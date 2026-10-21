@@ -37,7 +37,8 @@ pub enum Val<'s> {
     Digits(usize),
 }
 
-type Props<'s> = Vec<(&'static str, Val<'s>)>;
+/// An element's properties, in hast's order.
+pub type Props<'s> = Vec<(&'static str, Val<'s>)>;
 
 #[derive(Clone, Debug)]
 pub enum HKind<'s> {
@@ -208,14 +209,54 @@ impl<'s> HTree<'s> {
     }
 }
 
-fn set<'s>(props: &mut Props<'s>, key: &'static str, value: Val<'s>) {
+/// Editing for [`Plugin`]s. New nodes have no position, like nodes a rehype plugin makes.
+impl<'s> HTree<'s> {
+    /// A new, detached node.
+    pub fn add(&mut self, kind: HKind<'s>) -> Ix {
+        self.push(kind, At::None)
+    }
+
+    /// `parent`'s children, in order.
+    pub fn child_list(&self, parent: Ix) -> Vec<Ix> {
+        let mut out = Vec::new();
+        let mut cursor = self.nodes[parent as usize].first;
+        while cursor != NIL {
+            out.push(cursor);
+            cursor = self.nodes[cursor as usize].next;
+        }
+        out
+    }
+
+    /// Makes `children` (detached nodes or `parent`'s own) `parent`'s children.
+    pub fn replace_children(&mut self, parent: Ix, children: &[Ix]) {
+        let mut chain = EMPTY;
+        for &child in children {
+            self.append(&mut chain, child);
+        }
+        self.set_children(parent, chain);
+    }
+
+    /// An element's tag name.
+    pub fn tag_name(&self, ix: Ix) -> Option<&'static str> {
+        self.tag(ix)
+    }
+
+    /// An element's properties.
+    pub fn properties_mut(&mut self, ix: Ix) -> Option<&mut Props<'s>> {
+        self.props_mut(ix)
+    }
+}
+
+/// Sets property `key`, replacing any value it had.
+pub fn set<'s>(props: &mut Props<'s>, key: &'static str, value: Val<'s>) {
     match props.iter_mut().find(|(name, _)| *name == key) {
         Some((_, slot)) => *slot = value,
         None => props.push((key, value)),
     }
 }
 
-fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Val<'s>> {
+/// Property `key`.
+pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Val<'s>> {
     props
         .iter()
         .find(|(name, _)| *name == key)
@@ -1310,10 +1351,18 @@ fn sanitize_value<'s>(allowed: &Allowed, key: &str, value: Val<'s>) -> Result<Va
     }
 }
 
-fn sanitize_props<'s>(tag: &str, props: Props<'s>) -> Props<'s> {
+fn sanitize_props<'s>(
+    tag: &str,
+    props: Props<'s>,
+    code_classes: &'static [&'static str],
+) -> Props<'s> {
     let mut result: Props<'s> = Vec::with_capacity(props.len());
     for (key, value) in props {
-        let value = match specific(tag, key) {
+        let allowed = match (tag, key) {
+            ("code", "className") => Some(Allowed::Language(code_classes)),
+            _ => specific(tag, key),
+        };
+        let value = match allowed {
             Some(allowed) => sanitize_value(&allowed, key, value),
             None => Err(value),
         };
@@ -1458,6 +1507,9 @@ impl Default for Harden {
 
 struct Finisher<'a, 's> {
     tree: &'a mut HTree<'s>,
+    /// `None`: KaTeX runs first, so sanitize and harden wait for JavaScript too.
+    sanitize: bool,
+    code_classes: &'static [&'static str],
     /// `None` with math: KaTeX runs before sanitize and harden, in JavaScript.
     harden: Option<&'a Harden>,
     ancestors: Vec<&'static str>,
@@ -1545,7 +1597,7 @@ impl<'s> Finisher<'_, 's> {
     fn text(&mut self, ix: Ix, out: &mut Chain) {
         // hast-util-sanitize keeps only complete positions.
         let node = &mut self.tree.nodes[ix as usize];
-        if self.harden.is_some() && (node.start == Edge::None || node.end == Edge::None) {
+        if self.sanitize && (node.start == Edge::None || node.end == Edge::None) {
             node.start = Edge::None;
             node.end = Edge::None;
         }
@@ -1564,11 +1616,11 @@ impl<'s> Finisher<'_, 's> {
         self.ancestors.push(tag);
         self.children(ix);
         self.ancestors.pop();
-        let Some(harden) = self.harden else {
-            // Math: sanitize and harden run in JavaScript after KaTeX.
+        if !self.sanitize {
+            // KaTeX first: sanitize and harden run in JavaScript after it.
             self.tree.append(out, ix);
             return;
-        };
+        }
         let mut safe = TAG_NAMES.contains(&tag);
         if safe && matches!(tag, "tbody" | "td" | "th" | "thead" | "tfoot" | "tr") {
             safe = self.ancestors.contains(&"table");
@@ -1586,9 +1638,12 @@ impl<'s> Finisher<'_, 's> {
             node.end = Edge::None;
         }
         if let Some(props) = self.tree.props_mut(ix) {
-            *props = sanitize_props(tag, std::mem::take(props));
+            *props = sanitize_props(tag, std::mem::take(props), self.code_classes);
         }
-        if self.harden(ix, tag, harden) {
+        if self
+            .harden
+            .is_none_or(|harden| self.harden(ix, tag, harden))
+        {
             self.tree.append(out, ix);
         }
     }
@@ -1853,6 +1908,62 @@ impl Json<'_, '_> {
 // Pipeline
 // ---------------------------------------------------------------------------
 
+/// rehype-sanitize's schema: the default, plus `className` values `<code>` may keep beyond
+/// `language-*`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Sanitize {
+    /// For example `["math", "math-display", "math-inline"]`, so rehype-katex can still
+    /// find remark-math's code after sanitizing.
+    pub code_classes: &'static [&'static str],
+}
+
+/// The pipeline's settings. The default is Streamdown's.
+#[derive(Default)]
+pub struct Options {
+    pub harden: Harden,
+    pub sanitize: Sanitize,
+    /// Run rehype-katex after rehype-sanitize instead of before it (Streamdown's order):
+    /// math documents then come back sanitized, with only KaTeX and harden left to run.
+    pub katex_after_sanitize: bool,
+    pub plugins: Vec<Box<dyn Plugin>>,
+}
+
+/// What a [`Plugin`] may read besides the tree.
+pub struct Context<'a> {
+    /// The Markdown, with NUL replaced.
+    pub source: &'a str,
+    pub points: &'a Points,
+}
+
+impl Context<'_> {
+    /// A node edge's offset in UTF-16 units, as JavaScript counts it.
+    pub fn offset(&self, edge: Edge) -> Option<u32> {
+        match edge {
+            Edge::None => None,
+            Edge::Byte(byte) => Some(self.points.pt(byte).offset),
+            Edge::Pt(pt) => Some(pt.offset),
+        }
+    }
+}
+
+/// A transform at a fixed point of the pipeline: rill's remark or rehype plugin.
+///
+/// The hooks see a tree only when rill finishes it: a document with raw HTML stops before
+/// `hast_unsanitized` (parse5 runs in JavaScript), and with math `hast` waits for KaTeX.
+/// Run the JavaScript form of a plugin in those tails (see [`Kind`]).
+pub trait Plugin {
+    /// After parsing, before mdast-util-to-hast: where remark plugins run.
+    fn mdast(&self, _tree: &mut MTree<'_>) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Before rehype-sanitize: a rehype plugin placed ahead of it.
+    fn hast_unsanitized(&self, _tree: &mut HTree<'_>, _root: Ix, _context: &Context<'_>) {}
+
+    /// The final tree: a rehype plugin after the chain.
+    fn hast(&self, _tree: &mut HTree<'_>, _root: Ix, _context: &Context<'_>) {}
+}
+
 /// How far [`render`] took the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -1877,9 +1988,9 @@ impl Kind {
 }
 
 /// Markdown → Streamdown's HAST, as JSON.
-pub fn render(source: &str, harden: &Harden) -> Result<(Kind, String), Error> {
+pub fn render(source: &str, options: &Options) -> Result<(Kind, String), Error> {
     let source = mdast::without_nul(source);
-    let (kind, mdast, tree, root) = build(&source, harden)?;
+    let (kind, mdast, tree, root) = build(&source, options)?;
     let mut json = Json {
         tree: &tree,
         points: &mdast.points,
@@ -1890,8 +2001,8 @@ pub fn render(source: &str, harden: &Harden) -> Result<(Kind, String), Error> {
 }
 
 /// `{"kind":"complete"|"raw"|"math","tree":HAST}`.
-pub fn render_json(source: &str, harden: &Harden) -> Result<String, Error> {
-    let (kind, tree) = render(source, harden)?;
+pub fn render_json(source: &str, options: &Options) -> Result<String, Error> {
+    let (kind, tree) = render(source, options)?;
     Ok(format!("{{\"kind\":\"{}\",\"tree\":{tree}}}", kind.name()))
 }
 
@@ -2074,9 +2185,12 @@ impl Encoder<'_, '_> {
 
 fn build<'s>(
     source: &'s str,
-    harden: &Harden,
+    options: &Options,
 ) -> Result<(Kind, mdast::MTree<'s>, HTree<'s>, Ix), Error> {
-    let mdast = mdast::parse_arena(source)?;
+    let mut mdast = mdast::parse_arena(source)?;
+    for plugin in &options.plugins {
+        plugin.mdast(&mut mdast)?;
+    }
     let Converted {
         mut tree,
         root,
@@ -2086,18 +2200,33 @@ fn build<'s>(
     if raw_boundary {
         return Ok((Kind::Raw, mdast, tree, root));
     }
+    let context = Context {
+        source,
+        points: &mdast.points,
+    };
+    for plugin in &options.plugins {
+        plugin.hast_unsanitized(&mut tree, root, &context);
+    }
     if tree.nodes[root as usize].first == NIL {
         // parse5 locates a fragment root only through its child tokens.
         tree.nodes[root as usize].start = Edge::None;
         tree.nodes[root as usize].end = Edge::None;
     }
     tree.quirks = true;
+    let sanitize = !math || options.katex_after_sanitize;
     Finisher {
         tree: &mut tree,
-        harden: (!math).then_some(harden),
+        sanitize,
+        code_classes: options.sanitize.code_classes,
+        harden: (!math).then_some(&options.harden),
         ancestors: Vec::new(),
     }
     .children(root);
+    if !math {
+        for plugin in &options.plugins {
+            plugin.hast(&mut tree, root, &context);
+        }
+    }
     Ok((
         if math { Kind::Math } else { Kind::Complete },
         mdast,
@@ -2108,8 +2237,8 @@ fn build<'s>(
 
 /// The HAST as opcodes over `source` with NUL already replaced (see
 /// [`mdast::without_nul`]); offsets index that string in UTF-16 units.
-pub fn render_ops(source: &str, harden: &Harden) -> Result<Encoded, Error> {
-    let (kind, mdast, tree, root) = build(source, harden)?;
+pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
+    let (kind, mdast, tree, root) = build(source, options)?;
     let mut encoder = Encoder {
         tree: &tree,
         points: &mdast.points,

@@ -289,7 +289,8 @@ pub struct MTree<'s> {
 impl<'s> MTree<'s> {
     pub const ROOT: Ix = 0;
 
-    fn push(&mut self, kind: MKind<'s>, at: At) -> Ix {
+    /// A new, detached node.
+    pub fn push(&mut self, kind: MKind<'s>, at: At) -> Ix {
         let ix = self.nodes.len() as Ix;
         self.nodes.push(MNode {
             kind,
@@ -301,7 +302,8 @@ impl<'s> MTree<'s> {
         ix
     }
 
-    fn append(&mut self, parent: Ix, child: Ix) {
+    /// Appends detached `child` to `parent`'s children.
+    pub fn append(&mut self, parent: Ix, child: Ix) {
         let last = self.nodes[parent as usize].last;
         if last == NIL {
             self.nodes[parent as usize].first = child;

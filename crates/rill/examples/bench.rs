@@ -23,9 +23,13 @@ fn main() {
         .collect::<Vec<_>>()
         .join("\n\n");
     let source = one.repeat((100_000 / one.len()).max(1));
-    let harden = rill::Harden::default();
-    let (kind, _) = rill::render(&source, &harden).expect("render");
-    assert_eq!(kind, rill::Kind::Complete, "the bench document runs entirely in Rust");
+    let options = rill::Options::default();
+    let (kind, _) = rill::render(&source, &options).expect("render");
+    assert_eq!(
+        kind,
+        rill::Kind::Complete,
+        "the bench document runs entirely in Rust"
+    );
     let time = |label: &str, run: &dyn Fn()| {
         let mut samples: Vec<f64> = (0..60)
             .map(|_| {
@@ -45,9 +49,9 @@ fn main() {
         rill::parse_json(&source).expect("parse");
     });
     time("HAST opcodes", &|| {
-        rill::render_ops(&source, &harden).expect("render");
+        rill::render_ops(&source, &options).expect("render");
     });
     time("HAST JSON", &|| {
-        rill::render_json(&source, &harden).expect("render");
+        rill::render_json(&source, &options).expect("render");
     });
 }

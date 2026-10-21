@@ -12,14 +12,16 @@ pub mod mdast;
 mod autolink;
 mod json;
 
-pub use hast::{BlockPolicy, Harden, Kind, render, render_json, render_ops};
+pub use hast::{
+    BlockPolicy, Context, Harden, Kind, Options, Plugin, Sanitize, render, render_json, render_ops,
+};
 pub use mdast::{Error, parse_json};
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use wasm_bindgen::prelude::*;
 
-    use crate::{Harden, hast, mdast};
+    use crate::{Options, hast, mdast};
 
     /// MDAST JSON for `source`.
     #[wasm_bindgen(js_name = parseMdast)]
@@ -30,7 +32,7 @@ mod wasm {
     /// `{"kind","tree"}` HAST JSON for `source`.
     #[wasm_bindgen(js_name = renderJson)]
     pub fn render_json(source: &str) -> Result<String, JsError> {
-        hast::render_json(source, &Harden::default())
+        hast::render_json(source, &Options::default())
             .map_err(|error| JsError::new(&error.to_string()))
     }
 }

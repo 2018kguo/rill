@@ -18,10 +18,10 @@ fn main() -> io::Result<()> {
         let mut bytes = vec![0; length];
         input.read_exact(&mut bytes)?;
         let source = String::from_utf8_lossy(&bytes);
-        let harden = rill::Harden::default();
+        let options = rill::Options::default();
         match (
             rill::parse_json(&source),
-            rill::render_json(&source, &harden),
+            rill::render_json(&source, &options),
         ) {
             (Ok(mdast), Ok(hast)) => writeln!(out, "{{\"mdast\":{mdast},\"hast\":{hast}}}")?,
             (Err(error), _) | (_, Err(error)) => {
