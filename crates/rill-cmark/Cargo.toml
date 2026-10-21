@@ -1,0 +1,16 @@
+[package]
+name = "rill-cmark"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A pulldown-cmark 0.13.4 fork whose grammar matches micromark as Streamdown configures it."
+repository = "https://github.com/2018kguo/rill"
+publish = false
+
+[dependencies]
+bitflags = "2.13"
+memchr = "2.8"
+unicase = "2.10"
+
+[features]
+simd = []
