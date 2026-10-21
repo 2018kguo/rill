@@ -17,7 +17,7 @@ pub use hast::{
 };
 pub use mdast::{Error, parse_json};
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(feature = "wasm")]
 mod wasm {
     use wasm_bindgen::prelude::*;
 

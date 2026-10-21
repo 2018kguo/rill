@@ -1054,7 +1054,11 @@ impl<'s> Builder<'s> {
                     return Ok(());
                 }
                 Event::End(TagEnd::Image) => {}
-                Event::Text(text) | Event::Code(text) | Event::InlineMath(text) => {
+                // mdast-util-to-string keeps inline HTML's source in the alt.
+                Event::Text(text)
+                | Event::Code(text)
+                | Event::InlineMath(text)
+                | Event::InlineHtml(text) => {
                     alt.push_str(text);
                     return Ok(());
                 }
