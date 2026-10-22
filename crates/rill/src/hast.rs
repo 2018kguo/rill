@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use crate::json::{json_string, json_u32};
 use crate::mdast::{
     self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, Reference, ReferenceKind,
+    push_cow,
 };
 use crate::url::Url;
 
@@ -356,7 +357,14 @@ fn trim_markdown_space_start<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
 
 /// `trim-lines` 3.0.1.
 fn trim_lines<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
-    if !value.contains(['\n', '\r']) {
+    // Only spaces and tabs next to a line ending go.
+    let blank = |byte: &u8| matches!(byte, b' ' | b'\t');
+    let ending = |byte: &u8| matches!(byte, b'\n' | b'\r');
+    let unchanged = !value
+        .as_bytes()
+        .windows(2)
+        .any(|pair| blank(&pair[0]) && ending(&pair[1]) || ending(&pair[0]) && blank(&pair[1]));
+    if unchanged {
         return value.clone();
     }
     let mut out = String::with_capacity(value.len());
@@ -384,11 +392,7 @@ fn trim_lines<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
         first = false;
     }
     out.push_str(value[last..].trim_start_matches([' ', '\t']));
-    if out.len() == value.len() {
-        value.clone()
-    } else {
-        Cow::Owned(out)
-    }
+    Cow::Owned(out)
 }
 
 /// micromark-util-sanitize-uri 2.0.1 `normalizeUri`.
@@ -728,7 +732,7 @@ impl<'s> ToHast<'_, 's> {
                         }
                     }
                     match &mut self.hast.nodes[contents.last as usize].kind {
-                        HKind::Text(value) => value.to_mut().push_str(&suffix),
+                        HKind::Text(value) => push_cow(value, &suffix),
                         _ => {
                             let close = self.hast.text(Cow::Owned(suffix));
                             self.hast.append(&mut contents, close);
@@ -809,7 +813,9 @@ impl<'s> ToHast<'_, 's> {
     }
 
     fn link(&mut self, ix: Ix, url: Cow<'s, str>, title: Option<Cow<'s, str>>) -> Chain {
-        let mut props = vec![("href", Val::Str(normalize_uri(url)))];
+        // Room for the title and rehype-harden's `target` and `rel`.
+        let mut props = Vec::with_capacity(4);
+        props.push(("href", Val::Str(normalize_uri(url))));
         if let Some(title) = title {
             props.push(("title", Val::Str(title)));
         }
@@ -1029,7 +1035,7 @@ impl<'s> ToHast<'_, 's> {
                 let tail_text =
                     (inner.last != NIL).then(|| &mut self.hast.nodes[inner.last as usize].kind);
                 match tail_text {
-                    Some(HKind::Text(value)) => value.to_mut().push(' '),
+                    Some(HKind::Text(value)) => push_cow(value, " "),
                     _ => {
                         let space = self.hast.text(" ");
                         self.hast.append(&mut inner, space);
@@ -1619,7 +1625,7 @@ impl<'s> Finisher<'_, 's> {
         let HKind::Text(existing) = &mut into.kind else {
             unreachable!("mergeable nodes are text");
         };
-        existing.to_mut().push_str(&value);
+        push_cow(existing, &value);
         into.end = end;
     }
 

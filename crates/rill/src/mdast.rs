@@ -563,11 +563,11 @@ fn source_offset(source: &str, slice: &str) -> Option<usize> {
     (start + slice.len() <= source.len()).then_some(start)
 }
 
-fn push_cow<'s>(target: &mut Cow<'s, str>, value: &str) {
-    if target.is_empty() {
-        *target = Cow::Owned(value.to_owned());
-    } else {
-        target.to_mut().push_str(value);
+/// Appends `value`, copying a borrowed `target` once, into a string that fits both.
+pub(crate) fn push_cow(target: &mut Cow<'_, str>, value: &str) {
+    match target {
+        Cow::Owned(owned) => owned.push_str(value),
+        Cow::Borrowed(borrowed) => *target = Cow::Owned([*borrowed, value].concat()),
     }
 }
 
@@ -813,7 +813,7 @@ impl<'s> Builder<'s> {
                     let (tail, suffix) = indented_tail(source, end);
                     end = tail;
                     if !suffix.is_empty() {
-                        code.value.to_mut().push_str(&suffix);
+                        push_cow(&mut code.value, &suffix);
                     }
                 }
             }
