@@ -83,54 +83,61 @@ pub struct Pt {
     pub offset: u32,
 }
 
-/// Byte offset → unist point in UTF-16 units, as remark reports them.
+/// Index of the first non-ASCII byte, checking 16 bytes at a time.
+fn first_non_ascii(bytes: &[u8]) -> Option<usize> {
+    let ascii_run = bytes
+        .chunks_exact(16)
+        .take_while(|chunk| chunk.is_ascii())
+        .count()
+        * 16;
+    let rest = bytes[ascii_run..]
+        .iter()
+        .position(|byte| !byte.is_ascii())?;
+    Some(ascii_run + rest)
+}
+
+/// Byte offset → unist point in UTF-16 units, as remark reports them. Offsets must fall on
+/// character boundaries.
 pub struct Points {
     line_starts: Vec<u32>,
-    /// UTF-16 offset of every byte boundary; empty when the source is ASCII.
-    utf16: Vec<u32>,
+    /// For each non-ASCII character, the byte just past it and how many more UTF-8 bytes
+    /// than UTF-16 units the source holds up to there. Empty for ASCII sources.
+    narrowing: Vec<(u32, u32)>,
 }
 
 impl Points {
     pub fn new(source: &str) -> Self {
         let bytes = source.as_bytes();
         let mut line_starts = vec![0];
-        let mut at = 0;
-        while let Some(found) = memchr::memchr2(b'\n', b'\r', &bytes[at..]) {
-            at += found;
-            if bytes[at] == b'\r' && bytes.get(at + 1) == Some(&b'\n') {
-                at += 1;
+        for found in memchr::memchr2_iter(b'\n', b'\r', bytes) {
+            // A CRLF ends one line, at its LF.
+            if !(bytes[found] == b'\r' && bytes.get(found + 1) == Some(&b'\n')) {
+                line_starts.push(found as u32 + 1);
             }
-            at += 1;
-            line_starts.push(at as u32);
         }
-        let utf16 = if source.is_ascii() {
-            Vec::new()
-        } else {
-            let mut table = vec![0u32; bytes.len() + 1];
-            let mut units = 0u32;
-            let mut last = 0;
-            for (index, character) in source.char_indices() {
-                // Interior bytes of a multi-byte character map to its start.
-                for slot in &mut table[last..index] {
-                    *slot = units - 1;
-                }
-                table[index] = units;
-                units += character.len_utf16() as u32;
-                last = index + 1;
-            }
-            for slot in &mut table[last..] {
-                *slot = units;
-            }
-            table
-        };
-        Points { line_starts, utf16 }
+        let mut narrowing = Vec::new();
+        let mut narrowed = 0;
+        let mut at = 0;
+        while let Some(skip) = first_non_ascii(&bytes[at..]) {
+            at += skip;
+            let character = source[at..]
+                .chars()
+                .next()
+                .expect("whole characters are skipped, so `at` starts one");
+            at += character.len_utf8();
+            narrowed += (character.len_utf8() - character.len_utf16()) as u32;
+            narrowing.push((at as u32, narrowed));
+        }
+        Points {
+            line_starts,
+            narrowing,
+        }
     }
 
     pub fn units(&self, byte: u32) -> u32 {
-        if self.utf16.is_empty() {
-            byte
-        } else {
-            self.utf16[byte as usize]
+        match self.narrowing.partition_point(|&(end, _)| end <= byte) {
+            0 => byte,
+            index => byte - self.narrowing[index - 1].1,
         }
     }
 

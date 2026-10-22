@@ -11,6 +11,7 @@ pub mod mdast;
 
 mod autolink;
 mod json;
+mod url;
 
 pub use hast::{
     BlockPolicy, Context, Harden, Kind, Options, Plugin, Sanitize, render, render_json, render_ops,

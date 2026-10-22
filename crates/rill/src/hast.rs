@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 
 use crate::json::{json_string, json_u32};
 use crate::mdast::{self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, ReferenceKind};
+use crate::url::Url;
 
 // ---------------------------------------------------------------------------
 // Arena HAST
@@ -1394,31 +1395,8 @@ fn path_relative(url: &str) -> bool {
     url.starts_with('/') || url.starts_with("./") || url.starts_with("../")
 }
 
-fn parse_url(input: &str) -> Option<url::Url> {
-    match url::Url::parse(input) {
-        Ok(parsed) => Some(parsed),
-        Err(_) if path_relative(input) => {
-            url::Url::parse("http://example.com").ok()?.join(input).ok()
-        }
-        Err(_) => None,
-    }
-}
-
-fn js_search(parsed: &url::Url) -> String {
-    parsed
-        .query()
-        .filter(|q| !q.is_empty())
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default()
-}
-
-fn js_hash(parsed: &url::Url) -> String {
-    parsed
-        .fragment()
-        .filter(|f| !f.is_empty())
-        .map(|f| format!("#{f}"))
-        .unwrap_or_default()
-}
+/// The base rehype-harden resolves relative URLs against.
+const HARDEN_BASE: &str = "http://example.com";
 
 /// Why `transformUrl` returned null.
 struct Blocked;
@@ -1428,11 +1406,11 @@ fn transform_url(url: &str, image: bool) -> Result<Option<String>, Blocked> {
     if url.is_empty() {
         return Err(Blocked);
     }
-    if url.starts_with('#') && !image {
-        let base = url::Url::parse("http://example.com").map_err(|_| Blocked)?;
-        if base.join(url).is_ok_and(|test| js_hash(&test) == url) {
-            return Ok(None);
-        }
+    if url.starts_with('#')
+        && !image
+        && Url::parse_with_base(url, HARDEN_BASE).is_some_and(|test| test.hash == url)
+    {
+        return Ok(None);
     }
     if url.starts_with("data:") {
         return if image && url.starts_with("data:image/") {
@@ -1442,26 +1420,28 @@ fn transform_url(url: &str, image: bool) -> Result<Option<String>, Blocked> {
         };
     }
     if let Some(after) = url.strip_prefix("blob:") {
-        let parsed = url::Url::parse(url).map_err(|_| Blocked)?;
-        return if parsed.scheme() == "blob" && !after.is_empty() && after != "invalid" {
+        let parsed = Url::parse(url).ok_or(Blocked)?;
+        return if parsed.scheme == "blob" && !after.is_empty() && after != "invalid" {
             Ok(None)
         } else {
             Err(Blocked)
         };
     }
-    let parsed = parse_url(url).ok_or(Blocked)?;
-    if matches!(parsed.scheme(), "javascript" | "data" | "file" | "vbscript") {
+    let parsed = match Url::parse(url) {
+        Some(parsed) => parsed,
+        None if path_relative(url) => Url::parse_with_base(url, HARDEN_BASE).ok_or(Blocked)?,
+        None => return Err(Blocked),
+    };
+    if matches!(
+        parsed.scheme.as_str(),
+        "javascript" | "data" | "file" | "vbscript"
+    ) {
         return Err(Blocked);
     }
-    let result = if matches!(parsed.scheme(), "http" | "https") && path_relative(url) {
-        format!(
-            "{}{}{}",
-            parsed.path(),
-            js_search(&parsed),
-            js_hash(&parsed)
-        )
+    let result = if matches!(parsed.scheme.as_str(), "http" | "https") && path_relative(url) {
+        format!("{}{}{}", parsed.pathname, parsed.search, parsed.hash)
     } else {
-        parsed.as_str().to_owned()
+        parsed.href
     };
     Ok((result != url).then_some(result))
 }
@@ -2048,11 +2028,11 @@ impl Encoder<'_, '_> {
     fn table(&mut self, value: &str) -> (u32, u32) {
         let start = self.units;
         self.strings.push_str(value);
-        self.units += if value.is_ascii() {
-            value.len() as u32
-        } else {
-            value.encode_utf16().count() as u32
-        };
+        // Every byte that starts a character is one unit; four-byte ones are two.
+        self.units += value
+            .bytes()
+            .map(|byte| u32::from(byte & 0xC0 != 0x80) + u32::from(byte >= 0xF0))
+            .sum::<u32>();
         (start, self.units)
     }
 

@@ -5,6 +5,6 @@
 set -eu
 cd "$(dirname "$0")/.."
 cargo build --release -p rill --lib --features wasm-exports --target wasm32-unknown-unknown \
-  --config profile.release.lto=true --config profile.release.codegen-units=1 --config profile.release.debug=false
+  --config profile.release.lto=true --config profile.release.codegen-units=1 --config profile.release.debug=false --config profile.release.strip=true
 "${WASM_BINDGEN:-wasm-bindgen}" target/wasm32-unknown-unknown/release/rill.wasm \
   --target web --out-dir js/wasm --out-name rill
