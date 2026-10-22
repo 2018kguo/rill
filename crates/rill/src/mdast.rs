@@ -365,12 +365,23 @@ impl Iterator for Children<'_, '_> {
 }
 
 /// micromark `normalizeIdentifier` followed by mdast-util-from-markdown's lower-casing.
-pub fn normalize_identifier(label: &str) -> String {
-    let collapsed = label
-        .split(['\t', '\n', '\r', ' '])
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+fn normalize_identifier(label: &str) -> String {
+    let mut collapsed = String::with_capacity(label.len());
+    let parts = label.split(['\t', '\n', '\r', ' ']);
+    for part in parts {
+        if part.is_empty() {
+            continue;
+        }
+        if !collapsed.is_empty() {
+            collapsed.push(' ');
+        }
+        collapsed.push_str(part);
+    }
+    if collapsed.is_ascii() {
+        // Case folding round trips stay ASCII and come back to the ASCII lowercase.
+        collapsed.make_ascii_lowercase();
+        return collapsed;
+    }
     collapsed.to_lowercase().to_uppercase().to_lowercase()
 }
 
