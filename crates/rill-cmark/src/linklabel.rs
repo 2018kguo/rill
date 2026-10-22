@@ -20,8 +20,6 @@
 
 //! Link label parsing and matching.
 
-use unicase::UniCase;
-
 use crate::scanners::{is_ascii_punctuation, is_ascii_whitespace, scan_eol};
 use crate::strings::CowStr;
 
@@ -31,9 +29,17 @@ pub(crate) enum ReferenceLabel<'a> {
     Footnote(CowStr<'a>),
 }
 
-pub(crate) type LinkLabel<'a> = UniCase<CowStr<'a>>;
+/// rill: a label normalized as micromark's `normalizeIdentifier` does, which matches
+/// labels by JavaScript's `toLowerCase().toUpperCase()` rather than case folding.
+pub(crate) type LinkLabel<'a> = CowStr<'a>;
 
-pub(crate) type FootnoteLabel<'a> = UniCase<CowStr<'a>>;
+pub(crate) type FootnoteLabel<'a> = CowStr<'a>;
+
+/// `normalizeIdentifier` for a label whose whitespace `scan_link_label_rest` has
+/// already collapsed and trimmed.
+pub(crate) fn normalize_label<'a>(label: &str) -> LinkLabel<'a> {
+    label.to_lowercase().to_uppercase().into()
+}
 
 /// Assumes the opening bracket has already been scanned.
 /// The line break handler determines what happens when a linebreak

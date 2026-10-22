@@ -24,14 +24,8 @@
 //! Changes from upstream are marked `rill:`. The `rill` crate builds MDAST and HAST from
 //! its events; use it rather than this crate directly.
 
-// When compiled for the rustc compiler itself we want to make sure that this is
-// an unstable crate.
-
-// Forbid unsafe code unless the SIMD feature is enabled.
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
-
-pub mod utils;
 
 mod attention;
 pub mod autolink_literal;
@@ -39,20 +33,14 @@ mod entities;
 mod firstpass;
 mod linklabel;
 mod parse;
-mod puncttable;
 mod scanners;
 mod strings;
 mod tree;
 mod unicode_tables;
 
-use std::fmt::Display;
-
-pub use crate::parse::{
-    BrokenLink, BrokenLinkCallback, DefaultBrokenLinkCallback, OffsetIter, Parser, RefDefs,
-};
+pub use crate::parse::{OffsetIter, Parser};
 pub use crate::scanners::decode_string;
 pub use crate::strings::{CowStr, InlineStr};
-pub use crate::utils::*;
 
 /// Codeblock kind.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,37 +51,9 @@ pub enum CodeBlockKind<'a> {
 }
 
 impl<'a> CodeBlockKind<'a> {
-    pub fn is_indented(&self) -> bool {
-        matches!(*self, CodeBlockKind::Indented)
-    }
-
     pub fn is_fenced(&self) -> bool {
         matches!(*self, CodeBlockKind::Fenced(_))
     }
-
-    pub fn into_static(self) -> CodeBlockKind<'static> {
-        match self {
-            CodeBlockKind::Indented => CodeBlockKind::Indented,
-            CodeBlockKind::Fenced(s) => CodeBlockKind::Fenced(s.into_static()),
-        }
-    }
-}
-
-/// BlockQuote kind (Note, Tip, Important, Warning, Caution).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BlockQuoteKind {
-    Note,
-    Tip,
-    Important,
-    Warning,
-    Caution,
-}
-
-/// Metadata block kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MetadataBlockKind {
-    YamlStyle,
-    PlusesStyle,
 }
 
 /// Tags for elements that can contain other elements.
@@ -102,31 +62,15 @@ pub enum Tag<'a> {
     /// A paragraph of text and other inline elements.
     Paragraph,
 
-    /// A heading, with optional identifier, classes and custom attributes.
-    /// The identifier is prefixed with `#` and the last one in the attributes
-    /// list is chosen, classes are prefixed with `.` and custom attributes
-    /// have no prefix and can optionally have a value (`myattr` or `myattr=myvalue`).
-    ///
-    /// `id`, `classes` and `attrs` are only parsed and populated with [`Options::ENABLE_HEADING_ATTRIBUTES`], `None` or empty otherwise.
-    Heading {
-        level: HeadingLevel,
-        id: Option<CowStr<'a>>,
-        classes: Vec<CowStr<'a>>,
-        /// The first item of the tuple is the attr and second one the value.
-        attrs: Vec<(CowStr<'a>, Option<CowStr<'a>>)>,
-    },
+    /// A heading.
+    Heading(HeadingLevel),
 
     /// A block quote.
     ///
-    /// The `BlockQuoteKind` is only parsed & populated with [`Options::ENABLE_GFM`], `None` otherwise.
-    ///
     /// ```markdown
     /// > regular quote
-    ///
-    /// > [!NOTE]
-    /// > note quote
     /// ```
-    BlockQuote(Option<BlockQuoteKind>),
+    BlockQuote,
     /// A code block.
     CodeBlock(CodeBlockKind<'a>),
 
@@ -155,28 +99,15 @@ pub enum Tag<'a> {
     Item,
     /// A footnote definition. The value contained is the footnote's label by which it can
     /// be referred to.
-    ///
-    /// Only parsed and emitted with [`Options::ENABLE_FOOTNOTES`] or [`Options::ENABLE_OLD_FOOTNOTES`].
     FootnoteDefinition(CowStr<'a>),
 
-    /// Only parsed and emitted with [`Options::ENABLE_DEFINITION_LIST`].
-    DefinitionList,
-    /// Only parsed and emitted with [`Options::ENABLE_DEFINITION_LIST`].
-    DefinitionListTitle,
-    /// Only parsed and emitted with [`Options::ENABLE_DEFINITION_LIST`].
-    DefinitionListDefinition,
-
     /// A table. Contains a vector describing the text-alignment for each of its columns.
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     Table(Vec<Alignment>),
     /// A table header. Contains only `TableCell`s. Note that the table body starts immediately
     /// after the closure of the `TableHead` tag. There is no `TableBody` tag.
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     TableHead,
     /// A table row. Is used both for header rows as body rows. Contains only `TableCell`s.
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     TableRow,
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     TableCell,
 
     // span-level tags
@@ -190,23 +121,11 @@ pub enum Tag<'a> {
     /// half**strong** __strong__ __multi __level____
     /// ```
     Strong,
-    /// Only parsed and emitted with [`Options::ENABLE_STRIKETHROUGH`].
     ///
     /// ```markdown
     /// ~strike through~
     /// ```
     Strikethrough,
-    /// Only parsed and emitted with [`Options::ENABLE_SUPERSCRIPT`].
-    ///
-    /// ```markdown
-    /// ^superscript^
-    /// ```
-    Superscript,
-    /// Only parsed and emitted with [`Options::ENABLE_SUBSCRIPT`], if disabled `~something~` is parsed as [`Strikethrough`](Self::Strikethrough).
-    /// ```markdown
-    /// ~subscript~ ~~if also enabled this is strikethrough~~
-    /// ```
-    Subscript,
 
     /// A link.
     Link {
@@ -227,11 +146,6 @@ pub enum Tag<'a> {
         id: CowStr<'a>,
     },
 
-    /// A metadata block.
-    /// Only parsed and emitted with [`Options::ENABLE_YAML_STYLE_METADATA_BLOCKS`]
-    /// or [`Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS`].
-    MetadataBlock(MetadataBlockKind),
-
     /// rill: a `$$` math flow block with its meta string.
     MathBlock(CowStr<'a>),
 }
@@ -240,8 +154,8 @@ impl<'a> Tag<'a> {
     pub fn to_end(&self) -> TagEnd {
         match self {
             Tag::Paragraph => TagEnd::Paragraph,
-            Tag::Heading { level, .. } => TagEnd::Heading(*level),
-            Tag::BlockQuote(kind) => TagEnd::BlockQuote(*kind),
+            Tag::Heading(level) => TagEnd::Heading(*level),
+            Tag::BlockQuote => TagEnd::BlockQuote,
             Tag::CodeBlock(_) => TagEnd::CodeBlock,
             Tag::HtmlBlock => TagEnd::HtmlBlock,
             Tag::List(number) => TagEnd::List(number.is_some()),
@@ -251,80 +165,12 @@ impl<'a> Tag<'a> {
             Tag::TableHead => TagEnd::TableHead,
             Tag::TableRow => TagEnd::TableRow,
             Tag::TableCell => TagEnd::TableCell,
-            Tag::Subscript => TagEnd::Subscript,
-            Tag::Superscript => TagEnd::Superscript,
             Tag::Emphasis => TagEnd::Emphasis,
             Tag::Strong => TagEnd::Strong,
             Tag::Strikethrough => TagEnd::Strikethrough,
             Tag::Link { .. } => TagEnd::Link,
             Tag::Image { .. } => TagEnd::Image,
-            Tag::MetadataBlock(kind) => TagEnd::MetadataBlock(*kind),
             Tag::MathBlock(_) => TagEnd::MathBlock,
-            Tag::DefinitionList => TagEnd::DefinitionList,
-            Tag::DefinitionListTitle => TagEnd::DefinitionListTitle,
-            Tag::DefinitionListDefinition => TagEnd::DefinitionListDefinition,
-        }
-    }
-
-    pub fn into_static(self) -> Tag<'static> {
-        match self {
-            Tag::Paragraph => Tag::Paragraph,
-            Tag::Heading {
-                level,
-                id,
-                classes,
-                attrs,
-            } => Tag::Heading {
-                level,
-                id: id.map(|s| s.into_static()),
-                classes: classes.into_iter().map(|s| s.into_static()).collect(),
-                attrs: attrs
-                    .into_iter()
-                    .map(|(k, v)| (k.into_static(), v.map(|s| s.into_static())))
-                    .collect(),
-            },
-            Tag::BlockQuote(k) => Tag::BlockQuote(k),
-            Tag::CodeBlock(kb) => Tag::CodeBlock(kb.into_static()),
-            Tag::HtmlBlock => Tag::HtmlBlock,
-            Tag::List(v) => Tag::List(v),
-            Tag::Item => Tag::Item,
-            Tag::FootnoteDefinition(a) => Tag::FootnoteDefinition(a.into_static()),
-            Tag::Table(v) => Tag::Table(v),
-            Tag::TableHead => Tag::TableHead,
-            Tag::TableRow => Tag::TableRow,
-            Tag::TableCell => Tag::TableCell,
-            Tag::Emphasis => Tag::Emphasis,
-            Tag::Strong => Tag::Strong,
-            Tag::Strikethrough => Tag::Strikethrough,
-            Tag::Superscript => Tag::Superscript,
-            Tag::Subscript => Tag::Subscript,
-            Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            } => Tag::Link {
-                link_type,
-                dest_url: dest_url.into_static(),
-                title: title.into_static(),
-                id: id.into_static(),
-            },
-            Tag::Image {
-                link_type,
-                dest_url,
-                title,
-                id,
-            } => Tag::Image {
-                link_type,
-                dest_url: dest_url.into_static(),
-                title: title.into_static(),
-                id: id.into_static(),
-            },
-            Tag::MetadataBlock(v) => Tag::MetadataBlock(v),
-            Tag::MathBlock(meta) => Tag::MathBlock(meta.into_static()),
-            Tag::DefinitionList => Tag::DefinitionList,
-            Tag::DefinitionListTitle => Tag::DefinitionListTitle,
-            Tag::DefinitionListDefinition => Tag::DefinitionListDefinition,
         }
     }
 }
@@ -335,7 +181,7 @@ pub enum TagEnd {
     Paragraph,
     Heading(HeadingLevel),
 
-    BlockQuote(Option<BlockQuoteKind>),
+    BlockQuote,
     CodeBlock,
 
     HtmlBlock,
@@ -345,10 +191,6 @@ pub enum TagEnd {
     Item,
     FootnoteDefinition,
 
-    DefinitionList,
-    DefinitionListTitle,
-    DefinitionListDefinition,
-
     Table,
     TableHead,
     TableRow,
@@ -357,13 +199,10 @@ pub enum TagEnd {
     Emphasis,
     Strong,
     Strikethrough,
-    Superscript,
-    Subscript,
 
     Link,
     Image,
 
-    MetadataBlock(MetadataBlockKind),
     MathBlock,
 }
 
@@ -386,19 +225,6 @@ pub enum HeadingLevel {
     H4,
     H5,
     H6,
-}
-
-impl Display for HeadingLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::H1 => write!(f, "h1"),
-            Self::H2 => write!(f, "h2"),
-            Self::H3 => write!(f, "h3"),
-            Self::H4 => write!(f, "h4"),
-            Self::H5 => write!(f, "h5"),
-            Self::H6 => write!(f, "h6"),
-        }
-    }
 }
 
 /// Returned when trying to convert a `usize` into a `Heading` but it fails
@@ -429,40 +255,14 @@ pub enum LinkType {
     Inline,
     /// Reference link like `[foo][bar]`
     Reference,
-    /// Reference without destination in the document, but resolved by the broken_link_callback
-    ReferenceUnknown,
     /// Collapsed link like `[foo][]`
     Collapsed,
-    /// Collapsed link without destination in the document, but resolved by the broken_link_callback
-    CollapsedUnknown,
     /// Shortcut link like `[foo]`
     Shortcut,
-    /// Shortcut without destination in the document, but resolved by the broken_link_callback
-    ShortcutUnknown,
     /// Autolink like `<http://foo.bar/baz>`
     Autolink,
     /// Email address in autolink like `<john@example.org>`
     Email,
-    /// Wikilink link like `[[foo]]` or `[[foo|bar]]`
-    WikiLink {
-        /// `true` if the wikilink was piped.
-        ///
-        /// * `true` - `[[foo|bar]]`
-        /// * `false` - `[[foo]]`
-        has_pothole: bool,
-    },
-}
-
-impl LinkType {
-    /// Map the link type to an equivalent _Unknown link type.
-    fn to_unknown(self) -> Self {
-        match self {
-            LinkType::Reference => LinkType::ReferenceUnknown,
-            LinkType::Collapsed => LinkType::CollapsedUnknown,
-            LinkType::Shortcut => LinkType::ShortcutUnknown,
-            _ => unreachable!(),
-        }
-    }
 }
 
 /// Markdown events that are generated in a preorder traversal of the document
@@ -487,19 +287,11 @@ pub enum Event<'a> {
     /// ```
     Code(CowStr<'a>),
     /// An inline math environment node.
-    /// Requires [`Options::ENABLE_MATH`].
-    ///
-    /// ```markdown
-    /// $math$
-    /// ```
-    InlineMath(CowStr<'a>),
-    /// A display math environment node.
-    /// Requires [`Options::ENABLE_MATH`].
     ///
     /// ```markdown
     /// $$math$$
     /// ```
-    DisplayMath(CowStr<'a>),
+    InlineMath(CowStr<'a>),
     /// An HTML node.
     ///
     /// A line of HTML inside [`Tag::HtmlBlock`] includes the line break.
@@ -512,7 +304,7 @@ pub enum Event<'a> {
     InlineHtml(CowStr<'a>),
     /// A reference to a footnote with given label, which may or may not be defined
     /// by an event with a [`Tag::FootnoteDefinition`] tag. Definitions and references to them may
-    /// occur in any order. Only parsed and emitted with [`Options::ENABLE_FOOTNOTES`] or [`Options::ENABLE_OLD_FOOTNOTES`].
+    /// occur in any order.
     ///
     /// ```markdown
     /// [^1]
@@ -543,7 +335,6 @@ pub enum Event<'a> {
     /// *`·` is any whitespace*
     Rule,
     /// A task list marker, rendered as a checkbox in HTML. Contains a true when it is checked.
-    /// Only parsed and emitted with [`Options::ENABLE_TASKLISTS`].
     /// ```markdown
     /// - [ ] unchecked
     /// - [x] checked
@@ -557,31 +348,6 @@ pub enum Event<'a> {
     },
 }
 
-impl<'a> Event<'a> {
-    pub fn into_static(self) -> Event<'static> {
-        match self {
-            Event::Start(t) => Event::Start(t.into_static()),
-            Event::End(e) => Event::End(e),
-            Event::Text(s) => Event::Text(s.into_static()),
-            Event::Code(s) => Event::Code(s.into_static()),
-            Event::InlineMath(s) => Event::InlineMath(s.into_static()),
-            Event::DisplayMath(s) => Event::DisplayMath(s.into_static()),
-            Event::Html(s) => Event::Html(s.into_static()),
-            Event::InlineHtml(s) => Event::InlineHtml(s.into_static()),
-            Event::FootnoteReference(s) => Event::FootnoteReference(s.into_static()),
-            Event::SoftBreak => Event::SoftBreak,
-            Event::HardBreak => Event::HardBreak,
-            Event::Rule => Event::Rule,
-            Event::TaskListMarker(b) => Event::TaskListMarker(b),
-            Event::Definition { label, dest, title } => Event::Definition {
-                label: label.into_static(),
-                dest: dest.into_static(),
-                title: title.map(CowStr::into_static),
-            },
-        }
-    }
-}
-
 /// Table column text alignment.
 #[derive(Copy, Clone, Debug, PartialEq)]
 
@@ -591,103 +357,4 @@ pub enum Alignment {
     Left,
     Center,
     Right,
-}
-
-bitflags::bitflags! {
-    /// Option struct containing flags for enabling extra features
-    /// that are not part of the CommonMark spec.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct Options: u32 {
-        const ENABLE_TABLES = 1 << 1;
-        /// GitHub-compatible footnote syntax.
-        ///
-        /// Footnotes are referenced with the syntax `[^IDENT]`,
-        /// and defined with an identifier followed by a colon at top level.
-        ///
-        /// ---
-        ///
-        /// ```markdown
-        /// Footnote referenced [^1].
-        ///
-        /// [^1]: footnote defined
-        /// ```
-        ///
-        /// Footnote referenced [^1].
-        ///
-        /// [^1]: footnote defined
-        const ENABLE_FOOTNOTES = 1 << 2;
-        const ENABLE_STRIKETHROUGH = 1 << 3;
-        const ENABLE_TASKLISTS = 1 << 4;
-        /// Enables replacement of ASCII punctuation characters with
-        /// Unicode ligatures and smart quotes.
-        ///
-        /// This includes replacing `--` with `—`, `---` with `—`, `...` with `…`,
-        /// `"quote"` with `“quote”`, and `'quote'` with `‘quote’`.
-        ///
-        /// The replacement takes place during the parsing of the document.
-        const ENABLE_SMART_PUNCTUATION = 1 << 5;
-        /// Extension to allow headings to have ID and classes.
-        ///
-        /// `# text { #id .class1 .class2 myattr other_attr=myvalue }`
-        /// is interpreted as a level 1 heading
-        /// with the content `text`, ID `id`, classes `class1` and `class2` and
-        /// custom attributes `myattr` (without value) and
-        /// `other_attr` with value `myvalue`.
-        /// Note that ID, classes, and custom attributes should be space-separated.
-        const ENABLE_HEADING_ATTRIBUTES = 1 << 6;
-        /// Metadata blocks in YAML style, i.e.:
-        /// - starting with a `---` line
-        /// - ending with a `---` or `...` line
-        const ENABLE_YAML_STYLE_METADATA_BLOCKS = 1 << 7;
-        /// Metadata blocks delimited by:
-        /// - `+++` line at start
-        /// - `+++` line at end
-        const ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS = 1 << 8;
-        /// Older footnote syntax. This flag implies `ENABLE_FOOTNOTES`, changing it to use an
-        /// older syntax instead of the new, default, GitHub-compatible syntax.
-        ///
-        /// New syntax is different from the old syntax regarding
-        /// indentation, nesting, and footnote references with no definition:
-        ///
-        /// ```markdown
-        /// [^1]: In new syntax, this is two footnote definitions.
-        /// [^2]: In old syntax, this is a single footnote definition with two lines.
-        ///
-        /// [^3]:
-        ///
-        ///     In new syntax, this is a footnote with two paragraphs.
-        ///
-        ///     In old syntax, this is a footnote followed by a code block.
-        ///
-        /// In new syntax, this undefined footnote definition renders as
-        /// literal text [^4]. In old syntax, it creates a dangling link.
-        /// ```
-        const ENABLE_OLD_FOOTNOTES = (1 << 9) | (1 << 2);
-        /// With this feature enabled, two events `Event::InlineMath` and `Event::DisplayMath`
-        /// are emitted that conventionally contain TeX formulas.
-        const ENABLE_MATH = 1 << 10;
-        /// Misc GitHub Flavored Markdown features not supported in CommonMark.
-        /// The following features are currently behind this tag:
-        /// - Blockquote tags ([!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]).
-        const ENABLE_GFM = 1 << 11;
-        /// Commonmark-HS-Extensions compatible definition lists.
-        ///
-        /// ```markdown
-        /// title 1
-        ///   : definition 1
-        /// title 2
-        ///   : definition 2
-        /// ```
-        const ENABLE_DEFINITION_LIST = 1 << 12;
-        const ENABLE_SUPERSCRIPT = 1 << 13;
-        const ENABLE_SUBSCRIPT = 1 << 14;
-        /// Obsidian-style Wikilinks.
-        const ENABLE_WIKILINKS = 1 << 15;
-    }
-}
-
-impl Options {
-    pub(crate) fn has_gfm_footnotes(&self) -> bool {
-        self.contains(Options::ENABLE_FOOTNOTES) && !self.contains(Options::ENABLE_OLD_FOOTNOTES)
-    }
 }

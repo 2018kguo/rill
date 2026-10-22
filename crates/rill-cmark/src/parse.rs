@@ -21,22 +21,17 @@
 //! Tree-based two pass parser.
 
 use std::cmp::{max, min};
-use std::collections::{HashMap, VecDeque};
-use std::iter::FusedIterator;
-use std::num::NonZeroUsize;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Index, Range};
 
-use unicase::UniCase;
-
 use crate::firstpass::run_first_pass;
-use crate::linklabel::{scan_link_label_rest, FootnoteLabel, LinkLabel, ReferenceLabel};
+use crate::linklabel::{
+    normalize_label, scan_link_label_rest, FootnoteLabel, LinkLabel, ReferenceLabel,
+};
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
-use crate::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, MetadataBlockKind,
-    Options, Tag, TagEnd,
-};
+use crate::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
 
 // Allowing arbitrary depth nested parentheses inside link destinations
 // can create denial of service vulnerabilities if we're not careful.
@@ -58,9 +53,6 @@ pub(crate) enum ItemBody {
 
     // repeats, can_open, can_close
     MaybeEmphasis(usize, bool, bool),
-    // can_open, can_close, brace context
-    // quote byte, can_open, can_close
-    MaybeSmartQuote(u8, bool, bool),
     MaybeCode(usize, bool),     // number of backticks, preceded by backslash
     MaybeMathText(usize, bool), // rill: number of dollars, preceded by backslash
     MaybeHtml,
@@ -73,9 +65,7 @@ pub(crate) enum ItemBody {
     Emphasis,
     Strong,
     Strikethrough,
-    Superscript,
-    Subscript,
-    Math(CowIndex, bool), // true for display math
+    Math(CowIndex),
     Code(CowIndex),
     Link(LinkIndex),
     Image(LinkIndex),
@@ -103,25 +93,16 @@ pub(crate) enum ItemBody {
     Paragraph,
     TightParagraph,
     Rule,
-    Heading(HeadingLevel, Option<HeadingIndex>), // heading level
+    Heading(HeadingLevel),
     FencedCodeBlock(CowIndex),
     // rill: `$$` math flow; the index is its meta string.
     MathBlock(CowIndex),
     IndentCodeBlock,
     HtmlBlock,
-    BlockQuote(Option<BlockQuoteKind>),
+    BlockQuote,
     List(bool, u8, u64), // is_tight, list character, list start index
     ListItem(usize),     // indent level
     FootnoteDefinition(CowIndex),
-    MetadataBlock(MetadataBlockKind),
-
-    // Definition lists
-    DefinitionList(bool), // is_tight
-    // gets turned into either a paragraph or a definition list title,
-    // depending on whether there's a definition after it
-    MaybeDefinitionListTitle,
-    DefinitionListTitle,
-    DefinitionListDefinition(usize),
 
     // Tables
     Table(AlignmentIndex),
@@ -139,7 +120,6 @@ impl ItemBody {
         matches!(
             *self,
             MaybeEmphasis(..)
-                | MaybeSmartQuote(..)
                 | MaybeCode(..)
                 | MaybeMathText(..)
                 | MaybeHtml
@@ -153,7 +133,6 @@ impl ItemBody {
         matches!(
             *self,
             MaybeEmphasis(..)
-                | MaybeSmartQuote(..)
                 | MaybeCode(..)
                 | MaybeMathText(..)
                 | MaybeHtml
@@ -181,20 +160,11 @@ impl ItemBody {
     }
 }
 
-#[derive(Debug)]
-pub struct BrokenLink<'a> {
-    pub span: std::ops::Range<usize>,
-    pub link_type: LinkType,
-    pub reference: CowStr<'a>,
-}
-
 /// Markdown event iterator.
-pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
+pub struct Parser<'input> {
     text: &'input str,
-    options: Options,
     tree: Tree<Item>,
     allocs: Allocations<'input>,
-    broken_link_callback: Option<F>,
     html_scan_guard: HtmlScanGuard,
 
     // https://github.com/pulldown-cmark/pulldown-cmark/issues/844
@@ -218,76 +188,31 @@ pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
     // used by inline passes. store them here for reuse
     inline_stack: InlineStack,
     link_stack: LinkStack,
-    wikilink_stack: LinkStack,
     code_delims: CodeDelims,
     math_text_delims: CodeDelims,
 }
 
-impl<'input, F> std::fmt::Debug for Parser<'input, F> {
+impl<'input> std::fmt::Debug for Parser<'input> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Only print the fields that have public types.
-        f.debug_struct("Parser")
-            .field("text", &self.text)
-            .field("options", &self.options)
-            .field(
-                "broken_link_callback",
-                &self.broken_link_callback.as_ref().map(|_| ..),
-            )
-            .finish()
+        f.debug_struct("Parser").field("text", &self.text).finish()
     }
 }
 
-impl<'a> BrokenLink<'a> {
-    /// Moves the link into version with a static lifetime.
-    ///
-    /// The `reference` member is cloned to a Boxed or Inline version.
-    pub fn into_static(self) -> BrokenLink<'static> {
-        BrokenLink {
-            span: self.span.clone(),
-            link_type: self.link_type,
-            reference: self.reference.into_string().into(),
-        }
-    }
-}
-
-impl<'input> Parser<'input, DefaultBrokenLinkCallback> {
-    /// Creates a new event iterator for a markdown string without any options enabled.
+impl<'input> Parser<'input> {
+    /// Creates a new event iterator for a markdown string, with rill's grammar.
     pub fn new(text: &'input str) -> Self {
-        Self::new_ext(text, Options::empty())
-    }
-
-    /// Creates a new event iterator for a markdown string with given options.
-    pub fn new_ext(text: &'input str, options: Options) -> Self {
-        Self::new_with_broken_link_callback(text, options, None)
-    }
-}
-
-impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
-    /// In case the parser encounters any potential links that have a broken
-    /// reference (e.g `[foo]` when there is no `[foo]: ` entry at the bottom)
-    /// the provided callback will be called with the reference name,
-    /// and the returned pair will be used as the link URL and title if it is not
-    /// `None`.
-    pub fn new_with_broken_link_callback(
-        text: &'input str,
-        options: Options,
-        broken_link_callback: Option<F>,
-    ) -> Self {
-        let (mut tree, allocs) = run_first_pass(text, options);
+        let (mut tree, allocs) = run_first_pass(text);
         tree.reset();
         let inline_stack = Default::default();
         let link_stack = Default::default();
-        let wikilink_stack = Default::default();
         let html_scan_guard = Default::default();
         Parser {
             text,
-            options,
             tree,
             allocs,
-            broken_link_callback,
             inline_stack,
             link_stack,
-            wikilink_stack,
             html_scan_guard,
             // always allow 100KiB
             link_ref_expansion_limit: text.len().max(100_000),
@@ -296,42 +221,24 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         }
     }
 
-    /// Returns a reference to the internal `RefDefs` object, which provides access
-    /// to the internal map of reference definitions.
-    pub fn reference_definitions(&self) -> &RefDefs<'_> {
-        &self.allocs.refdefs
-    }
-
-    /// Use a link label to fetch a type, url, and title.
+    /// Use a link label to fetch a url and title.
     ///
     /// This function enforces the [`link_ref_expansion_limit`].
     /// If it returns Some, it also consumes some of the fuel.
     /// If we're out of fuel, it immediately returns None.
     ///
     /// The URL and title are found in the [`RefDefs`] map.
-    /// If they're not there, and a callback was provided by the user,
-    /// the [`broken_link_callback`] will be invoked and given the opportunity
-    /// to provide a fallback.
     ///
-    /// The link type (that's "link" or "image") depends on the usage site, and
-    /// is provided by the caller of this function.
-    /// This function returns a new one because, if it has to invoke a callback
-    /// to find the information, the link type is [mapped to an unknown type].
-    ///
-    /// [mapped to an unknown type]: crate::LinkType::to_unknown
     /// [`link_ref_expansion_limit`]: Self::link_ref_expansion_limit
-    /// [`broken_link_callback`]: Self::broken_link_callback
-    fn fetch_link_type_url_title(
+    fn fetch_link_url_title(
         &mut self,
         link_label: CowStr<'input>,
-        span: Range<usize>,
-        link_type: LinkType,
-    ) -> Option<(LinkType, CowStr<'input>, CowStr<'input>)> {
+    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
         if self.link_ref_expansion_limit == 0 {
             return None;
         }
 
-        let (link_type, url, title) = self
+        let (url, title) = self
             .allocs
             .refdefs
             .get(link_label.as_ref())
@@ -343,24 +250,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     .cloned()
                     .unwrap_or_else(|| "".into());
                 let url = matching_def.dest.clone();
-                (link_type, url, title)
-            })
-            .or_else(|| {
-                match self.broken_link_callback.as_mut() {
-                    Some(callback) => {
-                        // Construct a BrokenLink struct, which will be passed to the callback
-                        let broken_link = BrokenLink {
-                            span,
-                            link_type,
-                            reference: link_label,
-                        };
-
-                        callback
-                            .handle_broken_link(broken_link)
-                            .map(|(url, title)| (link_type.to_unknown(), url, title))
-                    }
-                    None => None,
-                }
+                (url, title)
             })?;
 
         // Limit expansion from link references.
@@ -370,7 +260,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             .link_ref_expansion_limit
             .saturating_sub(url.len() + title.len());
 
-        Some((link_type, url, title))
+        Some((url, title))
     }
 
     /// Handle inline markup.
@@ -399,11 +289,10 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         // rill: literals are found once, in the block's own pass, where an open `[` blocks
         // them (micromark's `previousUnbalanced`); spans and links built from that pass
         // are not rescanned.
-        let autolinks = self.options.contains(Options::ENABLE_GFM)
-            && !self.tree[self.tree.peek_up().unwrap()]
-                .item
-                .body
-                .is_inline()
+        let autolinks = !self.tree[self.tree.peek_up().unwrap()]
+            .item
+            .body
+            .is_inline()
             && crate::autolink_literal::may_contain(&block_text[block_start.min(block_end)..]);
 
         while let Some(mut cur_ix) = cur {
@@ -589,16 +478,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     self.tree[cur_ix].item.body = ItemBody::Text {
                         backslash_escaped: false,
                     };
-                    let link_open_doubled = self.tree[cur_ix]
-                        .next
-                        .map(|ix| self.tree[ix].item.body == ItemBody::MaybeLinkOpen)
-                        .unwrap_or(false);
-                    if self.options.contains(Options::ENABLE_WIKILINKS) && link_open_doubled {
-                        self.wikilink_stack.push(LinkStackEl {
-                            node: cur_ix,
-                            ty: LinkStackTy::Link,
-                        });
-                    }
                     self.link_stack.push(LinkStackEl {
                         node: cur_ix,
                         ty: LinkStackTy::Link,
@@ -608,16 +487,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     self.tree[cur_ix].item.body = ItemBody::Text {
                         backslash_escaped: false,
                     };
-                    let link_open_doubled = self.tree[cur_ix]
-                        .next
-                        .map(|ix| self.tree[ix].item.body == ItemBody::MaybeLinkOpen)
-                        .unwrap_or(false);
-                    if self.options.contains(Options::ENABLE_WIKILINKS) && link_open_doubled {
-                        self.wikilink_stack.push(LinkStackEl {
-                            node: cur_ix,
-                            ty: LinkStackTy::Image,
-                        });
-                    }
                     self.link_stack.push(LinkStackEl {
                         node: cur_ix,
                         ty: LinkStackTy::Image,
@@ -628,19 +497,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                         backslash_escaped: false,
                     };
                     let tos_link = self.link_stack.pop();
-                    if self.options.contains(Options::ENABLE_WIKILINKS)
-                        && self.tree[cur_ix]
-                            .next
-                            .map(|ix| {
-                                matches!(self.tree[ix].item.body, ItemBody::MaybeLinkClose(..))
-                            })
-                            .unwrap_or(false)
-                    {
-                        if let Some(node) = self.handle_wikilink(block_text, cur_ix, prev) {
-                            cur = self.tree[node].next;
-                            continue;
-                        }
-                    }
                     if let Some(tos) = tos_link {
                         // skip rendering if already in a link, unless its an
                         // image
@@ -700,7 +556,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                             let scan_result = if footnote_call {
                                 RefScan::Failed
                             } else {
-                                scan_reference(&self.tree, block_text, next, self.options)
+                                scan_reference(&self.tree, block_text, next)
                             };
                             let (node_after_link, link_type) = match scan_result {
                                 // [label][reference]
@@ -763,13 +619,9 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     // No label? maybe it is a shortcut reference
                                     let label_start = self.tree[tos.node].item.end - 1;
                                     let label_end = self.tree[cur_ix].item.end;
-                                    scan_link_label(
-                                        &self.tree,
-                                        &self.text[label_start..label_end],
-                                        self.options,
-                                    )
-                                    .map(|(ix, label)| (label, label_start + ix))
-                                    .filter(|(_, end)| *end == label_end)
+                                    scan_link_label(&self.tree, &self.text[label_start..label_end])
+                                        .map(|(ix, label)| (label, label_start + ix))
+                                        .filter(|(_, end)| *end == label_end)
                                 }
                             };
 
@@ -783,16 +635,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                             // see if it's a footnote reference
                             if let Some((ReferenceLabel::Footnote(l), end)) = label {
                                 let footref = self.allocs.allocate_cow(l);
-                                if let Some(def) = self
-                                    .allocs
-                                    .footdefs
-                                    .get_mut(self.allocs.cows[footref.0].to_owned())
-                                {
-                                    def.use_count += 1;
-                                }
-                                if !self.options.has_gfm_footnotes()
-                                    || self.allocs.footdefs.contains(&self.allocs.cows[footref.0])
-                                {
+                                if self.allocs.footdefs.contains(&self.allocs.cows[footref.0]) {
                                     // If this came from a MaybeImage, then the `!` prefix
                                     // isn't part of the footnote reference.
                                     let footnote_ix = if tos.ty == LinkStackTy::Image {
@@ -823,15 +666,9 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     continue;
                                 }
                             } else if let Some((ReferenceLabel::Link(link_label), end)) = label {
-                                if let Some((def_link_type, url, title)) = self
-                                    .fetch_link_type_url_title(
-                                        link_label,
-                                        (self.tree[tos.node].item.start)..end,
-                                        link_type,
-                                    )
-                                {
+                                if let Some((url, title)) = self.fetch_link_url_title(link_label) {
                                     let link_ix =
-                                        self.allocs.allocate_link(def_link_type, url, title, id);
+                                        self.allocs.allocate_link(link_type, url, title, id);
                                     self.tree[tos.node].item.body = if tos.ty == LinkStackTy::Image
                                     {
                                         ItemBody::Image(link_ix)
@@ -881,7 +718,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             cur = self.tree[cur_ix].next;
         }
         self.link_stack.clear();
-        self.wikilink_stack.clear();
         self.code_delims.clear();
         self.math_text_delims.clear();
     }
@@ -997,95 +833,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         None
     }
 
-    /// Handles a wikilink.
-    ///
-    /// This function may bail early in case the link is malformed, so this
-    /// acts as a control flow guard. Returns the link node if a wikilink was
-    /// found and created.
-    fn handle_wikilink(
-        &mut self,
-        block_text: &'input str,
-        cur_ix: TreeIndex,
-        prev: Option<TreeIndex>,
-    ) -> Option<TreeIndex> {
-        let next_ix = self.tree[cur_ix].next.unwrap();
-        // this is a wikilink closing delim, try popping from
-        // the wikilink stack
-        if let Some(tos) = self.wikilink_stack.pop() {
-            if tos.ty == LinkStackTy::Disabled {
-                return None;
-            }
-            // fetches the beginning of the wikilink body
-            let Some(body_node) = self.tree[tos.node].next.and_then(|ix| self.tree[ix].next) else {
-                // skip if no next node exists, like at end of input
-                return None;
-            };
-            let start_ix = self.tree[body_node].item.start;
-            let end_ix = self.tree[cur_ix].item.start;
-            let wikilink = match scan_wikilink_pipe(
-                block_text,
-                start_ix, // bounded by closing tag
-                end_ix - start_ix,
-            ) {
-                Some((rest, wikitext)) => {
-                    // bail early if the wikiname would be empty
-                    if wikitext.is_empty() {
-                        return None;
-                    }
-                    // [[WikiName|rest]]
-                    let body_node = scan_nodes_to_ix(&self.tree, Some(body_node), rest);
-                    if let Some(body_node) = body_node {
-                        // break node so passes can actually format
-                        // the display text
-                        self.tree[body_node].item.start = rest;
-                        Some((true, body_node, wikitext))
-                    } else {
-                        None
-                    }
-                }
-                None => {
-                    let wikitext = &block_text[start_ix..end_ix];
-                    // bail early if the wikiname would be empty
-                    if wikitext.is_empty() {
-                        return None;
-                    }
-                    let body_node = self.tree.create_node(Item {
-                        start: start_ix,
-                        end: end_ix,
-                        body: ItemBody::Text {
-                            backslash_escaped: false,
-                        },
-                    });
-                    Some((false, body_node, wikitext))
-                }
-            };
-
-            if let Some((has_pothole, body_node, wikiname)) = wikilink {
-                let link_ix = self.allocs.allocate_link(
-                    LinkType::WikiLink { has_pothole },
-                    wikiname.into(),
-                    "".into(),
-                    "".into(),
-                );
-                if let Some(prev_ix) = prev {
-                    self.tree[prev_ix].next = None;
-                }
-                if tos.ty == LinkStackTy::Image {
-                    self.tree[tos.node].item.body = ItemBody::Image(link_ix);
-                } else {
-                    self.tree[tos.node].item.body = ItemBody::Link(link_ix);
-                }
-                self.tree[tos.node].child = Some(body_node);
-                self.tree[tos.node].next = self.tree[next_ix].next;
-                self.tree[tos.node].item.end = end_ix + 2;
-                self.disable_all_links();
-                return Some(tos.node);
-            }
-        }
-
-        None
-    }
-
     // rill: micromark resolves attention and strikethrough as separate passes, in the order
     // each first occurs in the paragraph (`resolveAllConstructs`). A resolved span's interior
     // then resolves in isolation (`insideSpan`: attention, then strikethrough), which the
@@ -1126,9 +873,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         let mut prev_ix: TreeIndex;
         let mut cur = self.tree.cur();
 
-        let mut single_quote_open: Option<TreeIndex> = None;
-        let mut double_quote_open: bool = false;
-
         while let Some(mut cur_ix) = cur {
             match self.tree[cur_ix].item.body {
                 ItemBody::MaybeEmphasis(mut count, can_open, can_close)
@@ -1166,36 +910,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     1
                                 };
                                 let ty = if c == b'~' {
-                                    if inc == 2 {
-                                        if self.options.contains(Options::ENABLE_STRIKETHROUGH) {
-                                            ItemBody::Strikethrough
-                                        } else {
-                                            ItemBody::Text {
-                                                backslash_escaped: false,
-                                            }
-                                        }
-                                    } else {
-                                        if self.options.contains(Options::ENABLE_SUBSCRIPT) {
-                                            ItemBody::Subscript
-                                        } else if self
-                                            .options
-                                            .contains(Options::ENABLE_STRIKETHROUGH)
-                                        {
-                                            ItemBody::Strikethrough
-                                        } else {
-                                            ItemBody::Text {
-                                                backslash_escaped: false,
-                                            }
-                                        }
-                                    }
-                                } else if c == b'^' {
-                                    if self.options.contains(Options::ENABLE_SUPERSCRIPT) {
-                                        ItemBody::Superscript
-                                    } else {
-                                        ItemBody::Text {
-                                            backslash_escaped: false,
-                                        }
-                                    }
+                                    ItemBody::Strikethrough
                                 } else if inc == 2 {
                                     ItemBody::Strong
                                 } else {
@@ -1255,32 +970,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                         cur = self.tree[prev_ix].next;
                     }
                 }
-                ItemBody::MaybeSmartQuote(c, can_open, can_close) => {
-                    self.tree[cur_ix].item.body = match c {
-                        b'\'' => {
-                            if let (Some(open_ix), true) = (single_quote_open, can_close) {
-                                self.tree[open_ix].item.body = ItemBody::SynthesizeChar('‘');
-                                single_quote_open = None;
-                            } else if can_open {
-                                single_quote_open = Some(cur_ix);
-                            }
-                            ItemBody::SynthesizeChar('’')
-                        }
-                        _ /* double quote */ => {
-                            if can_close && double_quote_open {
-                                double_quote_open = false;
-                                ItemBody::SynthesizeChar('”')
-                            } else {
-                                if can_open && !double_quote_open {
-                                    double_quote_open = true;
-                                }
-                                ItemBody::SynthesizeChar('“')
-                            }
-                        }
-                    };
-                    prev = cur;
-                    cur = self.tree[cur_ix].next;
-                }
                 ItemBody::HardBreak(true) => {
                     if self.tree[cur_ix].next.is_none() {
                         self.tree[cur_ix].item.body = ItemBody::SynthesizeChar('\\');
@@ -1299,7 +988,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
 
     fn disable_all_links(&mut self) {
         self.link_stack.disable_all_links();
-        self.wikilink_stack.disable_all_links();
     }
 
     /// Returns next byte index, url and title.
@@ -1318,11 +1006,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             *ix += scan_while(&underlying.as_bytes()[*ix..], is_ascii_whitespace_no_nl);
             if let Some(bl) = scan_eol(&underlying.as_bytes()[*ix..]) {
                 *ix += bl;
-                *ix += skip_container_prefixes(
-                    &self.tree,
-                    &underlying.as_bytes()[*ix..],
-                    self.options,
-                );
+                *ix += skip_container_prefixes(&self.tree, &underlying.as_bytes()[*ix..]);
             }
             *ix += scan_while(&underlying.as_bytes()[*ix..], is_ascii_whitespace_no_nl);
         };
@@ -1457,12 +1141,9 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     ix += 1;
                 }
                 // rill: scan the whole line; the span's end is no line end.
-                let skip = skip_container_prefixes(
-                    &self.tree,
-                    &self.text.as_bytes()[span_start + ix..],
-                    self.options,
-                )
-                .min(spanned_bytes.len() - ix);
+                let skip =
+                    skip_container_prefixes(&self.tree, &self.text.as_bytes()[span_start + ix..])
+                        .min(spanned_bytes.len() - ix);
                 if skip > 0 {
                     let buf = buf.get_or_insert_with(|| String::with_capacity(spanned_bytes.len()));
                     buf.push_str(&spanned_text[start_ix..ix]);
@@ -1509,7 +1190,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         let body = |allocs: &mut Allocations<'input>| {
             let cow_ix = allocs.allocate_cow(cow);
             if math {
-                ItemBody::Math(cow_ix, false)
+                ItemBody::Math(cow_ix)
             } else {
                 ItemBody::Code(cow_ix)
             }
@@ -1549,7 +1230,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             let (span, i) = scan_html_block_inner(
                 // Subtract 1 to include the < character
                 &bytes[(ix - 1)..],
-                Some(&|bytes| skip_container_prefixes(&self.tree, bytes, self.options)),
+                Some(&|bytes| skip_container_prefixes(&self.tree, bytes)),
             )?;
             Some((span, i + ix - 1))
         }
@@ -1558,21 +1239,17 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
     /// Consumes the event iterator and produces an iterator that produces
     /// `(Event, Range)` pairs, where the `Range` value maps to the corresponding
     /// range in the markdown source.
-    pub fn into_offset_iter(self) -> OffsetIter<'input, F> {
+    pub fn into_offset_iter(self) -> OffsetIter<'input> {
         OffsetIter { inner: self }
     }
 }
 
 /// Returns number of containers scanned.
-pub(crate) fn scan_containers(
-    tree: &Tree<Item>,
-    line_start: &mut LineStart<'_>,
-    options: Options,
-) -> usize {
+pub(crate) fn scan_containers(tree: &Tree<Item>, line_start: &mut LineStart<'_>) -> usize {
     let mut i = 0;
     for &node_ix in tree.walk_spine() {
         match tree[node_ix].item.body {
-            ItemBody::BlockQuote(..) => {
+            ItemBody::BlockQuote => {
                 let save = line_start.clone();
                 let _ = line_start.scan_space(3);
                 if !line_start.scan_blockquote_marker() {
@@ -1587,14 +1264,7 @@ pub(crate) fn scan_containers(
                     break;
                 }
             }
-            ItemBody::DefinitionListDefinition(indent) => {
-                let save = line_start.clone();
-                if !line_start.scan_space(indent) && !line_start.is_at_eol() {
-                    *line_start = save;
-                    break;
-                }
-            }
-            ItemBody::FootnoteDefinition(..) if options.has_gfm_footnotes() => {
+            ItemBody::FootnoteDefinition(..) => {
                 let save = line_start.clone();
                 if !line_start.scan_space(4) && !line_start.is_at_eol() {
                     *line_start = save;
@@ -1607,9 +1277,9 @@ pub(crate) fn scan_containers(
     }
     i
 }
-pub(crate) fn skip_container_prefixes(tree: &Tree<Item>, bytes: &[u8], options: Options) -> usize {
+pub(crate) fn skip_container_prefixes(tree: &Tree<Item>, bytes: &[u8]) -> usize {
     let mut line_start = LineStart::new(bytes);
-    let _ = scan_containers(tree, &mut line_start, options);
+    let _ = scan_containers(tree, &mut line_start);
     line_start.bytes_scanned()
 }
 
@@ -1844,24 +1514,15 @@ fn scan_nodes_to_ix(
 fn scan_link_label<'text>(
     tree: &Tree<Item>,
     text: &'text str,
-    options: Options,
 ) -> Option<(usize, ReferenceLabel<'text>)> {
     let bytes = text.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'[' {
         return None;
     }
-    let linebreak_handler = |bytes: &[u8]| Some(skip_container_prefixes(tree, bytes, options));
-    if options.contains(Options::ENABLE_FOOTNOTES)
-        && b'^' == bytes[1]
-        && bytes.get(2) != Some(&b']')
-    {
-        let linebreak_handler: &dyn Fn(&[u8]) -> Option<usize> = if options.has_gfm_footnotes() {
-            &|_| None
-        } else {
-            &linebreak_handler
-        };
+    let linebreak_handler = |bytes: &[u8]| Some(skip_container_prefixes(tree, bytes));
+    if b'^' == bytes[1] && bytes.get(2) != Some(&b']') {
         if let Some((byte_index, cow)) =
-            scan_link_label_rest(&text[2..], linebreak_handler, tree.is_in_table())
+            scan_link_label_rest(&text[2..], &|_| None, tree.is_in_table())
         {
             return Some((byte_index + 2, ReferenceLabel::Footnote(cow)));
         }
@@ -1871,12 +1532,7 @@ fn scan_link_label<'text>(
     Some((byte_index + 1, ReferenceLabel::Link(cow)))
 }
 
-fn scan_reference<'b>(
-    tree: &Tree<Item>,
-    text: &'b str,
-    cur: Option<TreeIndex>,
-    options: Options,
-) -> RefScan<'b> {
+fn scan_reference<'b>(tree: &Tree<Item>, text: &'b str, cur: Option<TreeIndex>) -> RefScan<'b> {
     let cur_ix = match cur {
         None => return RefScan::Failed,
         Some(cur_ix) => cur_ix,
@@ -1889,7 +1545,7 @@ fn scan_reference<'b>(
         let closing_node = tree[cur_ix].next.unwrap();
         RefScan::Collapsed(tree[closing_node].next)
     } else {
-        let label = scan_link_label(tree, &text[start..], options);
+        let label = scan_link_label(tree, &text[start..]);
         match label {
             Some((ix, ReferenceLabel::Link(label))) => RefScan::LinkLabel(label, start + ix),
             Some((_ix, ReferenceLabel::Footnote(_label))) => RefScan::UnexpectedFootnote,
@@ -1947,28 +1603,11 @@ enum LinkStackTy {
     Disabled,
 }
 
-/// Contains the destination URL, title and source span of a reference definition.
+/// Contains the destination URL and title of a reference definition.
 #[derive(Clone, Debug)]
 pub struct LinkDef<'a> {
     pub dest: CowStr<'a>,
     pub title: Option<CowStr<'a>>,
-    pub span: Range<usize>,
-}
-
-impl<'a> LinkDef<'a> {
-    pub fn into_static(self) -> LinkDef<'static> {
-        LinkDef {
-            dest: self.dest.into_static(),
-            title: self.title.map(|s| s.into_static()),
-            span: self.span,
-        }
-    }
-}
-
-/// Contains the destination URL, title and source span of a reference definition.
-#[derive(Clone, Debug)]
-pub struct FootnoteDef {
-    pub use_count: usize,
 }
 
 /// Tracks tree indices of code span delimiters of each length. It should prevent
@@ -2024,9 +1663,6 @@ pub(crate) struct CowIndex(usize);
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) struct AlignmentIndex(usize);
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) struct HeadingIndex(NonZeroUsize);
-
 #[derive(Clone)]
 pub(crate) struct Allocations<'a> {
     pub refdefs: RefDefs<'a>,
@@ -2034,17 +1670,8 @@ pub(crate) struct Allocations<'a> {
     links: Vec<(LinkType, CowStr<'a>, CowStr<'a>, CowStr<'a>)>,
     cows: Vec<CowStr<'a>>,
     alignments: Vec<Vec<Alignment>>,
-    headings: Vec<HeadingAttributes<'a>>,
     /// rill: every definition in source order (MDAST keeps duplicates); raw label source.
     pub definitions: Vec<(&'a str, LinkDef<'a>)>,
-}
-
-/// Used by the heading attributes extension.
-#[derive(Clone)]
-pub(crate) struct HeadingAttributes<'a> {
-    pub id: Option<CowStr<'a>>,
-    pub classes: Vec<CowStr<'a>>,
-    pub attrs: Vec<(CowStr<'a>, Option<CowStr<'a>>)>,
 }
 
 /// Keeps track of the reference definitions defined in the document.
@@ -2053,20 +1680,15 @@ pub struct RefDefs<'input>(pub(crate) HashMap<LinkLabel<'input>, LinkDef<'input>
 
 /// Keeps track of the footnote definitions defined in the document.
 #[derive(Clone, Default, Debug)]
-pub struct FootnoteDefs<'input>(pub(crate) HashMap<FootnoteLabel<'input>, FootnoteDef>);
+pub struct FootnoteDefs<'input>(pub(crate) HashSet<FootnoteLabel<'input>>);
 
 impl<'input, 'b, 's> RefDefs<'input>
 where
     's: 'b,
 {
-    /// Performs a lookup on reference label using unicode case folding.
+    /// Performs a lookup on a reference label, normalized as micromark does.
     pub fn get(&'s self, key: &'b str) -> Option<&'b LinkDef<'input>> {
-        self.0.get(&UniCase::new(key.into()))
-    }
-
-    /// Provides an iterator over all the document's reference definitions.
-    pub fn iter(&'s self) -> impl Iterator<Item = (&'s str, &'s LinkDef<'input>)> {
-        self.0.iter().map(|(k, v)| (k.as_ref(), v))
+        self.0.get(&normalize_label(key))
     }
 }
 
@@ -2074,13 +1696,9 @@ impl<'input, 'b, 's> FootnoteDefs<'input>
 where
     's: 'b,
 {
-    /// Performs a lookup on reference label using unicode case folding.
+    /// Performs a lookup on a footnote label, normalized as micromark does.
     pub fn contains(&'s self, key: &'b str) -> bool {
-        self.0.contains_key(&UniCase::new(key.into()))
-    }
-    /// Performs a lookup on reference label using unicode case folding.
-    pub fn get_mut(&'s mut self, key: CowStr<'input>) -> Option<&'s mut FootnoteDef> {
-        self.0.get_mut(&UniCase::new(key))
+        self.0.contains(&normalize_label(key))
     }
 }
 
@@ -2092,7 +1710,6 @@ impl<'a> Allocations<'a> {
             links: Vec::with_capacity(128),
             cows: Vec::new(),
             alignments: Vec::new(),
-            headings: Vec::new(),
             definitions: Vec::new(),
         }
     }
@@ -2121,21 +1738,12 @@ impl<'a> Allocations<'a> {
         AlignmentIndex(ix)
     }
 
-    pub fn allocate_heading(&mut self, attrs: HeadingAttributes<'a>) -> HeadingIndex {
-        let ix = self.headings.len();
-        self.headings.push(attrs);
-        // This won't panic. `self.headings.len()` can't be `usize::MAX` since
-        // such a long Vec cannot fit in memory.
-        let ix_nonzero = NonZeroUsize::new(ix.wrapping_add(1)).expect("too many headings");
-        HeadingIndex(ix_nonzero)
-    }
-
     pub fn take_cow(&mut self, ix: CowIndex) -> CowStr<'a> {
         std::mem::replace(&mut self.cows[ix.0], "".into())
     }
 
     pub fn take_link(&mut self, ix: LinkIndex) -> (LinkType, CowStr<'a>, CowStr<'a>, CowStr<'a>) {
-        let default_link = (LinkType::ShortcutUnknown, "".into(), "".into(), "".into());
+        let default_link = (LinkType::Shortcut, "".into(), "".into(), "".into());
         std::mem::replace(&mut self.links[ix.0], default_link)
     }
 
@@ -2168,14 +1776,6 @@ impl<'a> Index<AlignmentIndex> for Allocations<'a> {
     }
 }
 
-impl<'a> Index<HeadingIndex> for Allocations<'a> {
-    type Output = HeadingAttributes<'a>;
-
-    fn index(&self, ix: HeadingIndex) -> &Self::Output {
-        self.headings.index(ix.0.get() - 1)
-    }
-}
-
 /// A struct containing information on the reachability of certain inline HTML
 /// elements. In particular, for cdata elements (`<![CDATA[`), processing
 /// elements (`<?`) and declarations (`<!DECLARATION`). The respectives usizes
@@ -2189,51 +1789,6 @@ pub(crate) struct HtmlScanGuard {
     pub comment: usize,
 }
 
-/// Trait for broken link callbacks.
-///
-/// See [Parser::new_with_broken_link_callback].
-/// Automatically implemented for closures with the appropriate signature.
-pub trait BrokenLinkCallback<'input> {
-    fn handle_broken_link(
-        &mut self,
-        link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)>;
-}
-
-impl<'input, T> BrokenLinkCallback<'input> for T
-where
-    T: FnMut(BrokenLink<'input>) -> Option<(CowStr<'input>, CowStr<'input>)>,
-{
-    fn handle_broken_link(
-        &mut self,
-        link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
-        self(link)
-    }
-}
-
-impl<'input> BrokenLinkCallback<'input> for Box<dyn BrokenLinkCallback<'input>> {
-    fn handle_broken_link(
-        &mut self,
-        link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
-        (**self).handle_broken_link(link)
-    }
-}
-
-/// Broken link callback that does nothing.
-#[derive(Debug)]
-pub struct DefaultBrokenLinkCallback;
-
-impl<'input> BrokenLinkCallback<'input> for DefaultBrokenLinkCallback {
-    fn handle_broken_link(
-        &mut self,
-        _link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
-        None
-    }
-}
-
 /// Markdown event and source range iterator.
 ///
 /// Generates tuples where the first element is the markdown event and the second
@@ -2242,18 +1797,11 @@ impl<'input> BrokenLinkCallback<'input> for DefaultBrokenLinkCallback {
 /// Constructed from a `Parser` using its
 /// [`into_offset_iter`](struct.Parser.html#method.into_offset_iter) method.
 #[derive(Debug)]
-pub struct OffsetIter<'a, F = DefaultBrokenLinkCallback> {
-    inner: Parser<'a, F>,
+pub struct OffsetIter<'a> {
+    inner: Parser<'a>,
 }
 
-impl<'a, F: BrokenLinkCallback<'a>> OffsetIter<'a, F> {
-    /// Returns a reference to the internal reference definition tracker.
-    pub fn reference_definitions(&self) -> &RefDefs<'_> {
-        self.inner.reference_definitions()
-    }
-}
-
-impl<'a, F: BrokenLinkCallback<'a>> Iterator for OffsetIter<'a, F> {
+impl<'a> Iterator for OffsetIter<'a> {
     type Item = (Event<'a>, Range<usize>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2287,7 +1835,6 @@ impl<'a, F: BrokenLinkCallback<'a>> Iterator for OffsetIter<'a, F> {
                                     | ItemBody::Heading(..)
                                     | ItemBody::TableCell
                             )
-                            && self.inner.options.contains(Options::ENABLE_GFM)
                             && crate::autolink_literal::may_contain(
                                 &self.inner.text[self.inner.tree[child_ix].item.start..item.end],
                             )
@@ -2309,16 +1856,14 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
     match *body {
         ItemBody::Paragraph | ItemBody::TightParagraph => TagEnd::Paragraph,
         ItemBody::Emphasis => TagEnd::Emphasis,
-        ItemBody::Superscript => TagEnd::Superscript,
-        ItemBody::Subscript => TagEnd::Subscript,
         ItemBody::Strong => TagEnd::Strong,
         ItemBody::Strikethrough => TagEnd::Strikethrough,
         ItemBody::Link(..) => TagEnd::Link,
         ItemBody::Image(..) => TagEnd::Image,
-        ItemBody::Heading(level, _) => TagEnd::Heading(level),
+        ItemBody::Heading(level) => TagEnd::Heading(level),
         ItemBody::IndentCodeBlock | ItemBody::FencedCodeBlock(..) => TagEnd::CodeBlock,
         ItemBody::MathBlock(..) => TagEnd::MathBlock,
-        ItemBody::BlockQuote(kind) => TagEnd::BlockQuote(kind),
+        ItemBody::BlockQuote => TagEnd::BlockQuote,
         ItemBody::HtmlBlock => TagEnd::HtmlBlock,
         ItemBody::List(_, c, _) => {
             let is_ordered = c == b'.' || c == b')';
@@ -2330,10 +1875,6 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
         ItemBody::TableRow => TagEnd::TableRow,
         ItemBody::Table(..) => TagEnd::Table,
         ItemBody::FootnoteDefinition(..) => TagEnd::FootnoteDefinition,
-        ItemBody::MetadataBlock(kind) => TagEnd::MetadataBlock(kind),
-        ItemBody::DefinitionList(_) => TagEnd::DefinitionList,
-        ItemBody::DefinitionListTitle => TagEnd::DefinitionListTitle,
-        ItemBody::DefinitionListDefinition(_) => TagEnd::DefinitionListDefinition,
         _ => panic!("unexpected item body {:?}", body),
     }
 }
@@ -2365,8 +1906,6 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::Rule => return Event::Rule,
         ItemBody::Paragraph | ItemBody::TightParagraph => Tag::Paragraph,
         ItemBody::Emphasis => Tag::Emphasis,
-        ItemBody::Superscript => Tag::Superscript,
-        ItemBody::Subscript => Tag::Subscript,
         ItemBody::Strong => Tag::Strong,
         ItemBody::Strikethrough => Tag::Strikethrough,
         ItemBody::Link(link_ix) => {
@@ -2387,27 +1926,13 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
                 id,
             }
         }
-        ItemBody::Heading(level, Some(heading_ix)) => {
-            let HeadingAttributes { id, classes, attrs } = allocs.index(heading_ix);
-            Tag::Heading {
-                level,
-                id: id.clone(),
-                classes: classes.clone(),
-                attrs: attrs.clone(),
-            }
-        }
-        ItemBody::Heading(level, None) => Tag::Heading {
-            level,
-            id: None,
-            classes: Vec::new(),
-            attrs: Vec::new(),
-        },
+        ItemBody::Heading(level) => Tag::Heading(level),
         ItemBody::FencedCodeBlock(cow_ix) => {
             Tag::CodeBlock(CodeBlockKind::Fenced(allocs.take_cow(cow_ix)))
         }
         ItemBody::IndentCodeBlock => Tag::CodeBlock(CodeBlockKind::Indented),
         ItemBody::MathBlock(cow_ix) => Tag::MathBlock(allocs.take_cow(cow_ix)),
-        ItemBody::BlockQuote(kind) => Tag::BlockQuote(kind),
+        ItemBody::BlockQuote => Tag::BlockQuote,
         ItemBody::List(_, c, listitem_start) => {
             if c == b'.' || c == b')' {
                 Tag::List(Some(listitem_start))
@@ -2421,73 +1946,12 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::TableRow => Tag::TableRow,
         ItemBody::Table(alignment_ix) => Tag::Table(allocs.take_alignment(alignment_ix)),
         ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(allocs.take_cow(cow_ix)),
-        ItemBody::MetadataBlock(kind) => Tag::MetadataBlock(kind),
-        ItemBody::Math(cow_ix, is_display) => {
-            return if is_display {
-                Event::DisplayMath(allocs.take_cow(cow_ix))
-            } else {
-                Event::InlineMath(allocs.take_cow(cow_ix))
-            }
-        }
-        ItemBody::DefinitionList(_) => Tag::DefinitionList,
-        ItemBody::DefinitionListTitle => Tag::DefinitionListTitle,
-        ItemBody::DefinitionListDefinition(_) => Tag::DefinitionListDefinition,
+        ItemBody::Math(cow_ix) => return Event::InlineMath(allocs.take_cow(cow_ix)),
         _ => panic!("unexpected item body {:?}", item.body),
     };
 
     Event::Start(tag)
 }
-
-impl<'a, F: BrokenLinkCallback<'a>> Iterator for Parser<'a, F> {
-    type Item = Event<'a>;
-
-    fn next(&mut self) -> Option<Event<'a>> {
-        match self.tree.cur() {
-            None => {
-                let ix = self.tree.pop()?;
-                let ix = if matches!(self.tree[ix].item.body, ItemBody::TightParagraph) {
-                    // tight paragraphs emit nothing
-                    self.tree.next_sibling(ix);
-                    return self.next();
-                } else {
-                    ix
-                };
-                let tag_end = body_to_tag_end(&self.tree[ix].item.body);
-                self.tree.next_sibling(ix);
-                Some(Event::End(tag_end))
-            }
-            Some(cur_ix) => {
-                let maybe_cur_ix =
-                    if matches!(self.tree[cur_ix].item.body, ItemBody::TightParagraph) {
-                        // tight paragraphs emit nothing
-                        self.tree.push();
-                        self.tree.cur()
-                    } else {
-                        Some(cur_ix)
-                    };
-                if let Some(cur_ix) = maybe_cur_ix {
-                    if self.tree[cur_ix].item.body.is_maybe_inline() {
-                        self.handle_inline();
-                    }
-
-                    let node = self.tree[cur_ix];
-                    let item = node.item;
-                    let event = item_to_event(item, self.text, &mut self.allocs);
-                    if let Event::Start(ref _tag) = event {
-                        self.tree.push();
-                    } else {
-                        self.tree.next_sibling(cur_ix);
-                    }
-                    Some(event)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-impl<'a, F: BrokenLinkCallback<'a>> FusedIterator for Parser<'a, F> {}
 
 #[cfg(test)]
 mod test {
@@ -2495,18 +1959,6 @@ mod test {
     use crate::tree::Node;
 
     // TODO: move these tests to tests/html.rs?
-
-    fn parser_with_extensions(text: &str) -> Parser<'_> {
-        let mut opts = Options::empty();
-        opts.insert(Options::ENABLE_TABLES);
-        opts.insert(Options::ENABLE_FOOTNOTES);
-        opts.insert(Options::ENABLE_STRIKETHROUGH);
-        opts.insert(Options::ENABLE_SUPERSCRIPT);
-        opts.insert(Options::ENABLE_SUBSCRIPT);
-        opts.insert(Options::ENABLE_TASKLISTS);
-
-        Parser::new_ext(text, opts)
-    }
 
     #[test]
     #[cfg(target_pointer_width = "64")]
@@ -2525,114 +1977,104 @@ mod test {
     #[test]
     fn single_open_fish_bracket() {
         // dont crash
-        assert_eq!(3, Parser::new("<").count());
+        assert_eq!(3, Parser::new("<").into_offset_iter().count());
     }
 
     #[test]
     fn lone_hashtag() {
         // dont crash
-        assert_eq!(2, Parser::new("#").count());
+        assert_eq!(2, Parser::new("#").into_offset_iter().count());
     }
 
     #[test]
     fn lots_of_backslashes() {
         // dont crash
-        Parser::new("\\\\\r\r").count();
-        Parser::new("\\\r\r\\.\\\\\r\r\\.\\").count();
+        Parser::new("\\\\\r\r").into_offset_iter().count();
+        Parser::new("\\\r\r\\.\\\\\r\r\\.\\")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_1095() {
         let s = "- [n]:Z\r\n\t\t";
-        let parser = Parser::new_ext(s, Options::all());
-        for _ in parser {}
-    }
-
-    #[test]
-    fn issue_1030() {
-        let mut opts = Options::empty();
-        opts.insert(Options::ENABLE_WIKILINKS);
-
-        let parser = Parser::new_ext("For a new ferrari, [[Wikientry|click here]]!", opts);
-
-        let offsets = parser
-            .into_offset_iter()
-            .map(|(_ev, range)| range)
-            .collect::<Vec<_>>();
-        let expected_offsets = vec![
-            (0..44),  // Paragraph START
-            (0..19),  // `For a new ferrari, `
-            (19..43), // Wikilink START
-            (31..41), // `click here`
-            (19..43), // Wikilink END
-            (43..44), // `!`
-            (0..44),  // Paragraph END
-        ];
-        assert_eq!(offsets, expected_offsets);
+        for _ in Parser::new(s).into_offset_iter() {}
     }
 
     #[test]
     fn issue_320() {
         // dont crash
-        parser_with_extensions(":\r\t> |\r:\r\t> |\r").count();
+        Parser::new(":\r\t> |\r:\r\t> |\r")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_319() {
         // dont crash
-        parser_with_extensions("|\r-]([^|\r-]([^").count();
-        parser_with_extensions("|\r\r=][^|\r\r=][^car").count();
+        Parser::new("|\r-]([^|\r-]([^").into_offset_iter().count();
+        Parser::new("|\r\r=][^|\r\r=][^car")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_303() {
         // dont crash
-        parser_with_extensions("[^\r\ra]").count();
-        parser_with_extensions("\r\r]Z[^\x00\r\r]Z[^\x00").count();
+        Parser::new("[^\r\ra]").into_offset_iter().count();
+        Parser::new("\r\r]Z[^\x00\r\r]Z[^\x00")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_313() {
         // dont crash
-        parser_with_extensions("*]0[^\r\r*]0[^").count();
-        parser_with_extensions("[^\r> `][^\r> `][^\r> `][").count();
+        Parser::new("*]0[^\r\r*]0[^").into_offset_iter().count();
+        Parser::new("[^\r> `][^\r> `][^\r> `][")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_311() {
         // dont crash
-        parser_with_extensions("\\\u{0d}-\u{09}\\\u{0d}-\u{09}").count();
+        Parser::new("\\\u{0d}-\u{09}\\\u{0d}-\u{09}")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_283() {
         let input = std::str::from_utf8(b"\xf0\x9b\xb2\x9f<td:^\xf0\x9b\xb2\x9f").unwrap();
         // dont crash
-        parser_with_extensions(input).count();
+        Parser::new(input).into_offset_iter().count();
     }
 
     #[test]
     fn issue_289() {
         // dont crash
-        parser_with_extensions("> - \\\n> - ").count();
-        parser_with_extensions("- \n\n").count();
+        Parser::new("> - \\\n> - ").into_offset_iter().count();
+        Parser::new("- \n\n").into_offset_iter().count();
     }
 
     #[test]
     fn issue_306() {
         // dont crash
-        parser_with_extensions("*\r_<__*\r_<__*\r_<__*\r_<__").count();
+        Parser::new("*\r_<__*\r_<__*\r_<__*\r_<__")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_305() {
         // dont crash
-        parser_with_extensions("_6**6*_*").count();
+        Parser::new("_6**6*_*").into_offset_iter().count();
     }
 
     #[test]
     fn another_emphasis_panic() {
-        parser_with_extensions("*__#_#__*").count();
+        Parser::new("*__#_#__*").into_offset_iter().count();
     }
 
     #[test]
@@ -2667,7 +2109,7 @@ mod test {
 
     #[test]
     fn footnote_offsets() {
-        let range = parser_with_extensions("Testing this[^1] out.\n\n[^1]: Footnote.")
+        let range = Parser::new("Testing this[^1] out.\n\n[^1]: Footnote.")
             .into_offset_iter()
             .filter_map(|(ev, range)| match ev {
                 Event::FootnoteReference(..) => Some(range),
@@ -2681,7 +2123,7 @@ mod test {
     #[test]
     fn footnote_offsets_exclamation() {
         let mut immediately_before_footnote = None;
-        let range = parser_with_extensions("Testing this![^1] out.\n\n[^1]: Footnote.")
+        let range = Parser::new("Testing this![^1] out.\n\n[^1]: Footnote.")
             .into_offset_iter()
             .filter_map(|(ev, range)| match ev {
                 Event::FootnoteReference(..) => Some(range),
@@ -2706,7 +2148,7 @@ mod test {
     #[test]
     fn table_offset() {
         let markdown = "a\n\nTesting|This|Outtt\n--|:--:|--:\nSome Data|Other data|asdf";
-        let event_offset = parser_with_extensions(markdown)
+        let event_offset = Parser::new(markdown)
             .into_offset_iter()
             .map(|(_ev, range)| range)
             .nth(3)
@@ -2718,7 +2160,7 @@ mod test {
     #[test]
     fn table_cell_span() {
         let markdown = "a|b|c\n--|--|--\na|  |c";
-        let event_offset = parser_with_extensions(markdown)
+        let event_offset = Parser::new(markdown)
             .into_offset_iter()
             .filter_map(|(ev, span)| match ev {
                 Event::Start(Tag::TableCell) => Some(span),
@@ -2753,115 +2195,6 @@ mod test {
         assert_eq!(expected_offsets, event_offsets);
     }
 
-    // FIXME: add this one regression suite
-    #[cfg(feature = "html")]
-    #[test]
-    fn link_def_at_eof() {
-        let test_str = "[My site][world]\n\n[world]: https://vincentprouillet.com";
-        let expected = "<p><a href=\"https://vincentprouillet.com\">My site</a></p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn no_footnote_refs_without_option() {
-        let test_str = "a [^a]\n\n[^a]: yolo";
-        let expected = "<p>a <a href=\"yolo\">^a</a></p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn ref_def_at_eof() {
-        let test_str = "[test]:\\";
-        let expected = "";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn ref_def_cr_lf() {
-        let test_str = "[a]: /u\r\n\n[a]";
-        let expected = "<p><a href=\"/u\">a</a></p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn no_dest_refdef() {
-        let test_str = "[a]:";
-        let expected = "<p>[a]:</p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[test]
-    fn broken_links_called_only_once() {
-        for &(markdown, expected) in &[
-            ("See also [`g()`][crate::g].", 1),
-            ("See also [`g()`][crate::g][].", 1),
-            ("[brokenlink1] some other node [brokenlink2]", 2),
-        ] {
-            let mut times_called = 0;
-            let callback = &mut |_broken_link: BrokenLink| {
-                times_called += 1;
-                None
-            };
-            let parser =
-                Parser::new_with_broken_link_callback(markdown, Options::empty(), Some(callback));
-            for _ in parser {}
-            assert_eq!(times_called, expected);
-        }
-    }
-
-    #[test]
-    fn simple_broken_link_callback() {
-        let test_str = "This is a link w/o def: [hello][world]";
-        let mut callback = |broken_link: BrokenLink| {
-            assert_eq!("world", broken_link.reference.as_ref());
-            assert_eq!(&test_str[broken_link.span], "[hello][world]");
-            let url = "YOLO".into();
-            let title = "SWAG".to_owned().into();
-            Some((url, title))
-        };
-        let parser =
-            Parser::new_with_broken_link_callback(test_str, Options::empty(), Some(&mut callback));
-        let mut link_tag_count = 0;
-        for (typ, url, title, id) in parser.filter_map(|event| match event {
-            Event::Start(tag) => match tag {
-                Tag::Link {
-                    link_type,
-                    dest_url,
-                    title,
-                    id,
-                } => Some((link_type, dest_url, title, id)),
-                _ => None,
-            },
-            _ => None,
-        }) {
-            link_tag_count += 1;
-            assert_eq!(typ, LinkType::ReferenceUnknown);
-            assert_eq!(url.as_ref(), "YOLO");
-            assert_eq!(title.as_ref(), "SWAG");
-            assert_eq!(id.as_ref(), "world");
-        }
-        assert!(link_tag_count > 0);
-    }
-
     #[test]
     fn code_block_kind_check_fenced() {
         let parser = Parser::new("hello\n```test\ntadam\n```");
@@ -2894,105 +2227,19 @@ mod test {
     }
 
     #[test]
-    fn ref_defs() {
-        let input = r###"[a B c]: http://example.com
-[another]: https://google.com
-
-text
-
-[final ONE]: http://wikipedia.org
-"###;
-        let mut parser = Parser::new(input);
-
-        assert!(parser.reference_definitions().get("a b c").is_some());
-        assert!(parser.reference_definitions().get("nope").is_none());
-
-        if let Some(_event) = parser.next() {
-            // testing keys with shorter lifetimes than parser and its input
-            let s = "final one".to_owned();
-            let link_def = parser.reference_definitions().get(&s).unwrap();
-            let span = &input[link_def.span.clone()];
-            assert_eq!(span, "[final ONE]: http://wikipedia.org");
-        }
-    }
-
-    #[test]
-    fn common_lifetime_patterns_allowed<'b>() {
-        let temporary_str = String::from("xyz");
-
-        // NOTE: this is a limitation of Rust, it doesn't allow putting lifetime parameters on the closure itself.
-        // Hack it by attaching the lifetime to the test function instead.
-        // TODO: why is the `'b` lifetime required at all? Changing it to `'_` breaks things :(
-        let mut closure = |link: BrokenLink<'b>| Some(("#".into(), link.reference));
-
-        fn function(link: BrokenLink<'_>) -> Option<(CowStr<'_>, CowStr<'_>)> {
-            Some(("#".into(), link.reference))
-        }
-
-        for _ in Parser::new_with_broken_link_callback(
-            "static lifetime",
-            Options::empty(),
-            Some(&mut closure),
-        ) {}
-        /* This fails to compile. Because the closure can't say `for <'a> fn(BrokenLink<'a>) ->
-         * CowStr<'a>` and has to use the enclosing `'b` lifetime parameter, `temporary_str` lives
-         * shorter than `'b`. I think this is unlikely to occur in real life, and if it does, the
-         * fix is simple: move it out to a function that allows annotating the lifetimes.
-         */
-        //for _ in Parser::new_with_broken_link_callback(&temporary_str, Options::empty(), Some(&mut callback)) {
-        //}
-
-        for _ in Parser::new_with_broken_link_callback(
-            "static lifetime",
-            Options::empty(),
-            Some(&mut function),
-        ) {}
-        for _ in Parser::new_with_broken_link_callback(
-            &temporary_str,
-            Options::empty(),
-            Some(&mut function),
-        ) {}
-    }
-
-    #[test]
     fn inline_html_inside_blockquote() {
         // Regression for #960
         let input = "> <foo\n> bar>";
-        let events: Vec<_> = Parser::new(input).collect();
+        let events: Vec<_> = Parser::new(input)
+            .into_offset_iter()
+            .map(|(ev, _)| ev)
+            .collect();
         let expected = [
-            Event::Start(Tag::BlockQuote(None)),
+            Event::Start(Tag::BlockQuote),
             Event::Start(Tag::Paragraph),
             Event::InlineHtml(CowStr::Boxed("<foo\nbar>".to_string().into())),
             Event::End(TagEnd::Paragraph),
-            Event::End(TagEnd::BlockQuote(None)),
-        ];
-        assert_eq!(&events, &expected);
-    }
-
-    #[test]
-    fn wikilink_has_pothole() {
-        let input = "[[foo]] [[bar|baz]]";
-        let events: Vec<_> = Parser::new_ext(input, Options::ENABLE_WIKILINKS).collect();
-        let expected = [
-            Event::Start(Tag::Paragraph),
-            Event::Start(Tag::Link {
-                link_type: LinkType::WikiLink { has_pothole: false },
-                dest_url: CowStr::Borrowed("foo"),
-                title: CowStr::Borrowed(""),
-                id: CowStr::Borrowed(""),
-            }),
-            Event::Text(CowStr::Borrowed("foo")),
-            Event::End(TagEnd::Link),
-            Event::Text(CowStr::Borrowed(" ")),
-            Event::Start(Tag::Link {
-                link_type: LinkType::WikiLink { has_pothole: true },
-                dest_url: CowStr::Borrowed("bar"),
-                title: CowStr::Borrowed(""),
-                id: CowStr::Borrowed(""),
-            }),
-            Event::Text(CowStr::Borrowed("baz")),
-            Event::End(TagEnd::Link),
-            Event::End(TagEnd::Paragraph),
+            Event::End(TagEnd::BlockQuote),
         ];
         assert_eq!(&events, &expected);
     }

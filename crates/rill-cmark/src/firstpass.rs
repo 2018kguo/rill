@@ -2,37 +2,29 @@
 //! are in a linear chain with potential inline markup identified.
 
 use std::cmp::max;
-use std::ops::Range;
 
-use crate::parse::{
-    scan_containers, Allocations, FootnoteDef, HeadingAttributes, Item, ItemBody, LinkDef,
-    LINK_MAX_NESTED_PARENS,
-};
+use crate::parse::{scan_containers, Allocations, Item, ItemBody, LinkDef, LINK_MAX_NESTED_PARENS};
+use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
-use crate::Options;
 use crate::{
-    linklabel::{scan_link_label_rest, LinkLabel},
+    linklabel::{normalize_label, scan_link_label_rest, LinkLabel},
     HeadingLevel,
 };
-use crate::{scanners::*, MetadataBlockKind};
-
-use unicase::UniCase;
 
 /// Runs the first pass, which resolves the block structure of the document,
 /// and returns the resulting tree.
-pub(crate) fn run_first_pass(text: &str, options: Options) -> (Tree<Item>, Allocations<'_>) {
+pub(crate) fn run_first_pass(text: &str) -> (Tree<Item>, Allocations<'_>) {
     // This is a very naive heuristic for the number of nodes
     // we'll need.
     let start_capacity = max(128, text.len() / 32);
-    let lookup_table = &create_lut(&options);
+    let lookup_table = &create_lut();
     let first_pass = FirstPass {
         text,
         tree: Tree::with_capacity(start_capacity),
         begin_list_item: None,
         last_line_blank: false,
         allocs: Allocations::new(),
-        options,
         lookup_table,
         paragraph_interrupted: false,
         lazy_html: None,
@@ -48,7 +40,6 @@ struct FirstPass<'a, 'b> {
     begin_list_item: Option<usize>,
     last_line_blank: bool,
     allocs: Allocations<'a>,
-    options: Options,
     lookup_table: &'b LookupTable,
     /// rill: the previous line was a paragraph line in the current container, so new
     /// list items on this line follow micromark's interrupt rules.
@@ -77,24 +68,13 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let bytes = self.text.as_bytes();
         let mut line_start = LineStart::new(&bytes[start_ix..]);
 
-        let i = scan_containers(&self.tree, &mut line_start, self.options);
+        let i = scan_containers(&self.tree, &mut line_start);
         if self.lazy_html.take() != Some(start_ix) {
             for _ in i..self.tree.spine_len() {
                 self.pop(start_ix);
             }
         }
         let interrupting = std::mem::take(&mut self.paragraph_interrupted);
-
-        if self.options.contains(Options::ENABLE_OLD_FOOTNOTES) {
-            // finish footnote if it's still open and was preceded by blank line
-            if let Some(node_ix) = self.tree.peek_up() {
-                if let ItemBody::FootnoteDefinition(..) = self.tree[node_ix].item.body {
-                    if self.last_line_blank {
-                        self.pop(start_ix);
-                    }
-                }
-            }
-        }
 
         // Process new containers
         loop {
@@ -104,19 +84,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 line_start = save;
                 break;
             }
-            if self.options.contains(Options::ENABLE_FOOTNOTES) {
-                // Footnote definitions
-                let container_start = start_ix + line_start.bytes_scanned();
-                if let Some(bytecount) = self.parse_footnote(container_start) {
-                    start_ix = container_start + bytecount;
-                    if self.options.contains(Options::ENABLE_OLD_FOOTNOTES) {
-                        // gfm footnotes need indented, but old footnotes don't
-                        // handle this, old footnotes treat the next line as part of the current line
-                        start_ix += scan_blank_line(&bytes[start_ix..]).unwrap_or(0);
-                    }
-                    line_start = LineStart::new(&bytes[start_ix..]);
-                    continue;
-                }
+            // Footnote definitions
+            let container_start = start_ix + line_start.bytes_scanned();
+            if let Some(bytecount) = self.parse_footnote(container_start) {
+                start_ix = container_start + bytecount;
+                line_start = LineStart::new(&bytes[start_ix..]);
+                continue;
             }
             let container_start = start_ix + line_start.bytes_scanned();
             let before_marker = line_start.clone();
@@ -146,146 +119,44 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     self.begin_list_item = Some(after_marker_index + n);
                     return after_marker_index + n;
                 }
-                if self.options.contains(Options::ENABLE_TASKLISTS) {
-                    let before_marker = line_start.clone();
-                    let task_list_marker =
-                        line_start.scan_task_list_marker().map(|is_checked| Item {
-                            start: after_marker_index,
-                            end: start_ix + line_start.bytes_scanned(),
-                            body: ItemBody::TaskListMarker(is_checked),
-                        });
-                    if let Some(task_list_marker) = task_list_marker {
-                        if let Some(n) = scan_blank_line(&bytes[task_list_marker.end..]) {
-                            // rill: micromark needs paragraph content after a task marker; it
-                            // may start on the next line. Otherwise `[ ]` stays text.
-                            let next = task_list_marker.end + n;
-                            let content = self
-                                .scan_next_line_or_lazy_continuation(&bytes[next..])
-                                .map(|line| next + line.bytes_scanned())
-                                .filter(|&ix| {
-                                    ix < bytes.len() && scan_blank_line(&bytes[ix..]).is_none()
-                                });
-                            match content {
-                                Some(ix) => {
-                                    return self.parse_paragraph(ix, Some(task_list_marker))
-                                }
-                                None => line_start = before_marker,
-                            }
-                        } else {
-                            // rill: the marker takes one space or tab; the rest is text.
-                            if !line_start.scan_ch(b' ') {
-                                line_start.scan_ch(b'\t');
-                            }
-                            let ix = start_ix + line_start.bytes_scanned();
-                            return self.parse_paragraph(ix, Some(task_list_marker));
-                        }
-                    }
-                }
-            } else if let Some((indent, child, item)) = self
-                .options
-                .contains(Options::ENABLE_DEFINITION_LIST)
-                .then(|| {
-                    self.tree
-                        .cur()
-                        .map(|cur| (self.tree[cur].child, &mut self.tree[cur].item))
-                })
-                .flatten()
-                .filter(|(_, item)| {
-                    matches!(
-                        item,
-                        Item {
-                            body: ItemBody::Paragraph
-                                | ItemBody::TightParagraph
-                                | ItemBody::MaybeDefinitionListTitle
-                                | ItemBody::DefinitionListDefinition(_),
-                            ..
-                        }
-                    )
-                })
-                .and_then(|item| {
-                    Some((
-                        line_start
-                            .scan_definition_list_definition_marker_with_indent(outer_indent)?,
-                        item.0,
-                        item.1,
-                    ))
-                })
-            {
-                match item.body {
-                    ItemBody::Paragraph | ItemBody::TightParagraph => {
-                        item.body = ItemBody::DefinitionList(true);
-                        let Item { start, end, .. } = *item;
-                        let list_idx = self.tree.cur().unwrap();
-                        let title_idx = self.tree.create_node(Item {
-                            start,
-                            end, // will get updated later if item not empty
-                            body: ItemBody::DefinitionListTitle,
-                        });
-                        self.tree[title_idx].child = child;
-                        self.tree[list_idx].child = Some(title_idx);
-                        self.tree.push();
-                    }
-                    ItemBody::MaybeDefinitionListTitle => {
-                        item.body = ItemBody::DefinitionListTitle;
-                    }
-                    ItemBody::DefinitionListDefinition(_) => {}
-                    _ => unreachable!(),
-                }
-                let after_marker_index = start_ix + line_start.bytes_scanned();
-                self.tree.append(Item {
-                    start: container_start - outer_indent,
-                    end: after_marker_index, // will get updated later if item not empty
-                    body: ItemBody::DefinitionListDefinition(indent),
+                let before_marker = line_start.clone();
+                let task_list_marker = line_start.scan_task_list_marker().map(|is_checked| Item {
+                    start: after_marker_index,
+                    end: start_ix + line_start.bytes_scanned(),
+                    body: ItemBody::TaskListMarker(is_checked),
                 });
-                if let Some(ItemBody::DefinitionList(ref mut is_tight)) =
-                    self.tree.peek_up().map(|cur| &mut self.tree[cur].item.body)
-                {
-                    if self.last_line_blank {
-                        *is_tight = false;
-                        self.last_line_blank = false;
+                if let Some(task_list_marker) = task_list_marker {
+                    if let Some(n) = scan_blank_line(&bytes[task_list_marker.end..]) {
+                        // rill: micromark needs paragraph content after a task marker; it
+                        // may start on the next line. Otherwise `[ ]` stays text.
+                        let next = task_list_marker.end + n;
+                        let content = self
+                            .scan_next_line_or_lazy_continuation(&bytes[next..])
+                            .map(|line| next + line.bytes_scanned())
+                            .filter(|&ix| {
+                                ix < bytes.len() && scan_blank_line(&bytes[ix..]).is_none()
+                            });
+                        match content {
+                            Some(ix) => return self.parse_paragraph(ix, Some(task_list_marker)),
+                            None => line_start = before_marker,
+                        }
+                    } else {
+                        // rill: the marker takes one space or tab; the rest is text.
+                        if !line_start.scan_ch(b' ') {
+                            line_start.scan_ch(b'\t');
+                        }
+                        let ix = start_ix + line_start.bytes_scanned();
+                        return self.parse_paragraph(ix, Some(task_list_marker));
                     }
-                }
-                self.tree.push();
-                if let Some(n) = scan_blank_line(&bytes[after_marker_index..]) {
-                    self.begin_list_item = Some(after_marker_index + n);
-                    return after_marker_index + n;
                 }
             } else if line_start.scan_blockquote_marker() {
-                // rill: remark has no GitHub alert blockquotes.
-                let kind = None;
                 self.finish_list(start_ix);
                 self.tree.append(Item {
                     start: container_start,
                     end: 0, // will get set later
-                    body: ItemBody::BlockQuote(kind),
+                    body: ItemBody::BlockQuote,
                 });
                 self.tree.push();
-                if kind.is_some() {
-                    // blockquote tag leaves us at the end of the line
-                    // we need to scan through all the container syntax for the next line
-                    // and break out if we can't re-scan all of them
-                    let ix = start_ix + line_start.bytes_scanned();
-                    let mut lazy_line_start = LineStart::new(&bytes[ix..]);
-                    let tree_position =
-                        scan_containers(&self.tree, &mut lazy_line_start, self.options);
-                    let current_container = tree_position == self.tree.spine_len();
-                    if !lazy_line_start.scan_space(4)
-                        && self.scan_paragraph_interrupt(
-                            &bytes[ix + lazy_line_start.bytes_scanned()..],
-                            current_container,
-                            tree_position,
-                        )
-                    {
-                        return ix;
-                    } else {
-                        // blockquote tags act as if they were nested in a paragraph
-                        // so you can lazily continue the imaginary paragraph off of them
-                        line_start = lazy_line_start;
-                        line_start.scan_all_space();
-                        start_ix = ix;
-                        break;
-                    }
-                }
             } else {
                 line_start = save;
                 break;
@@ -297,10 +168,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         if let Some(n) = scan_blank_line(&bytes[ix..]) {
             if let Some(node_ix) = self.tree.peek_up() {
                 match &mut self.tree[node_ix].item.body {
-                    ItemBody::BlockQuote(..) => (),
-                    ItemBody::ListItem(indent) | ItemBody::DefinitionListDefinition(indent)
-                        if self.begin_list_item.is_some() =>
-                    {
+                    ItemBody::BlockQuote => (),
+                    ItemBody::ListItem(indent) if self.begin_list_item.is_some() => {
                         self.last_line_blank = true;
                         // This is a blank list item.
                         // While the list itself can be continued no matter how many blank lines
@@ -330,20 +199,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
 
         let ix = start_ix + line_start.bytes_scanned();
-
-        // metadata blocks cannot be indented
-        if indent == 0 {
-            if let Some((_n, metadata_block_ch)) = scan_metadata_block(
-                &bytes[ix..],
-                self.options
-                    .contains(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS),
-                self.options
-                    .contains(Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS),
-            ) {
-                self.finish_list(start_ix);
-                return self.parse_metadata_block(ix, metadata_block_ch);
-            }
-        }
 
         // HTML Blocks
         if bytes[ix] == b'<' {
@@ -452,7 +307,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         bytes: &'input [u8],
     ) -> Option<LineStart<'input>> {
         let mut line_start = LineStart::new(bytes);
-        let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+        let tree_position = scan_containers(&self.tree, &mut line_start);
         let current_container = tree_position == self.tree.spine_len();
         // rill: a blank line ends the content however far it is indented.
         let mut rest = line_start.clone();
@@ -461,11 +316,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             return None;
         }
         if !line_start.scan_space(4)
-            && self.scan_paragraph_interrupt(
-                &bytes[line_start.bytes_scanned()..],
-                current_container,
-                tree_position,
-            )
+            && self
+                .scan_paragraph_interrupt(&bytes[line_start.bytes_scanned()..], current_container)
         {
             // rill: micromark's definitions are content, so the next line's containers
             // open under the interrupt rules, as after a paragraph.
@@ -597,7 +449,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     ) -> Option<(usize, TreeIndex)> {
         let bytes = self.text.as_bytes();
         let mut line_start = LineStart::new(&bytes[ix..]);
-        let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+        let tree_position = scan_containers(&self.tree, &mut line_start);
         let current_container = tree_position == self.tree.spine_len();
         if !current_container {
             return None;
@@ -608,14 +460,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
         line_start.scan_all_space();
         ix += line_start.bytes_scanned();
-        if scan_paragraph_interrupt_no_table(
-            &bytes[ix..],
-            current_container,
-            self.options.contains(Options::ENABLE_FOOTNOTES),
-            self.options.contains(Options::ENABLE_DEFINITION_LIST),
-            &self.tree,
-            tree_position,
-        ) {
+        if scan_paragraph_interrupt_no_table(&bytes[ix..], current_container, &self.tree) {
             return None;
         }
         // rill: a table is no paragraph (micromark's `_gfmTableDynamicInterruptHack`), so
@@ -633,30 +478,11 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
     /// Returns offset of line start after paragraph.
     fn parse_paragraph(&mut self, start_ix: usize, tasklist_marker: Option<Item>) -> usize {
-        let body = if let Some(ItemBody::DefinitionList(_)) =
-            self.tree.peek_up().map(|idx| self.tree[idx].item.body)
-        {
-            if self.tree.cur().map_or(true, |idx| {
-                matches!(
-                    &self.tree[idx].item.body,
-                    ItemBody::DefinitionListDefinition(..)
-                )
-            }) {
-                // blank lines between the previous definition and this one don't count
-                self.last_line_blank = false;
-                ItemBody::MaybeDefinitionListTitle
-            } else {
-                self.finish_list(start_ix);
-                ItemBody::Paragraph
-            }
-        } else {
-            self.finish_list(start_ix);
-            ItemBody::Paragraph
-        };
+        self.finish_list(start_ix);
         let node_ix = self.tree.append(Item {
             start: start_ix,
             end: 0, // will get set later
-            body,
+            body: ItemBody::Paragraph,
         });
         self.tree.push();
 
@@ -672,12 +498,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let mut line_begin = start_ix;
         loop {
             // rill: micromark's delimiter row takes any paragraph line as its head.
-            let scan_mode = if self.options.contains(Options::ENABLE_TABLES) {
-                TableParseMode::Scan
-            } else {
-                TableParseMode::Disabled
-            };
-            let (next_ix, brk) = self.parse_line(ix, None, scan_mode);
+            let (next_ix, brk) = self.parse_line(ix, None, TableParseMode::Scan);
 
             if let (
                 Some(Item {
@@ -698,13 +519,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 }
                 self.pop(paragraph_end);
                 if starts_block(&bytes[ix..]) {
-                    if body == ItemBody::MaybeDefinitionListTitle {
-                        self.finish_list(ix);
-                    }
                     return line_begin;
-                }
-                if body == ItemBody::MaybeDefinitionListTitle {
-                    self.finish_list(ix);
                 }
                 self.tree.append(Item {
                     start: ix,
@@ -729,9 +544,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 // be a cleaner way
                 self.tree[node_ix].child = None;
                 self.tree.pop();
-                if body == ItemBody::MaybeDefinitionListTitle {
-                    self.finish_list(ix);
-                }
                 self.tree.push();
                 if let Some(ix) = self.parse_table(table_cols, ix, next_ix) {
                     return ix;
@@ -740,7 +552,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
             ix = next_ix;
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+            let tree_position = scan_containers(&self.tree, &mut line_start);
             let current_container = tree_position == self.tree.spine_len();
             let trailing_backslash_pos = match brk {
                 Some(Item {
@@ -760,15 +572,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                             self.tree.append_text(pos, pos + 1, false);
                         }
                         self.pop(ix_setext);
-                        if body == ItemBody::MaybeDefinitionListTitle {
-                            self.finish_list(ix);
-                        }
                         return ix_setext;
                     }
                 }
                 // first check for non-empty lists, then for other interrupts
                 let suffix = &bytes[ix_new..];
-                if self.scan_paragraph_interrupt(suffix, current_container, tree_position) {
+                if self.scan_paragraph_interrupt(suffix, current_container) {
                     if let Some(pos) = trailing_backslash_pos {
                         self.tree.append_text(pos, pos + 1, false);
                     }
@@ -818,9 +627,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     /// `]` closes the latest one, link or not.
     /// ponytail: brackets in code spans still count; spans are not resolved yet.
     fn in_literal_path(&mut self, from: usize, ix: usize) -> bool {
-        if !self.options.contains(Options::ENABLE_GFM) {
-            return false;
-        }
         if self.literal_cache.0 != from {
             self.literal_cache = (from, from, from);
         }
@@ -878,7 +684,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     ) -> Option<usize> {
         let bytes = self.text.as_bytes();
         let (n, level) = scan_setext_heading(&bytes[ix..])?;
-        let mut attrs = None;
 
         if let Some(cur_ix) = self.tree.cur() {
             let parent_ix = self.tree.peek_up().unwrap();
@@ -888,53 +693,15 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             // of the parent) instead.
             let header_end = self.tree[cur_ix].item.end;
 
-            // extract the trailing attribute block
-            let (content_end, attrs_) =
-                self.extract_and_parse_heading_attribute_block(header_start, header_end);
-            attrs = attrs_;
-
             // strip trailing whitespace
-            let new_end = if has_trailing_content {
-                content_end
-            } else {
-                let mut last_line_start = header_start;
-                if attrs.is_some() {
-                    loop {
-                        let next_line_start =
-                            last_line_start + scan_nextline(&bytes[last_line_start..content_end]);
-                        if next_line_start >= content_end {
-                            break;
-                        }
-                        let mut line_start = LineStart::new(&bytes[next_line_start..content_end]);
-                        if scan_containers(&self.tree, &mut line_start, self.options)
-                            != self.tree.spine_len()
-                        {
-                            break;
-                        }
-                        last_line_start = next_line_start + line_start.bytes_scanned();
-                    }
-                }
-                let trailing_ws = scan_rev_while(
-                    &bytes[last_line_start..content_end],
-                    is_ascii_whitespace_no_nl,
-                );
-                content_end - trailing_ws
-            };
-
-            if attrs.is_some() {
-                // remove trailing block attributes
-                self.tree.truncate_siblings(new_end);
-            }
-
-            if let Some(cur_ix) = self.tree.cur() {
-                self.tree[cur_ix].item.end = new_end;
+            if !has_trailing_content {
+                let trailing_ws =
+                    scan_rev_while(&bytes[header_start..header_end], is_ascii_whitespace_no_nl);
+                self.tree[cur_ix].item.end = header_end - trailing_ws;
             }
         }
 
-        self.tree[node_ix].item.body = ItemBody::Heading(
-            level,
-            attrs.map(|attrs| self.allocs.allocate_heading(attrs)),
-        );
+        self.tree[node_ix].item.body = ItemBody::Heading(level);
 
         Some(ix + n)
     }
@@ -976,9 +743,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         // check if we may be parsing a table
                         let next_line_ix = ix + eol_bytes;
                         let mut line_start = LineStart::new(&bytes[next_line_ix..]);
-                        if scan_containers(&self.tree, &mut line_start, self.options)
-                            == self.tree.spine_len()
-                        {
+                        if scan_containers(&self.tree, &mut line_start) == self.tree.spine_len() {
                             let table_head_ix = next_line_ix + line_start.bytes_scanned();
                             // rill: `- x` there is a list item, which micromark opens first.
                             let head = &bytes[table_head_ix..];
@@ -1070,10 +835,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         && !self.in_literal_path(start, ix)
                     {
                         self.tree.append_text(begin_text, ix, backslash_escaped);
-                        if bytes[ix + 1] == b'$'
-                            && bytes.get(ix + 2) == Some(&b'$')
-                            && self.options.contains(Options::ENABLE_MATH)
-                        {
+                        if bytes[ix + 1] == b'$' && bytes.get(ix + 2) == Some(&b'$') {
                             let count = 1 + scan_ch_repeat(&bytes[(ix + 2)..], b'$');
                             self.tree.append(Item {
                                 start: ix + 1,
@@ -1245,82 +1007,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         LoopInstruction::ContinueAndSkip(0)
                     }
                 }
-                b'.' => {
-                    if ix + 2 < bytes.len() && bytes[ix + 1] == b'.' && bytes[ix + 2] == b'.' {
-                        self.tree.append_text(begin_text, ix, backslash_escaped);
-                        backslash_escaped = false;
-                        self.tree.append(Item {
-                            start: ix,
-                            end: ix + 3,
-                            body: ItemBody::SynthesizeChar('…'),
-                        });
-                        begin_text = ix + 3;
-                        LoopInstruction::ContinueAndSkip(2)
-                    } else {
-                        LoopInstruction::ContinueAndSkip(0)
-                    }
-                }
-                b'-' => {
-                    let count = 1 + scan_ch_repeat(&bytes[(ix + 1)..], b'-');
-                    if count == 1 {
-                        LoopInstruction::ContinueAndSkip(0)
-                    } else {
-                        let itembody = if count == 2 {
-                            ItemBody::SynthesizeChar('–')
-                        } else if count == 3 {
-                            ItemBody::SynthesizeChar('—')
-                        } else {
-                            let (ems, ens) = match count % 6 {
-                                0 | 3 => (count / 3, 0),
-                                2 | 4 => (0, count / 2),
-                                1 => (count / 3 - 1, 2),
-                                _ => (count / 3, 1),
-                            };
-                            // – and — are 3 bytes each in utf8
-                            let mut buf = String::with_capacity(3 * (ems + ens));
-                            for _ in 0..ems {
-                                buf.push('—');
-                            }
-                            for _ in 0..ens {
-                                buf.push('–');
-                            }
-                            ItemBody::SynthesizeText(self.allocs.allocate_cow(buf.into()))
-                        };
-
-                        self.tree.append_text(begin_text, ix, backslash_escaped);
-                        backslash_escaped = false;
-                        self.tree.append(Item {
-                            start: ix,
-                            end: ix + count,
-                            body: itembody,
-                        });
-                        begin_text = ix + count;
-                        LoopInstruction::ContinueAndSkip(count - 1)
-                    }
-                }
-                c @ b'\'' | c @ b'"' => {
-                    let string_suffix = &self.text[ix..];
-                    let can_open =
-                        delim_run_can_open(&self.text[start..], string_suffix, 1, ix - start, mode);
-                    let can_close = delim_run_can_close(
-                        &self.text[start..],
-                        string_suffix,
-                        1,
-                        ix - start,
-                        mode,
-                    );
-
-                    self.tree.append_text(begin_text, ix, backslash_escaped);
-                    backslash_escaped = false;
-                    self.tree.append(Item {
-                        start: ix,
-                        end: ix + 1,
-                        body: ItemBody::MaybeSmartQuote(c, can_open, can_close),
-                    });
-                    begin_text = ix + 1;
-
-                    LoopInstruction::ContinueAndSkip(0)
-                }
                 _ => LoopInstruction::ContinueAndSkip(0),
             }
         });
@@ -1366,7 +1052,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             self.append_html_line(remaining_space.max(indent), line_start_ix, ix);
 
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len() {
                 end_ix = ix;
                 break;
@@ -1415,7 +1101,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             self.append_html_line(remaining_space.max(indent), line_start_ix, ix);
 
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len() || line_start.is_at_eol() {
                 end_ix = ix;
                 break;
@@ -1462,7 +1148,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             }
 
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len()
                 || !(line_start.scan_space(4) || line_start.is_at_eol())
             {
@@ -1516,7 +1202,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         self.tree.push();
         loop {
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len() {
                 // this line will get parsed again as not being part of the code
                 // if it's blank, it should be parsed as a blank line
@@ -1541,46 +1227,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             self.append_code_text(remaining_space, ix, next_ix);
             ix = next_ix;
         }
-    }
-
-    fn parse_metadata_block(&mut self, start_ix: usize, metadata_block_ch: u8) -> usize {
-        let bytes = self.text.as_bytes();
-        let metadata_block_kind = match metadata_block_ch {
-            b'-' => MetadataBlockKind::YamlStyle,
-            b'+' => MetadataBlockKind::PlusesStyle,
-            _ => panic!("Erroneous metadata block character when parsing metadata block"),
-        };
-        // 3 delimiter characters
-        let mut ix = start_ix + 3 + scan_nextline(&bytes[start_ix + 3..]);
-        self.tree.append(Item {
-            start: start_ix,
-            end: 0, // will get set later
-            body: ItemBody::MetadataBlock(metadata_block_kind),
-        });
-        self.tree.push();
-        loop {
-            let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
-            if n_containers < self.tree.spine_len() {
-                break;
-            }
-            if let (_, 0) = calc_indent(&bytes[ix..], 4) {
-                if let Some(n) = scan_closing_metadata_block(&bytes[ix..], metadata_block_ch) {
-                    ix += n;
-                    break;
-                }
-            }
-            let remaining_space = line_start.remaining_space();
-            ix += line_start.bytes_scanned();
-            let next_ix = ix + scan_nextline(&bytes[ix..]);
-            self.append_code_text(remaining_space, ix, next_ix);
-            ix = next_ix;
-        }
-
-        self.pop(ix);
-
-        // try to read trailing whitespace or it will register as a completely blank line
-        ix + scan_blank_line(&bytes[ix..]).unwrap_or(0)
     }
 
     fn append_code_text(&mut self, remaining_space: usize, start: usize, end: usize) {
@@ -1618,13 +1264,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     fn pop(&mut self, ix: usize) {
         let cur_ix = self.tree.pop().unwrap();
         self.tree[cur_ix].item.end = ix;
-        if let ItemBody::DefinitionList(_) = self.tree[cur_ix].item.body {
-            fixup_end_of_definition_list(&mut self.tree, cur_ix);
-            self.begin_list_item = None;
-        }
-        if let ItemBody::List(true, _, _) | ItemBody::DefinitionList(true) =
-            self.tree[cur_ix].item.body
-        {
+        if let ItemBody::List(true, _, _) = self.tree[cur_ix].item.body {
             surgerize_tight_list(&mut self.tree, cur_ix);
             self.begin_list_item = None;
         }
@@ -1635,17 +1275,13 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     fn finish_list(&mut self, ix: usize) {
         self.finish_empty_list_item();
         if let Some(node_ix) = self.tree.peek_up() {
-            if let ItemBody::List(_, _, _) | ItemBody::DefinitionList(_) =
-                self.tree[node_ix].item.body
-            {
+            if let ItemBody::List(_, _, _) = self.tree[node_ix].item.body {
                 self.pop(ix);
             }
         }
         if self.last_line_blank {
             if let Some(node_ix) = self.tree.peek_grandparent() {
-                if let ItemBody::List(ref mut is_tight, _, _)
-                | ItemBody::DefinitionList(ref mut is_tight) = self.tree[node_ix].item.body
-                {
+                if let ItemBody::List(ref mut is_tight, _, _) = self.tree[node_ix].item.body {
                     *is_tight = false;
                 }
             }
@@ -1658,9 +1294,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             if self.last_line_blank {
                 // A list item can begin with at most one blank line.
                 if let Some(node_ix) = self.tree.peek_up() {
-                    if let ItemBody::ListItem(_) | ItemBody::DefinitionListDefinition(_) =
-                        self.tree[node_ix].item.body
-                    {
+                    if let ItemBody::ListItem(_) = self.tree[node_ix].item.body {
                         self.pop(begin_list_item);
                     }
                 }
@@ -1722,7 +1356,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let bytes = self.text.as_bytes();
         if let Some(eol_bytes) = scan_eol(&bytes[ix..]) {
             self.tree[heading_ix].item.end = ix + eol_bytes;
-            self.tree[heading_ix].item.body = ItemBody::Heading(atx_level, None);
+            self.tree[heading_ix].item.body = ItemBody::Heading(atx_level);
             return ix + eol_bytes;
         }
         // skip leading spaces
@@ -1733,37 +1367,24 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let header_start = ix;
         let header_node_idx = self.tree.push(); // so that we can set the endpoint later
 
-        // trim the trailing attribute block before parsing the entire line, if necessary
-        let (end, content_end, attrs) = if self.options.contains(Options::ENABLE_HEADING_ATTRIBUTES)
+        let (line_ix, line_brk) = self.parse_line(ix, None, TableParseMode::Disabled);
+        ix = line_ix;
+        // Backslash at end is actually hard line break
+        if let Some(Item {
+            start,
+            end,
+            body: ItemBody::HardBreak(true),
+        }) = line_brk
         {
-            // the start of the next line is the end of the header since the
-            // header cannot have line breaks
-            let header_end = header_start + scan_nextline(&bytes[header_start..]);
-            let (content_end, attrs) =
-                self.extract_and_parse_heading_attribute_block(header_start, header_end);
-            self.parse_line(ix, Some(content_end), TableParseMode::Disabled);
-            (header_end, content_end, attrs)
-        } else {
-            let (line_ix, line_brk) = self.parse_line(ix, None, TableParseMode::Disabled);
-            ix = line_ix;
-            // Backslash at end is actually hard line break
-            if let Some(Item {
-                start,
-                end,
-                body: ItemBody::HardBreak(true),
-            }) = line_brk
-            {
-                self.tree.append_text(start, end, false);
-            }
-            (ix, ix, None)
-        };
-        self.tree[header_node_idx].item.end = end;
+            self.tree.append_text(start, end, false);
+        }
+        self.tree[header_node_idx].item.end = ix;
 
         // remove trailing matter from header text
         let mut empty_text_node = false;
         if let Some(cur_ix) = self.tree.cur() {
             // remove closing of the ATX heading
-            let header_text = &bytes[header_start..content_end];
+            let header_text = &bytes[header_start..ix];
             let mut limit = header_text
                 .iter()
                 .rposition(|&b| !(b == b'\n' || b == b'\r' || b == b' '))
@@ -1794,12 +1415,9 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         } else {
             self.tree.pop();
         }
-        self.tree[heading_ix].item.body = ItemBody::Heading(
-            atx_level,
-            attrs.map(|attrs| self.allocs.allocate_heading(attrs)),
-        );
+        self.tree[heading_ix].item.body = ItemBody::Heading(atx_level);
 
-        end
+        ix
     }
 
     /// Returns the number of bytes scanned on success.
@@ -1808,15 +1426,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         if !bytes.starts_with(b"[^") {
             return None;
         }
-        let (mut i, label) = if self.options.has_gfm_footnotes() {
-            // GitHub doesn't allow footnote definition labels to contain line breaks.
-            // It actually does allow this for link definitions under certain circumstances,
-            // but for this it's simpler to avoid it.
-            scan_link_label_rest(&self.text[start + 2..], &|_| None, self.tree.is_in_table())?
-        } else {
-            self.parse_refdef_label(start + 2)?
-        };
-        if self.options.has_gfm_footnotes() && label.bytes().any(|b| b == b'\r' || b == b'\n') {
+        // GitHub doesn't allow footnote definition labels to contain line breaks.
+        // It actually does allow this for link definitions under certain circumstances,
+        // but for this it's simpler to avoid it.
+        let (mut i, label) =
+            scan_link_label_rest(&self.text[start + 2..], &|_| None, self.tree.is_in_table())?;
+        if label.bytes().any(|b| b == b'\r' || b == b'\n') {
             // GitHub doesn't allow footnote definition labels to contain line breaks,
             // even if they're escaped.
             return None;
@@ -1833,13 +1448,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 self.pop(start);
             }
         }
-        if self.options.has_gfm_footnotes() {
-            i += scan_whitespace_no_nl(&bytes[i..]);
-        }
-        self.allocs
-            .footdefs
-            .0
-            .insert(UniCase::new(label.clone()), FootnoteDef { use_count: 0 });
+        i += scan_whitespace_no_nl(&bytes[i..]);
+        self.allocs.footdefs.0.insert(normalize_label(&label));
         self.tree.append(Item {
             start,
             end: 0, // will get set later
@@ -1857,14 +1467,14 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             &self.text[start..],
             &|bytes| {
                 let mut line_start = LineStart::new(bytes);
-                let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+                let tree_position = scan_containers(&self.tree, &mut line_start);
                 let current_container = tree_position == self.tree.spine_len();
                 if line_start.scan_space(4) {
                     return Some(line_start.bytes_scanned());
                 }
                 let bytes_scanned = line_start.bytes_scanned();
                 let suffix = &bytes[bytes_scanned..];
-                if self.scan_paragraph_interrupt(suffix, current_container, tree_position)
+                if self.scan_paragraph_interrupt(suffix, current_container)
                     || (current_container && scan_setext_heading(suffix).is_some())
                 {
                     None
@@ -1888,8 +1498,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             return None;
         }
         i += 1;
-        let (bytecount, link_def) = self.scan_refdef(start, start + i)?;
-        Some((bytecount + i, UniCase::new(label), link_def))
+        let (bytecount, link_def) = self.scan_refdef(start + i)?;
+        Some((bytecount + i, normalize_label(&label), link_def))
     }
 
     /// Returns number of bytes and number of newlines
@@ -1908,11 +1518,11 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 break;
             }
             let mut line_start = LineStart::new(&bytes[i..]);
-            let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+            let tree_position = scan_containers(&self.tree, &mut line_start);
             let current_container = tree_position == self.tree.spine_len();
             if !line_start.scan_space(4) {
                 let suffix = &bytes[i + line_start.bytes_scanned()..];
-                if self.scan_paragraph_interrupt(suffix, current_container, tree_position)
+                if self.scan_paragraph_interrupt(suffix, current_container)
                     || scan_setext_heading(suffix).is_some()
                 {
                     return None;
@@ -1967,11 +1577,11 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         bytecount += 1;
                     }
                     let mut line_start = LineStart::new(&bytes[bytecount..]);
-                    let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+                    let tree_position = scan_containers(&self.tree, &mut line_start);
                     let current_container = tree_position == self.tree.spine_len();
                     if !line_start.scan_space(4) {
                         let suffix = &bytes[bytecount + line_start.bytes_scanned()..];
-                        if self.scan_paragraph_interrupt(suffix, current_container, tree_position)
+                        if self.scan_paragraph_interrupt(suffix, current_container)
                             || scan_setext_heading(suffix).is_some()
                         {
                             return None;
@@ -2012,7 +1622,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
     /// Returns # of bytes and definition.
     /// Assumes the label of the reference including colon has already been scanned.
-    fn scan_refdef(&self, span_start: usize, start: usize) -> Option<(usize, LinkDef<'a>)> {
+    fn scan_refdef(&self, start: usize) -> Option<(usize, LinkDef<'a>)> {
         let bytes = self.text.as_bytes();
 
         // whitespace between label and url (including up to one newline)
@@ -2027,14 +1637,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         i += dest_length;
 
         // no title
-        let mut backup = (
-            i - start,
-            LinkDef {
-                dest,
-                title: None,
-                span: span_start..i,
-            },
-        );
+        let mut backup = (i - start, LinkDef { dest, title: None });
 
         // scan whitespace between dest and label
         let (mut i, newlines) =
@@ -2059,7 +1662,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             i += title_length;
             if scan_blank_line(&bytes[i..]).is_some() {
                 backup.0 = i - start;
-                backup.1.span = span_start..i;
                 backup.1.title = Some(unescape(title, self.tree.is_in_table()));
                 return Some(backup);
             }
@@ -2072,20 +1674,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     }
 
     /// Checks whether we should break a paragraph on the given input.
-    fn scan_paragraph_interrupt(
-        &self,
-        bytes: &[u8],
-        current_container: bool,
-        tree_position: usize,
-    ) -> bool {
-        if scan_paragraph_interrupt_no_table(
-            bytes,
-            current_container,
-            self.options.contains(Options::ENABLE_FOOTNOTES),
-            self.options.contains(Options::ENABLE_DEFINITION_LIST),
-            &self.tree,
-            tree_position,
-        ) {
+    fn scan_paragraph_interrupt(&self, bytes: &[u8], current_container: bool) -> bool {
+        if scan_paragraph_interrupt_no_table(bytes, current_container, &self.tree) {
             return true;
         }
         // pulldown-cmark allows heavy tables, that have a `|` on the header row,
@@ -2102,7 +1692,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         // ---|---|---
         //  d | e | f
         // ```
-        if !self.options.contains(Options::ENABLE_TABLES) || !bytes.starts_with(b"|") {
+        if !bytes.starts_with(b"|") {
             return false;
         }
 
@@ -2149,7 +1739,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         //     ^
         //     | need to skip over the `>` when checking for the table
         let mut line_start = LineStart::new(&bytes[next_line_ix..]);
-        if scan_containers(&self.tree, &mut line_start, self.options) != self.tree.spine_len() {
+        if scan_containers(&self.tree, &mut line_start) != self.tree.spine_len() {
             return false;
         }
         let table_head_ix = next_line_ix + line_start.bytes_scanned();
@@ -2164,34 +1754,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
         // make sure they match the number of columns we find in separator line
         alignment.len() == header_count
-    }
-
-    /// Extracts and parses a heading attribute block if exists.
-    ///
-    /// Returns `(end_offset_of_heading_content, (id, classes))`.
-    ///
-    /// If `header_end` is less than or equal to `header_start`, the given
-    /// input is considered as empty.
-    fn extract_and_parse_heading_attribute_block(
-        &mut self,
-        header_start: usize,
-        header_end: usize,
-    ) -> (usize, Option<HeadingAttributes<'a>>) {
-        if !self.options.contains(Options::ENABLE_HEADING_ATTRIBUTES) {
-            return (header_end, None);
-        }
-
-        // extract the trailing attribute block
-        let header_bytes = &self.text.as_bytes()[header_start..header_end];
-        let (content_len, attr_block_range_rel) =
-            extract_attribute_block_content_from_header_text(header_bytes);
-        let content_end = header_start + content_len;
-        let attrs = attr_block_range_rel.and_then(|r| {
-            parse_inside_attribute_block(
-                &self.text[(header_start + r.start)..(header_start + r.end)],
-            )
-        });
-        (content_end, attrs)
     }
 }
 
@@ -2253,10 +1815,7 @@ fn starts_block(bytes: &[u8]) -> bool {
 fn scan_paragraph_interrupt_no_table(
     bytes: &[u8],
     current_container: bool,
-    has_footnote: bool,
-    definition_list: bool,
     tree: &Tree<Item>,
-    tree_position: usize,
 ) -> bool {
     scan_eol(bytes).is_some()
         || scan_hrule(bytes).is_ok()
@@ -2276,22 +1835,7 @@ fn scan_paragraph_interrupt_no_table(
                 || starts_html_block_type_6(&bytes[1..])
                 // rill: micromark lets complete HTML interrupt on a lazy line.
                 || !current_container && scan_html_type_7(bytes).is_some())
-        || definition_list
-            && ((current_container
-                && tree.peek_up().map_or(false, |cur| {
-                    matches!(
-                        tree[cur].item.body,
-                        ItemBody::Paragraph
-                            | ItemBody::TightParagraph
-                            | ItemBody::MaybeDefinitionListTitle
-                    )
-                }))
-                || tree.walk_spine().nth(tree_position).map_or(false, |cur| {
-                    matches!(tree[*cur].item.body, ItemBody::DefinitionListDefinition(_))
-                }))
-            && bytes.starts_with(b":")
-        || (has_footnote
-            && bytes.starts_with(b"[^")
+        || (bytes.starts_with(b"[^")
             && scan_link_label_rest(
                 std::str::from_utf8(&bytes[2..]).unwrap(),
                 &|_| None,
@@ -2360,158 +1904,14 @@ fn surgerize_tight_list(tree: &mut Tree<Item>, list_ix: TreeIndex) {
     }
 }
 
-fn fixup_end_of_definition_list(tree: &mut Tree<Item>, list_ix: TreeIndex) {
-    let mut list_item = tree[list_ix].child;
-    let mut previous_list_item = None;
-    while let Some(listitem_ix) = list_item {
-        match &mut tree[listitem_ix].item.body {
-            ItemBody::DefinitionListTitle | ItemBody::DefinitionListDefinition(_) => {
-                previous_list_item = list_item;
-                list_item = tree[listitem_ix].next;
-            }
-            body @ ItemBody::MaybeDefinitionListTitle => {
-                *body = ItemBody::Paragraph;
-                break;
-            }
-            _ => break,
-        }
-    }
-    if let Some(previous_list_item) = previous_list_item {
-        tree.truncate_to_parent(previous_list_item);
-    }
-}
-
-/// Determines whether the delimiter run starting at given index is
-/// left-flanking, as defined by the commonmark spec (and isn't intraword
-/// for _ delims).
-/// suffix is &s[ix..], which is passed in as an optimization, since taking
-/// a string subslice is O(n).
-fn delim_run_can_open(
-    s: &str,
-    suffix: &str,
-    run_len: usize,
-    ix: usize,
-    mode: TableParseMode,
-) -> bool {
-    let next_char = if let Some(c) = suffix[run_len..].chars().next() {
-        c
-    } else {
-        return false;
-    };
-    if next_char.is_whitespace() {
-        return false;
-    }
-    if ix == 0 {
-        return true;
-    }
-    if mode == TableParseMode::Active {
-        if s.as_bytes()[..ix].ends_with(b"|") && !s.as_bytes()[..ix].ends_with(br"\|") {
-            return true;
-        }
-        if next_char == '|' {
-            return false;
-        }
-    }
-    let delim = suffix.bytes().next().unwrap();
-    // `*` and `~~` can be intraword, `_` and `~` cannot
-    if delim == b'*' && !is_punctuation(next_char) {
-        return true;
-    }
-    if delim == b'~' && run_len > 1 {
-        return true;
-    }
-    let prev_char = s[..ix].chars().last().unwrap();
-    if delim == b'~' && prev_char == '~' && !is_punctuation(next_char) {
-        return true;
-    }
-
-    prev_char.is_whitespace()
-        || is_punctuation(prev_char) && (delim != b'\'' || ![']', ')'].contains(&prev_char))
-}
-
-/// Determines whether the delimiter run starting at given index is
-/// right-flanking, as defined by the commonmark spec (and isn't intraword
-/// for _ delims)
-fn delim_run_can_close(
-    s: &str,
-    suffix: &str,
-    run_len: usize,
-    ix: usize,
-    mode: TableParseMode,
-) -> bool {
-    if ix == 0 {
-        return false;
-    }
-    let prev_char = s[..ix].chars().last().unwrap();
-    if prev_char.is_whitespace() {
-        return false;
-    }
-    let next_char = if let Some(c) = suffix[run_len..].chars().next() {
-        c
-    } else {
-        return true;
-    };
-    if mode == TableParseMode::Active {
-        if s.as_bytes()[..ix].ends_with(b"|") && !s.as_bytes()[..ix].ends_with(br"\|") {
-            return false;
-        }
-        if next_char == '|' {
-            return true;
-        }
-    }
-    let delim = suffix.bytes().next().unwrap();
-    // `*` and `~~` can be intraword, `_` and `~` cannot
-    if (delim == b'*' || (delim == b'~' && run_len > 1)) && !is_punctuation(prev_char) {
-        return true;
-    }
-    if delim == b'~' && prev_char == '~' {
-        return true;
-    }
-
-    next_char.is_whitespace() || is_punctuation(next_char)
-}
-
-fn create_lut(options: &Options) -> LookupTable {
-    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-    {
-        LookupTable {
-            simd: simd::compute_lookup(options),
-            scalar: special_bytes(options),
-        }
-    }
-    #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
-    {
-        special_bytes(options)
-    }
-}
-
-fn special_bytes(options: &Options) -> [bool; 256] {
+fn create_lut() -> LookupTable {
     let mut bytes = [false; 256];
     let standard_bytes = [
-        b'\n', b'\r', b'*', b'_', b'&', b'\\', b'[', b']', b'<', b'!', b'`',
+        b'\n', b'\r', b'*', b'_', b'&', b'\\', b'[', b']', b'<', b'!', b'`', b'|', b'~', b'$',
     ];
 
     for &byte in &standard_bytes {
         bytes[byte as usize] = true;
-    }
-    if options.contains(Options::ENABLE_TABLES) {
-        bytes[b'|' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_STRIKETHROUGH)
-        || options.contains(Options::ENABLE_SUBSCRIPT)
-    {
-        bytes[b'~' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_SUPERSCRIPT) {
-        bytes[b'^' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_MATH) {
-        bytes[b'$' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_SMART_PUNCTUATION) {
-        for &byte in &[b'.', b'-', b'"', b'\''] {
-            bytes[byte as usize] = true;
-        }
     }
 
     bytes
@@ -2524,13 +1924,6 @@ enum LoopInstruction<T> {
     BreakAtWith(usize, T),
 }
 
-#[cfg(all(target_arch = "x86_64", feature = "simd"))]
-struct LookupTable {
-    simd: [u8; 16],
-    scalar: [bool; 256],
-}
-
-#[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
 type LookupTable = [bool; 256];
 
 /// This function walks the byte slices from the given index and
@@ -2545,25 +1938,6 @@ type LookupTable = [bool; 256];
 /// index that is outside the byteslice bound and a `None` value.
 fn iterate_special_bytes<F, T>(
     lut: &LookupTable,
-    bytes: &[u8],
-    ix: usize,
-    callback: F,
-) -> (usize, Option<T>)
-where
-    F: FnMut(usize, u8) -> LoopInstruction<Option<T>>,
-{
-    #[cfg(all(target_arch = "x86_64", feature = "simd"))]
-    {
-        simd::iterate_special_bytes(lut, bytes, ix, callback)
-    }
-    #[cfg(not(all(target_arch = "x86_64", feature = "simd")))]
-    {
-        scalar_iterate_special_bytes(lut, bytes, ix, callback)
-    }
-}
-
-fn scalar_iterate_special_bytes<F, T>(
-    lut: &[bool; 256],
     bytes: &[u8],
     mut ix: usize,
     mut callback: F,
@@ -2587,382 +1961,4 @@ where
     }
 
     (ix, None)
-}
-
-/// Split the usual heading content range and the content inside the trailing attribute block.
-///
-/// Returns `(leading_content_len, Option<trailing_attr_block_range>)`.
-///
-/// Note that `trailing_attr_block_range` will be empty range when the block
-/// is `{}`, since the range is content inside the wrapping `{` and `}`.
-///
-/// The closing `}` of an attribute block can have trailing whitespaces.
-/// They are automatically trimmed when the attribute block is being searched.
-///
-/// However, this method does not trim the trailing whitespaces of heading content.
-/// It is callers' responsibility to trim them if necessary.
-fn extract_attribute_block_content_from_header_text(
-    heading: &[u8],
-) -> (usize, Option<Range<usize>>) {
-    let heading_len = heading.len();
-    let mut ix = heading_len;
-    ix -= scan_rev_while(heading, |b| {
-        b == b'\n' || b == b'\r' || b == b' ' || b == b'\t'
-    });
-    if ix == 0 {
-        return (heading_len, None);
-    }
-
-    let attr_block_close = ix - 1;
-    if heading.get(attr_block_close) != Some(&b'}') {
-        // The last character is not `}`. No attribute blocks found.
-        return (heading_len, None);
-    }
-    // move cursor before the closing right brace (`}`)
-    ix -= 1;
-
-    ix -= scan_rev_while(&heading[..ix], |b| {
-        // Characters to be excluded:
-        //  * `{` and `}`: special characters to open and close an attribute block.
-        //  * `\\`: a special character to escape many characters and disable some syntaxes.
-        //      + Handling of this escape character differs among markdown processors.
-        //      + Escaped characters will be separate text node from neighbors, so
-        //        it is not easy to handle unescaped string and trim the trailing block.
-        //  * `<` and `>`: special characters to start and end HTML tag.
-        //      + No known processors converts `{#<i>foo</i>}` into
-        //        `id="&lt;i&gt;foo&lt;/&gt;"` as of this writing, so hopefully
-        //        this restriction won't cause compatibility issues.
-        //  * `\n` and `\r`: a newline character.
-        //      + Setext heading can have multiple lines. However it is hard to support
-        //        attribute blocks that have newline inside, since the parsing proceeds line by
-        //        line and lines will be separate nodes even they are logically a single text.
-        !matches!(b, b'{' | b'}' | b'<' | b'>' | b'\\' | b'\n' | b'\r')
-    });
-    if ix == 0 {
-        // `{` is not found. No attribute blocks available.
-        return (heading_len, None);
-    }
-    let attr_block_open = ix - 1;
-    if heading[attr_block_open] != b'{' {
-        // `{` is not found. No attribute blocks available.
-        return (heading_len, None);
-    }
-
-    (attr_block_open, Some(ix..attr_block_close))
-}
-
-/// Parses an attribute block content, such as `.class1 #id .class2`.
-///
-/// Returns `(id, classes)`.
-///
-/// It is callers' responsibility to find opening and closing characters of the attribute
-/// block. Usually [`extract_attribute_block_content_from_header_text`] function does it for you.
-///
-/// Note that this parsing requires explicit whitespace separators between
-/// attributes. This is intentional design with the reasons below:
-///
-/// * to keep conversion simple and easy to understand for any possible input,
-/// * to avoid adding less obvious conversion rule that can reduce compatibility
-///   with other implementations more, and
-/// * to follow the major design of implementations with the support for the
-///   attribute blocks extension (as of this writing).
-///
-/// See also: [`Options::ENABLE_HEADING_ATTRIBUTES`].
-///
-/// [`Options::ENABLE_HEADING_ATTRIBUTES`]: `crate::Options::ENABLE_HEADING_ATTRIBUTES`
-fn parse_inside_attribute_block(inside_attr_block: &str) -> Option<HeadingAttributes<'_>> {
-    let mut id = None;
-    let mut classes = Vec::new();
-    let mut attrs = Vec::new();
-
-    for attr in inside_attr_block.split_ascii_whitespace() {
-        // iterator returned by `str::split_ascii_whitespace` never emits empty
-        // strings, so taking first byte won't panic.
-        if attr.len() > 1 {
-            let first_byte = attr.as_bytes()[0];
-            if first_byte == b'#' {
-                id = Some(attr[1..].into());
-            } else if first_byte == b'.' {
-                classes.push(attr[1..].into());
-            } else {
-                let split = attr.split_once('=');
-                if let Some((key, value)) = split {
-                    attrs.push((key.into(), Some(value.into())));
-                } else {
-                    attrs.push((attr.into(), None));
-                }
-            }
-        }
-    }
-
-    Some(HeadingAttributes { id, classes, attrs })
-}
-
-#[cfg(all(target_arch = "x86_64", feature = "simd"))]
-mod simd {
-    //! SIMD byte scanning logic.
-    //!
-    //! This module provides functions that allow walking through byteslices, calling
-    //! provided callback functions on special bytes and their indices using SIMD.
-    //! The byteset is defined in `compute_lookup`.
-    //!
-    //! The idea is to load in a chunk of 16 bytes and perform a lookup into a set of
-    //! bytes on all the bytes in this chunk simultaneously. We produce a 16 bit bitmask
-    //! from this and call the callback on every index corresponding to a 1 in this mask
-    //! before moving on to the next chunk. This allows us to move quickly when there
-    //! are no or few matches.
-    //!
-    //! The table lookup is inspired by this [great overview]. However, since all of the
-    //! bytes we're interested in are ASCII, we don't quite need the full generality of
-    //! the universal algorithm and are hence able to skip a few instructions.
-    //!
-    //! [great overview]: http://0x80.pl/articles/simd-byte-lookup.html
-
-    use super::{LookupTable, LoopInstruction};
-    use crate::Options;
-    use core::arch::x86_64::*;
-
-    const VECTOR_SIZE: usize = std::mem::size_of::<__m128i>();
-
-    /// Generates a lookup table containing the bitmaps for our
-    /// special marker bytes. This is effectively a 128 element 2d bitvector,
-    /// that can be indexed by a four bit row index (the lower nibble)
-    /// and a three bit column index (upper nibble).
-    pub(super) fn compute_lookup(options: &Options) -> [u8; 16] {
-        let mut lookup = [0u8; 16];
-        let standard_bytes = [
-            b'\n', b'\r', b'*', b'_', b'&', b'\\', b'[', b']', b'<', b'!', b'`',
-        ];
-
-        for &byte in &standard_bytes {
-            add_lookup_byte(&mut lookup, byte);
-        }
-        if options.contains(Options::ENABLE_TABLES) {
-            add_lookup_byte(&mut lookup, b'|');
-        }
-        if options.contains(Options::ENABLE_STRIKETHROUGH)
-            || options.contains(Options::ENABLE_SUBSCRIPT)
-        {
-            add_lookup_byte(&mut lookup, b'~');
-        }
-        if options.contains(Options::ENABLE_SUPERSCRIPT) {
-            add_lookup_byte(&mut lookup, b'^');
-        }
-        if options.contains(Options::ENABLE_MATH) {
-            add_lookup_byte(&mut lookup, b'$');
-        }
-        if options.contains(Options::ENABLE_SMART_PUNCTUATION) {
-            for &byte in &[b'.', b'-', b'"', b'\''] {
-                add_lookup_byte(&mut lookup, byte);
-            }
-        }
-
-        lookup
-    }
-
-    fn add_lookup_byte(lookup: &mut [u8; 16], byte: u8) {
-        lookup[(byte & 0x0f) as usize] |= 1 << (byte >> 4);
-    }
-
-    /// Computes a bit mask for the given byteslice starting from the given index,
-    /// where the 16 least significant bits indicate (by value of 1) whether or not
-    /// there is a special character at that byte position. The least significant bit
-    /// corresponds to `bytes[ix]` and the most significant bit corresponds to
-    /// `bytes[ix + 15]`.
-    /// It is only safe to call this function when `bytes.len() >= ix + VECTOR_SIZE`.
-    #[target_feature(enable = "ssse3")]
-    #[inline]
-    unsafe fn compute_mask(lut: &[u8; 16], bytes: &[u8], ix: usize) -> i32 {
-        debug_assert!(bytes.len() >= ix + VECTOR_SIZE);
-
-        let bitmap = _mm_loadu_si128(lut.as_ptr() as *const __m128i);
-        // Small lookup table to compute single bit bitshifts
-        // for 16 bytes at once.
-        let bitmask_lookup =
-            _mm_setr_epi8(1, 2, 4, 8, 16, 32, 64, -128, -1, -1, -1, -1, -1, -1, -1, -1);
-
-        // Load input from memory.
-        let raw_ptr = bytes.as_ptr().add(ix) as *const __m128i;
-        let input = _mm_loadu_si128(raw_ptr);
-        // Compute the bitmap using the bottom nibble as an index
-        // into the lookup table. Note that non-ascii bytes will have
-        // their most significant bit set and will map to lookup[0].
-        let bitset = _mm_shuffle_epi8(bitmap, input);
-        // Compute the high nibbles of the input using a 16-bit rightshift of four
-        // and a mask to prevent most-significant bit issues.
-        let higher_nibbles = _mm_and_si128(_mm_srli_epi16(input, 4), _mm_set1_epi8(0x0f));
-        // Create a bitmask for the bitmap by perform a left shift of the value
-        // of the higher nibble. Bytes with their most significant set are mapped
-        // to -1 (all ones).
-        let bitmask = _mm_shuffle_epi8(bitmask_lookup, higher_nibbles);
-        // Test the bit of the bitmap by AND'ing the bitmap and the mask together.
-        let tmp = _mm_and_si128(bitset, bitmask);
-        // Check whether the result was not null. NEQ is not a SIMD intrinsic,
-        // but comparing to the bitmask is logically equivalent. This also prevents us
-        // from matching any non-ASCII bytes since none of the bitmaps were all ones
-        // (-1).
-        let result = _mm_cmpeq_epi8(tmp, bitmask);
-
-        // Return the resulting bitmask.
-        _mm_movemask_epi8(result)
-    }
-
-    /// Calls callback on byte indices and their value.
-    /// Breaks when callback returns LoopInstruction::BreakAtWith(ix, val). And skips the
-    /// number of bytes in callback return value otherwise.
-    /// Returns the final index and a possible break value.
-    pub(super) fn iterate_special_bytes<F, T>(
-        lut: &LookupTable,
-        bytes: &[u8],
-        ix: usize,
-        callback: F,
-    ) -> (usize, Option<T>)
-    where
-        F: FnMut(usize, u8) -> LoopInstruction<Option<T>>,
-    {
-        if is_x86_feature_detected!("ssse3") && bytes.len() >= VECTOR_SIZE {
-            unsafe { simd_iterate_special_bytes(&lut.simd, bytes, ix, callback) }
-        } else {
-            super::scalar_iterate_special_bytes(&lut.scalar, bytes, ix, callback)
-        }
-    }
-
-    /// Calls the callback function for every 1 in the given bitmask with
-    /// the index `offset + ix`, where `ix` is the position of the 1 in the mask.
-    /// Returns `Ok(ix)` to continue from index `ix`, `Err((end_ix, opt_val)` to break with
-    /// final index `end_ix` and optional value `opt_val`.
-    unsafe fn process_mask<F, T>(
-        mut mask: i32,
-        bytes: &[u8],
-        mut offset: usize,
-        callback: &mut F,
-    ) -> Result<usize, (usize, Option<T>)>
-    where
-        F: FnMut(usize, u8) -> LoopInstruction<Option<T>>,
-    {
-        while mask != 0 {
-            let mask_ix = mask.trailing_zeros() as usize;
-            offset += mask_ix;
-            match callback(offset, *bytes.get_unchecked(offset)) {
-                LoopInstruction::ContinueAndSkip(skip) => {
-                    offset += skip + 1;
-                    let shift = skip + 1 + mask_ix;
-                    if shift >= 32 {
-                        break;
-                    }
-                    mask >>= shift;
-                }
-                LoopInstruction::BreakAtWith(ix, val) => return Err((ix, val)),
-            }
-        }
-        Ok(offset)
-    }
-
-    #[target_feature(enable = "ssse3")]
-    /// Important: only call this function when `bytes.len() >= 16`. Doing
-    /// so otherwise may exhibit undefined behaviour.
-    unsafe fn simd_iterate_special_bytes<F, T>(
-        lut: &[u8; 16],
-        bytes: &[u8],
-        mut ix: usize,
-        mut callback: F,
-    ) -> (usize, Option<T>)
-    where
-        F: FnMut(usize, u8) -> LoopInstruction<Option<T>>,
-    {
-        debug_assert!(bytes.len() >= VECTOR_SIZE);
-        let upperbound = bytes.len() - VECTOR_SIZE;
-
-        while ix < upperbound {
-            let mask = compute_mask(lut, bytes, ix);
-            let block_start = ix;
-            ix = match process_mask(mask, bytes, ix, &mut callback) {
-                Ok(ix) => std::cmp::max(ix, VECTOR_SIZE + block_start),
-                Err((end_ix, val)) => return (end_ix, val),
-            };
-        }
-
-        if bytes.len() > ix {
-            // shift off the bytes at start we have already scanned
-            let mask = compute_mask(lut, bytes, upperbound) >> ix - upperbound;
-            if let Err((end_ix, val)) = process_mask(mask, bytes, ix, &mut callback) {
-                return (end_ix, val);
-            }
-        }
-
-        (bytes.len(), None)
-    }
-
-    #[cfg(test)]
-    mod simd_test {
-        use super::super::create_lut;
-        use super::{iterate_special_bytes, LoopInstruction};
-        use crate::Options;
-
-        fn check_expected_indices(bytes: &[u8], expected: &[usize], skip: usize) {
-            let mut opts = Options::empty();
-            opts.insert(Options::ENABLE_MATH);
-            opts.insert(Options::ENABLE_TABLES);
-            opts.insert(Options::ENABLE_FOOTNOTES);
-            opts.insert(Options::ENABLE_STRIKETHROUGH);
-            opts.insert(Options::ENABLE_SUPERSCRIPT);
-            opts.insert(Options::ENABLE_TASKLISTS);
-
-            let lut = create_lut(&opts);
-            let mut indices = vec![];
-
-            iterate_special_bytes::<_, i32>(&lut, bytes, 0, |ix, _byte_ty| {
-                indices.push(ix);
-                LoopInstruction::ContinueAndSkip(skip)
-            });
-
-            assert_eq!(&indices[..], expected);
-        }
-
-        #[test]
-        fn simple_no_match() {
-            check_expected_indices("abcdef0123456789".as_bytes(), &[], 0);
-        }
-
-        #[test]
-        fn simple_match() {
-            check_expected_indices("*bcd&f0123456789".as_bytes(), &[0, 4], 0);
-        }
-
-        #[test]
-        fn single_open_fish() {
-            check_expected_indices("<".as_bytes(), &[0], 0);
-        }
-
-        #[test]
-        fn long_match() {
-            check_expected_indices("0123456789abcde~*bcd&f0".as_bytes(), &[15, 16, 20], 0);
-        }
-
-        #[test]
-        fn border_skip() {
-            check_expected_indices("0123456789abcde~~~~d&f0".as_bytes(), &[15, 20], 3);
-        }
-
-        #[test]
-        fn exhaustive_search() {
-            let chars = [
-                b'\n', b'\r', b'*', b'_', b'~', b'^', b'|', b'&', b'\\', b'[', b']', b'<', b'!',
-                b'`', b'$', b'{', b'}',
-            ];
-
-            for &c in &chars {
-                for i in 0u8..=255 {
-                    if !chars.contains(&i) {
-                        // full match
-                        let mut buf = [i; 18];
-                        buf[3] = c;
-                        buf[6] = c;
-
-                        check_expected_indices(&buf[..], &[3, 6], 0);
-                    }
-                }
-            }
-        }
-    }
 }

@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use rill_cmark::{Alignment, Event, LinkType, Options, Parser, Tag, TagEnd};
+use rill_cmark::{Alignment, Event, LinkType, Parser, Tag, TagEnd};
 
 use crate::autolink::{self, Finder, Piece};
 use crate::json::{json_string, json_u32};
@@ -38,16 +38,6 @@ impl From<Alignment> for AlignKind {
     }
 }
 
-/// The rill-cmark extensions remark-gfm and remark-math enable.
-fn options() -> Options {
-    Options::ENABLE_TABLES
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_GFM
-        | Options::ENABLE_MATH
-}
-
 /// An event stream the builder cannot turn into MDAST. Every UTF-8 string is valid
 /// Markdown, so these mean a bug in the vendored parser, never bad input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,8 +47,6 @@ pub enum Error {
     Unbalanced,
     /// A child for a node that cannot have children.
     LeafParent,
-    /// An event for an extension the native options disable.
-    DisabledExtension,
     /// NUL must be replaced (see [`without_nul`]) before parsing.
     Nul,
 }
@@ -68,7 +56,6 @@ impl std::fmt::Display for Error {
         f.write_str(match self {
             Error::Unbalanced => "unbalanced parser events",
             Error::LeafParent => "child event inside a leaf node",
-            Error::DisabledExtension => "event for a disabled extension",
             Error::Nul => "source contains NUL",
         })
     }
@@ -1266,7 +1253,7 @@ impl<'s> Builder<'s> {
         let source = self.tree.source;
         if !self.exits.is_empty() && !matches!(event, Event::End(_)) {
             let opens = match event {
-                Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::FootnoteDefinition(_)) => {
+                Event::Start(Tag::BlockQuote | Tag::List(_) | Tag::FootnoteDefinition(_)) => {
                     Opens::Container
                 }
                 Event::Start(Tag::Item) => Opens::Item,
@@ -1408,13 +1395,6 @@ impl<'s> Builder<'s> {
             Event::InlineMath(value) => {
                 self.leaf(MKind::InlineMath(Cow::from(value)), bytes(start, end))
             }
-            Event::DisplayMath(value) => self.leaf(
-                MKind::Math {
-                    value: Cow::from(value),
-                    meta: None,
-                },
-                bytes(start, end),
-            ),
             Event::FootnoteReference(label) => self.leaf(
                 MKind::FootnoteReference {
                     identifier: normalize_identifier(&label),
@@ -1491,8 +1471,8 @@ impl<'s> Builder<'s> {
         let source = self.tree.source;
         let kind = match tag {
             Tag::Paragraph => MKind::Paragraph,
-            Tag::Heading { level, .. } => MKind::Heading(level as u8),
-            Tag::BlockQuote(_) => MKind::Blockquote,
+            Tag::Heading(level) => MKind::Heading(level as u8),
+            Tag::BlockQuote => MKind::Blockquote,
             Tag::CodeBlock(kind) => {
                 let fenced = kind.is_fenced();
                 let (lang, meta) = if fenced {
@@ -1575,12 +1555,6 @@ impl<'s> Builder<'s> {
                     },
                 }
             }
-            Tag::MetadataBlock(_)
-            | Tag::DefinitionList
-            | Tag::DefinitionListTitle
-            | Tag::DefinitionListDefinition
-            | Tag::Superscript
-            | Tag::Subscript => return Err(Error::DisabledExtension),
         };
         self.open(kind, start, end)
     }
@@ -1626,7 +1600,7 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
         starts: Vec::new(),
         exits: Vec::new(),
     };
-    let events = Parser::new_ext(source, options()).into_offset_iter();
+    let events = Parser::new(source).into_offset_iter();
     for (event, range) in events {
         builder.event(event, range.start, range.end)?;
     }
