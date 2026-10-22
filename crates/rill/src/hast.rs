@@ -91,6 +91,17 @@ impl Chain {
     }
 }
 
+impl Edge {
+    /// The point this edge stands for, if any.
+    fn point(self, points: &Points) -> Option<Pt> {
+        match self {
+            Edge::None => None,
+            Edge::Byte(byte) => Some(points.pt(byte)),
+            Edge::Pt(pt) => Some(pt),
+        }
+    }
+}
+
 fn edges(at: At) -> (Edge, Edge) {
     match at {
         At::None => (Edge::None, Edge::None),
@@ -198,6 +209,18 @@ impl<'s> HTree<'s> {
         chain.first = ix;
     }
 
+    /// `first` and the siblings after it.
+    fn siblings(&self, first: Ix) -> impl Iterator<Item = Ix> + '_ {
+        let mut cursor = first;
+        std::iter::from_fn(move || {
+            let ix = cursor;
+            (ix != NIL).then(|| {
+                cursor = self.nodes[ix as usize].next;
+                ix
+            })
+        })
+    }
+
     fn tag(&self, ix: Ix) -> Option<&'static str> {
         match &self.nodes[ix as usize].kind {
             HKind::Element { tag, .. } => Some(tag),
@@ -247,14 +270,14 @@ impl<'s> HTree<'s> {
     }
 
     /// `parent`'s children, in order.
+    pub fn children(&self, parent: Ix) -> impl Iterator<Item = Ix> + '_ {
+        self.siblings(self.nodes[parent as usize].first)
+    }
+
+    /// `parent`'s children, in order, collected so the tree can be edited meanwhile.
+    #[must_use]
     pub fn child_list(&self, parent: Ix) -> Vec<Ix> {
-        let mut out = Vec::new();
-        let mut cursor = self.nodes[parent as usize].first;
-        while cursor != NIL {
-            out.push(cursor);
-            cursor = self.nodes[cursor as usize].next;
-        }
-        out
+        self.children(parent).collect()
     }
 
     /// Makes `children` (detached nodes or `parent`'s own) `parent`'s children.
@@ -693,18 +716,15 @@ impl<'s> ToHast<'_, 's> {
                     props.push(("start", Val::Num(i64::from(start))));
                 }
                 let results = self.all(ix);
-                let mut cursor = results.first;
-                while cursor != NIL {
-                    let task = matches!(
-                        &self.h.nodes[cursor as usize].kind,
+                let has_task = self.h.siblings(results.first).any(|item| {
+                    matches!(
+                        &self.h.nodes[item as usize].kind,
                         HKind::Element { tag: "li", props, .. }
                             if matches!(get(props, "className"), Some(Val::Class("task-list-item")))
-                    );
-                    if task {
-                        props.push(("className", class("contains-task-list")));
-                        break;
-                    }
-                    cursor = self.h.nodes[cursor as usize].next;
+                    )
+                });
+                if has_task {
+                    props.push(("className", class("contains-task-list")));
                 }
                 let children = self.h.wrap(results, true);
                 Chain::one(self.h.element_with(tag, props, at, children))
@@ -1748,10 +1768,8 @@ struct Json<'a, 's> {
 
 impl Json<'_, '_> {
     fn point(&mut self, edge: Edge) {
-        let pt = match edge {
-            Edge::None => return,
-            Edge::Byte(byte) => self.points.pt(byte),
-            Edge::Pt(pt) => pt,
+        let Some(pt) = edge.point(self.points) else {
+            return;
         };
         self.out.push_str("{\"line\":");
         json_u32(&mut self.out, pt.line);
@@ -1783,15 +1801,12 @@ impl Json<'_, '_> {
 
     fn children(&mut self, ix: Ix) {
         self.out.push('[');
-        let mut cursor = self.tree.nodes[ix as usize].first;
-        let mut first = true;
-        while cursor != NIL {
-            if !first {
+        let tree = self.tree;
+        for (index, child) in tree.children(ix).enumerate() {
+            if index > 0 {
                 self.out.push(',');
             }
-            first = false;
-            self.node(cursor);
-            cursor = self.tree.nodes[cursor as usize].next;
+            self.node(child);
         }
         self.out.push(']');
     }
@@ -1901,11 +1916,7 @@ pub struct Context<'a> {
 impl Context<'_> {
     /// A node edge's offset in UTF-16 units, as JavaScript counts it.
     pub fn offset(&self, edge: Edge) -> Option<u32> {
-        match edge {
-            Edge::None => None,
-            Edge::Byte(byte) => Some(self.points.pt(byte).offset),
-            Edge::Pt(pt) => Some(pt.offset),
-        }
+        edge.point(self.points).map(|pt| pt.offset)
     }
 }
 
@@ -2045,10 +2056,8 @@ impl Encoder<'_, '_> {
     }
 
     fn point(&mut self, edge: Edge) {
-        let pt = match edge {
-            Edge::None => return,
-            Edge::Byte(byte) => self.points.pt(byte),
-            Edge::Pt(pt) => pt,
+        let Some(pt) = edge.point(self.points) else {
+            return;
         };
         self.ops.extend([pt.line, pt.column, pt.offset]);
     }
@@ -2060,19 +2069,17 @@ impl Encoder<'_, '_> {
         self.point(end);
     }
 
+    /// The child count, then the children: the count is patched in after them.
     fn children(&mut self, ix: Ix) {
+        let count_slot = self.ops.len();
+        self.ops.push(0);
         let mut count = 0;
-        let mut cursor = self.tree.nodes[ix as usize].first;
-        while cursor != NIL {
+        let tree = self.tree;
+        for child in tree.children(ix) {
+            self.node(child);
             count += 1;
-            cursor = self.tree.nodes[cursor as usize].next;
         }
-        self.ops.push(count);
-        let mut cursor = self.tree.nodes[ix as usize].first;
-        while cursor != NIL {
-            self.node(cursor);
-            cursor = self.tree.nodes[cursor as usize].next;
-        }
+        self.ops[count_slot] = count;
     }
 
     fn value(&mut self, value: &Val<'_>) {
