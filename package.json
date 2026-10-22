@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "get-east-asian-width": "1.5.0",
+    "hast-util-to-html": "9.0.5",
+    "katex": "0.16.47",
     "micromark-extension-cjk-friendly-util": "2.1.1",
     "rehype-harden": "1.1.8",
     "rehype-katex": "7.0.1",
@@ -22,11 +24,12 @@
     "remark-math": "6.0.0",
     "remark-parse": "11.0.0",
     "remark-rehype": "11.1.2",
-    "unified": "11.0.5",
-    "hast-util-to-html": "9.0.5",
-    "katex": "0.16.47"
+    "unified": "11.0.5"
   },
   "workspaces": [
     "js"
-  ]
+  ],
+  "devDependencies": {
+    "binaryen": "132.0.0"
+  }
 }
