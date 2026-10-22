@@ -115,7 +115,15 @@ pub struct Points {
     line_starts: Vec<u32>,
     /// For each non-ASCII character, the byte just past it and how many more UTF-8 bytes
     /// than UTF-16 units the source holds up to there. Empty for ASCII sources.
-    narrowing: Vec<(u32, u32)>,
+    narrowing: Vec<Narrowing>,
+}
+
+/// How far UTF-16 offsets trail byte offsets from `end` on (to the next entry).
+struct Narrowing {
+    /// The byte just past a non-ASCII character.
+    end: u32,
+    /// Extra UTF-8 bytes over UTF-16 units in the source up to `end`.
+    narrowed: u32,
 }
 
 impl Points {
@@ -139,7 +147,10 @@ impl Points {
                 .expect("whole characters are skipped, so `at` starts one");
             at += character.len_utf8();
             narrowed += (character.len_utf8() - character.len_utf16()) as u32;
-            narrowing.push((at as u32, narrowed));
+            narrowing.push(Narrowing {
+                end: at as u32,
+                narrowed,
+            });
         }
         Points {
             line_starts,
@@ -148,9 +159,12 @@ impl Points {
     }
 
     pub fn units(&self, byte: u32) -> u32 {
-        match self.narrowing.partition_point(|&(end, _)| end <= byte) {
+        match self
+            .narrowing
+            .partition_point(|narrowing| narrowing.end <= byte)
+        {
             0 => byte,
-            index => byte - self.narrowing[index - 1].1,
+            index => byte - self.narrowing[index - 1].narrowed,
         }
     }
 
@@ -642,15 +656,30 @@ enum Opens {
     Other,
 }
 
+/// Text collected for the next text node, with its byte span.
+struct PendingText<'s> {
+    value: Cow<'s, str>,
+    start: usize,
+    end: usize,
+}
+
+/// A task item's check (`[x]`) and the paragraph it opens.
+#[derive(Clone, Copy)]
+struct TaskCheck {
+    paragraph: Ix,
+    start: usize,
+    end: usize,
+}
+
 struct Builder<'s> {
     tree: MTree<'s>,
     stack: Vec<Frame>,
-    text: Option<(Cow<'s, str>, usize, usize)>,
+    text: Option<PendingText<'s>>,
     /// Plain text collected for the open image's alt; nested images only add text.
     alt: Option<String>,
     nested_images: usize,
     /// The open task item's paragraph with its check's byte span.
-    task: Option<(Ix, usize, usize)>,
+    task: Option<TaskCheck>,
     /// Starts micromark reports at no real source point (see `task_paragraph`).
     starts: Vec<(Ix, Pt)>,
     exits: Vec<Exit>,
@@ -678,7 +707,7 @@ impl<'s> Builder<'s> {
     }
 
     fn flush_text(&mut self) -> Result<(), Error> {
-        if let Some((value, start, end)) = self.text.take() {
+        if let Some(PendingText { value, start, end }) = self.text.take() {
             let parent = self.parent()?;
             let ix = self
                 .tree
@@ -691,7 +720,11 @@ impl<'s> Builder<'s> {
     fn push_text(&mut self, value: Cow<'s, str>, start: usize, end: usize) {
         let source = self.tree.source;
         match &mut self.text {
-            Some((text, _, text_end)) => {
+            Some(PendingText {
+                value: text,
+                end: text_end,
+                ..
+            }) => {
                 // Contiguous source slices stay one borrow instead of a copy.
                 match (&*text, &value) {
                     (Cow::Borrowed(left), Cow::Borrowed(right)) => {
@@ -706,7 +739,7 @@ impl<'s> Builder<'s> {
                 }
                 *text_end = end;
             }
-            None => self.text = Some((value, start, end)),
+            None => self.text = Some(PendingText { value, start, end }),
         }
     }
 
@@ -935,11 +968,11 @@ impl<'s> Builder<'s> {
             end = content_end;
         }
         self.tree.nodes[ix as usize].at = At::Bytes(start as u32, end as u32);
-        if let Some((paragraph, check_start, check_end)) = self.task
-            && paragraph == ix
+        if let Some(check) = self.task
+            && check.paragraph == ix
         {
             self.task = None;
-            self.task_paragraph(ix, check_start, check_end, end);
+            self.task_paragraph(ix, check.start, check.end, end);
         }
         if matches!(self.tree.nodes[ix as usize].kind, MKind::Paragraph)
             && self.tree.nodes[ix as usize].first == NIL
@@ -1415,7 +1448,11 @@ impl<'s> Builder<'s> {
                         {
                             *slot = Some(checked);
                         }
-                        self.task = Some((self.stack[depth - 1].ix, start, end));
+                        self.task = Some(TaskCheck {
+                            paragraph: self.stack[depth - 1].ix,
+                            start,
+                            end,
+                        });
                     }
                     None => {
                         // A setext heading swallowed the paragraph: the marker is plain text.
