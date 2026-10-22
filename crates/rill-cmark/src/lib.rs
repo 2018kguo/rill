@@ -40,9 +40,7 @@ mod strings;
 mod tree;
 mod unicode_tables;
 
-pub use crate::parse::{
-    BrokenLink, BrokenLinkCallback, DefaultBrokenLinkCallback, OffsetIter, Parser,
-};
+pub use crate::parse::{OffsetIter, Parser};
 pub use crate::scanners::decode_string;
 pub use crate::strings::{CowStr, InlineStr};
 pub use crate::utils::*;
@@ -260,32 +258,14 @@ pub enum LinkType {
     Inline,
     /// Reference link like `[foo][bar]`
     Reference,
-    /// Reference without destination in the document, but resolved by the broken_link_callback
-    ReferenceUnknown,
     /// Collapsed link like `[foo][]`
     Collapsed,
-    /// Collapsed link without destination in the document, but resolved by the broken_link_callback
-    CollapsedUnknown,
     /// Shortcut link like `[foo]`
     Shortcut,
-    /// Shortcut without destination in the document, but resolved by the broken_link_callback
-    ShortcutUnknown,
     /// Autolink like `<http://foo.bar/baz>`
     Autolink,
     /// Email address in autolink like `<john@example.org>`
     Email,
-}
-
-impl LinkType {
-    /// Map the link type to an equivalent _Unknown link type.
-    fn to_unknown(self) -> Self {
-        match self {
-            LinkType::Reference => LinkType::ReferenceUnknown,
-            LinkType::Collapsed => LinkType::CollapsedUnknown,
-            LinkType::Shortcut => LinkType::ShortcutUnknown,
-            _ => unreachable!(),
-        }
-    }
 }
 
 /// Markdown events that are generated in a preorder traversal of the document

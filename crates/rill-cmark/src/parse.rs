@@ -161,19 +161,11 @@ impl ItemBody {
     }
 }
 
-#[derive(Debug)]
-pub struct BrokenLink<'a> {
-    pub span: std::ops::Range<usize>,
-    pub link_type: LinkType,
-    pub reference: CowStr<'a>,
-}
-
 /// Markdown event iterator.
-pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
+pub struct Parser<'input> {
     text: &'input str,
     tree: Tree<Item>,
     allocs: Allocations<'input>,
-    broken_link_callback: Option<F>,
     html_scan_guard: HtmlScanGuard,
 
     // https://github.com/pulldown-cmark/pulldown-cmark/issues/844
@@ -201,49 +193,16 @@ pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
     math_text_delims: CodeDelims,
 }
 
-impl<'input, F> std::fmt::Debug for Parser<'input, F> {
+impl<'input> std::fmt::Debug for Parser<'input> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Only print the fields that have public types.
-        f.debug_struct("Parser")
-            .field("text", &self.text)
-            .field(
-                "broken_link_callback",
-                &self.broken_link_callback.as_ref().map(|_| ..),
-            )
-            .finish()
+        f.debug_struct("Parser").field("text", &self.text).finish()
     }
 }
 
-impl<'a> BrokenLink<'a> {
-    /// Moves the link into version with a static lifetime.
-    ///
-    /// The `reference` member is cloned to a Boxed or Inline version.
-    pub fn into_static(self) -> BrokenLink<'static> {
-        BrokenLink {
-            span: self.span.clone(),
-            link_type: self.link_type,
-            reference: self.reference.into_string().into(),
-        }
-    }
-}
-
-impl<'input> Parser<'input, DefaultBrokenLinkCallback> {
+impl<'input> Parser<'input> {
     /// Creates a new event iterator for a markdown string, with rill's grammar.
     pub fn new(text: &'input str) -> Self {
-        Self::new_with_broken_link_callback(text, None)
-    }
-}
-
-impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
-    /// In case the parser encounters any potential links that have a broken
-    /// reference (e.g `[foo]` when there is no `[foo]: ` entry at the bottom)
-    /// the provided callback will be called with the reference name,
-    /// and the returned pair will be used as the link URL and title if it is not
-    /// `None`.
-    pub fn new_with_broken_link_callback(
-        text: &'input str,
-        broken_link_callback: Option<F>,
-    ) -> Self {
         let (mut tree, allocs) = run_first_pass(text);
         tree.reset();
         let inline_stack = Default::default();
@@ -253,7 +212,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             text,
             tree,
             allocs,
-            broken_link_callback,
             inline_stack,
             link_stack,
             html_scan_guard,
@@ -264,36 +222,24 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         }
     }
 
-    /// Use a link label to fetch a type, url, and title.
+    /// Use a link label to fetch a url and title.
     ///
     /// This function enforces the [`link_ref_expansion_limit`].
     /// If it returns Some, it also consumes some of the fuel.
     /// If we're out of fuel, it immediately returns None.
     ///
     /// The URL and title are found in the [`RefDefs`] map.
-    /// If they're not there, and a callback was provided by the user,
-    /// the [`broken_link_callback`] will be invoked and given the opportunity
-    /// to provide a fallback.
     ///
-    /// The link type (that's "link" or "image") depends on the usage site, and
-    /// is provided by the caller of this function.
-    /// This function returns a new one because, if it has to invoke a callback
-    /// to find the information, the link type is [mapped to an unknown type].
-    ///
-    /// [mapped to an unknown type]: crate::LinkType::to_unknown
     /// [`link_ref_expansion_limit`]: Self::link_ref_expansion_limit
-    /// [`broken_link_callback`]: Self::broken_link_callback
-    fn fetch_link_type_url_title(
+    fn fetch_link_url_title(
         &mut self,
         link_label: CowStr<'input>,
-        span: Range<usize>,
-        link_type: LinkType,
-    ) -> Option<(LinkType, CowStr<'input>, CowStr<'input>)> {
+    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
         if self.link_ref_expansion_limit == 0 {
             return None;
         }
 
-        let (link_type, url, title) = self
+        let (url, title) = self
             .allocs
             .refdefs
             .get(link_label.as_ref())
@@ -305,24 +251,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     .cloned()
                     .unwrap_or_else(|| "".into());
                 let url = matching_def.dest.clone();
-                (link_type, url, title)
-            })
-            .or_else(|| {
-                match self.broken_link_callback.as_mut() {
-                    Some(callback) => {
-                        // Construct a BrokenLink struct, which will be passed to the callback
-                        let broken_link = BrokenLink {
-                            span,
-                            link_type,
-                            reference: link_label,
-                        };
-
-                        callback
-                            .handle_broken_link(broken_link)
-                            .map(|(url, title)| (link_type.to_unknown(), url, title))
-                    }
-                    None => None,
-                }
+                (url, title)
             })?;
 
         // Limit expansion from link references.
@@ -332,7 +261,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             .link_ref_expansion_limit
             .saturating_sub(url.len() + title.len());
 
-        Some((link_type, url, title))
+        Some((url, title))
     }
 
     /// Handle inline markup.
@@ -745,15 +674,9 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     continue;
                                 }
                             } else if let Some((ReferenceLabel::Link(link_label), end)) = label {
-                                if let Some((def_link_type, url, title)) = self
-                                    .fetch_link_type_url_title(
-                                        link_label,
-                                        (self.tree[tos.node].item.start)..end,
-                                        link_type,
-                                    )
-                                {
+                                if let Some((url, title)) = self.fetch_link_url_title(link_label) {
                                     let link_ix =
-                                        self.allocs.allocate_link(def_link_type, url, title, id);
+                                        self.allocs.allocate_link(link_type, url, title, id);
                                     self.tree[tos.node].item.body = if tos.ty == LinkStackTy::Image
                                     {
                                         ItemBody::Image(link_ix)
@@ -1324,7 +1247,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
     /// Consumes the event iterator and produces an iterator that produces
     /// `(Event, Range)` pairs, where the `Range` value maps to the corresponding
     /// range in the markdown source.
-    pub fn into_offset_iter(self) -> OffsetIter<'input, F> {
+    pub fn into_offset_iter(self) -> OffsetIter<'input> {
         OffsetIter { inner: self }
     }
 }
@@ -1838,7 +1761,7 @@ impl<'a> Allocations<'a> {
     }
 
     pub fn take_link(&mut self, ix: LinkIndex) -> (LinkType, CowStr<'a>, CowStr<'a>, CowStr<'a>) {
-        let default_link = (LinkType::ShortcutUnknown, "".into(), "".into(), "".into());
+        let default_link = (LinkType::Shortcut, "".into(), "".into(), "".into());
         std::mem::replace(&mut self.links[ix.0], default_link)
     }
 
@@ -1884,51 +1807,6 @@ pub(crate) struct HtmlScanGuard {
     pub comment: usize,
 }
 
-/// Trait for broken link callbacks.
-///
-/// See [Parser::new_with_broken_link_callback].
-/// Automatically implemented for closures with the appropriate signature.
-pub trait BrokenLinkCallback<'input> {
-    fn handle_broken_link(
-        &mut self,
-        link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)>;
-}
-
-impl<'input, T> BrokenLinkCallback<'input> for T
-where
-    T: FnMut(BrokenLink<'input>) -> Option<(CowStr<'input>, CowStr<'input>)>,
-{
-    fn handle_broken_link(
-        &mut self,
-        link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
-        self(link)
-    }
-}
-
-impl<'input> BrokenLinkCallback<'input> for Box<dyn BrokenLinkCallback<'input>> {
-    fn handle_broken_link(
-        &mut self,
-        link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
-        (**self).handle_broken_link(link)
-    }
-}
-
-/// Broken link callback that does nothing.
-#[derive(Debug)]
-pub struct DefaultBrokenLinkCallback;
-
-impl<'input> BrokenLinkCallback<'input> for DefaultBrokenLinkCallback {
-    fn handle_broken_link(
-        &mut self,
-        _link: BrokenLink<'input>,
-    ) -> Option<(CowStr<'input>, CowStr<'input>)> {
-        None
-    }
-}
-
 /// Markdown event and source range iterator.
 ///
 /// Generates tuples where the first element is the markdown event and the second
@@ -1937,11 +1815,11 @@ impl<'input> BrokenLinkCallback<'input> for DefaultBrokenLinkCallback {
 /// Constructed from a `Parser` using its
 /// [`into_offset_iter`](struct.Parser.html#method.into_offset_iter) method.
 #[derive(Debug)]
-pub struct OffsetIter<'a, F = DefaultBrokenLinkCallback> {
-    inner: Parser<'a, F>,
+pub struct OffsetIter<'a> {
+    inner: Parser<'a>,
 }
 
-impl<'a, F: BrokenLinkCallback<'a>> Iterator for OffsetIter<'a, F> {
+impl<'a> Iterator for OffsetIter<'a> {
     type Item = (Event<'a>, Range<usize>);
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2093,7 +1971,7 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
     Event::Start(tag)
 }
 
-impl<'a, F: BrokenLinkCallback<'a>> Iterator for Parser<'a, F> {
+impl<'a> Iterator for Parser<'a> {
     type Item = Event<'a>;
 
     fn next(&mut self) -> Option<Event<'a>> {
@@ -2142,7 +2020,7 @@ impl<'a, F: BrokenLinkCallback<'a>> Iterator for Parser<'a, F> {
     }
 }
 
-impl<'a, F: BrokenLinkCallback<'a>> FusedIterator for Parser<'a, F> {}
+impl<'a> FusedIterator for Parser<'a> {}
 
 #[cfg(test)]
 mod test {
@@ -2430,57 +2308,6 @@ mod test {
     }
 
     #[test]
-    fn broken_links_called_only_once() {
-        for &(markdown, expected) in &[
-            ("See also [`g()`][crate::g].", 1),
-            ("See also [`g()`][crate::g][].", 1),
-            ("[brokenlink1] some other node [brokenlink2]", 2),
-        ] {
-            let mut times_called = 0;
-            let callback = &mut |_broken_link: BrokenLink| {
-                times_called += 1;
-                None
-            };
-            let parser = Parser::new_with_broken_link_callback(markdown, Some(callback));
-            for _ in parser {}
-            assert_eq!(times_called, expected);
-        }
-    }
-
-    #[test]
-    fn simple_broken_link_callback() {
-        let test_str = "This is a link w/o def: [hello][world]";
-        let mut callback = |broken_link: BrokenLink| {
-            assert_eq!("world", broken_link.reference.as_ref());
-            assert_eq!(&test_str[broken_link.span], "[hello][world]");
-            let url = "YOLO".into();
-            let title = "SWAG".to_owned().into();
-            Some((url, title))
-        };
-        let parser = Parser::new_with_broken_link_callback(test_str, Some(&mut callback));
-        let mut link_tag_count = 0;
-        for (typ, url, title, id) in parser.filter_map(|event| match event {
-            Event::Start(tag) => match tag {
-                Tag::Link {
-                    link_type,
-                    dest_url,
-                    title,
-                    id,
-                } => Some((link_type, dest_url, title, id)),
-                _ => None,
-            },
-            _ => None,
-        }) {
-            link_tag_count += 1;
-            assert_eq!(typ, LinkType::ReferenceUnknown);
-            assert_eq!(url.as_ref(), "YOLO");
-            assert_eq!(title.as_ref(), "SWAG");
-            assert_eq!(id.as_ref(), "world");
-        }
-        assert!(link_tag_count > 0);
-    }
-
-    #[test]
     fn code_block_kind_check_fenced() {
         let parser = Parser::new("hello\n```test\ntadam\n```");
         let mut found = 0;
@@ -2509,32 +2336,6 @@ mod test {
             }
         }
         assert_eq!(found, 1);
-    }
-
-    #[test]
-    fn common_lifetime_patterns_allowed<'b>() {
-        let temporary_str = String::from("xyz");
-
-        // NOTE: this is a limitation of Rust, it doesn't allow putting lifetime parameters on the closure itself.
-        // Hack it by attaching the lifetime to the test function instead.
-        // TODO: why is the `'b` lifetime required at all? Changing it to `'_` breaks things :(
-        let mut closure = |link: BrokenLink<'b>| Some(("#".into(), link.reference));
-
-        fn function(link: BrokenLink<'_>) -> Option<(CowStr<'_>, CowStr<'_>)> {
-            Some(("#".into(), link.reference))
-        }
-
-        for _ in Parser::new_with_broken_link_callback("static lifetime", Some(&mut closure)) {}
-        /* This fails to compile. Because the closure can't say `for <'a> fn(BrokenLink<'a>) ->
-         * CowStr<'a>` and has to use the enclosing `'b` lifetime parameter, `temporary_str` lives
-         * shorter than `'b`. I think this is unlikely to occur in real life, and if it does, the
-         * fix is simple: move it out to a function that allows annotating the lifetimes.
-         */
-        //for _ in Parser::new_with_broken_link_callback(&temporary_str, Some(&mut callback)) {
-        //}
-
-        for _ in Parser::new_with_broken_link_callback("static lifetime", Some(&mut function)) {}
-        for _ in Parser::new_with_broken_link_callback(&temporary_str, Some(&mut function)) {}
     }
 
     #[test]
