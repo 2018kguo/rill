@@ -374,13 +374,6 @@ pub fn normalize_identifier(label: &str) -> String {
     collapsed.to_lowercase().to_uppercase().to_lowercase()
 }
 
-fn cow<'s>(value: rill_cmark::CowStr<'s>) -> Cow<'s, str> {
-    match value {
-        rill_cmark::CowStr::Borrowed(borrowed) => Cow::Borrowed(borrowed),
-        other => Cow::Owned(other.to_string()),
-    }
-}
-
 /// Where `slice` sits in `source`, if it is a subslice of it.
 fn source_offset(source: &str, slice: &str) -> Option<usize> {
     let start = (slice.as_ptr() as usize).checked_sub(source.as_ptr() as usize)?;
@@ -1171,7 +1164,7 @@ impl<'s> Builder<'s> {
                     && start > previous_end
                     && bytes[start - 1] == b'\\'
                     && bytes.get(start).is_some_and(u8::is_ascii_punctuation);
-                self.push_text(cow(text), start - usize::from(escaped), end);
+                self.push_text(Cow::from(text), start - usize::from(escaped), end);
                 Ok(())
             }
             Event::Html(html) => match self.kind_mut() {
@@ -1181,12 +1174,14 @@ impl<'s> Builder<'s> {
                 }
                 _ => Err(Error::Unbalanced),
             },
-            Event::InlineHtml(html) => self.leaf(MKind::Html(cow(html)), bytes(start, end)),
-            Event::Code(code) => self.leaf(MKind::InlineCode(cow(code)), bytes(start, end)),
-            Event::InlineMath(value) => self.leaf(MKind::InlineMath(cow(value)), bytes(start, end)),
+            Event::InlineHtml(html) => self.leaf(MKind::Html(Cow::from(html)), bytes(start, end)),
+            Event::Code(code) => self.leaf(MKind::InlineCode(Cow::from(code)), bytes(start, end)),
+            Event::InlineMath(value) => {
+                self.leaf(MKind::InlineMath(Cow::from(value)), bytes(start, end))
+            }
             Event::DisplayMath(value) => self.leaf(
                 MKind::Math {
-                    value: cow(value),
+                    value: Cow::from(value),
                     meta: None,
                 },
                 bytes(start, end),
@@ -1194,7 +1189,7 @@ impl<'s> Builder<'s> {
             Event::FootnoteReference(label) => self.leaf(
                 MKind::FootnoteReference {
                     identifier: normalize_identifier(&label),
-                    label: label.to_string(),
+                    label: label.into_string(),
                 },
                 bytes(start, end),
             ),
@@ -1215,8 +1210,8 @@ impl<'s> Builder<'s> {
                 }
                 self.leaf(
                     MKind::Definition {
-                        url: cow(dest),
-                        title: title.map(cow),
+                        url: Cow::from(dest),
+                        title: title.map(Cow::from),
                         identifier: normalize_identifier(&label),
                         label: rill_cmark::decode_string(&label),
                     },
@@ -1298,7 +1293,7 @@ impl<'s> Builder<'s> {
             },
             Tag::FootnoteDefinition(label) => MKind::FootnoteDefinition {
                 identifier: normalize_identifier(&label),
-                label: label.to_string(),
+                label: label.into_string(),
             },
             Tag::Table(align) => MKind::Table(
                 align
@@ -1331,9 +1326,9 @@ impl<'s> Builder<'s> {
                     url: if link_type == LinkType::Email {
                         Cow::Owned(format!("mailto:{dest_url}"))
                     } else {
-                        cow(dest_url)
+                        Cow::from(dest_url)
                     },
-                    title: (!title.is_empty()).then(|| cow(title)),
+                    title: (!title.is_empty()).then(|| Cow::from(title)),
                 },
             },
             Tag::Image {
@@ -1351,8 +1346,8 @@ impl<'s> Builder<'s> {
                         alt: String::new(),
                     },
                     None => MKind::Image {
-                        url: cow(dest_url),
-                        title: (!title.is_empty()).then(|| cow(title)),
+                        url: Cow::from(dest_url),
+                        title: (!title.is_empty()).then(|| Cow::from(title)),
                         alt: String::new(),
                     },
                 }
