@@ -76,6 +76,7 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// micromark replaces NUL with U+FFFD; both are one UTF-16 unit, so positions agree.
+#[must_use]
 pub fn without_nul(source: &str) -> Cow<'_, str> {
     if source.contains('\0') {
         Cow::Owned(source.replace('\0', "\u{fffd}"))
@@ -127,6 +128,7 @@ struct Narrowing {
 }
 
 impl Points {
+    #[must_use]
     pub fn new(source: &str) -> Self {
         let bytes = source.as_bytes();
         let mut line_starts = vec![0];
@@ -158,6 +160,7 @@ impl Points {
         }
     }
 
+    #[must_use]
     pub fn units(&self, byte: u32) -> u32 {
         match self
             .narrowing
@@ -168,6 +171,7 @@ impl Points {
         }
     }
 
+    #[must_use]
     pub fn pt(&self, byte: u32) -> Pt {
         let line = self.line_starts.partition_point(|start| *start <= byte);
         let offset = self.units(byte);
@@ -272,6 +276,7 @@ pub enum MKind<'s> {
 
 impl MKind<'_> {
     /// The mdast `type`.
+    #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
             MKind::Root => "root",
@@ -347,10 +352,12 @@ impl<'s> MTree<'s> {
         self.nodes[parent as usize].last = child;
     }
 
+    #[must_use]
     pub fn node(&self, ix: Ix) -> &MNode<'s> {
         &self.nodes[ix as usize]
     }
 
+    #[must_use]
     pub fn children(&self, parent: Ix) -> Children<'_, 's> {
         Children {
             tree: self,
@@ -366,6 +373,7 @@ impl<'s> MTree<'s> {
         }
     }
 
+    #[must_use]
     pub fn pt_range(&self, at: At) -> Option<(Pt, Pt)> {
         match at {
             At::None => None,
@@ -375,6 +383,7 @@ impl<'s> MTree<'s> {
     }
 
     /// The tree as remark's MDAST JSON, positions in UTF-16 units.
+    #[must_use]
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(self.source.len() * 6 + 64);
         self.write_json(&mut out, MTree::ROOT);
@@ -1432,24 +1441,30 @@ impl<'s> Builder<'s> {
                 )
             }
             Event::TaskListMarker(checked) => {
-                let depth = self.stack.len();
-                let item = (depth >= 2)
-                    .then(|| (self.stack[depth - 2].ix, self.stack[depth - 1].ix))
-                    .filter(|&(item, paragraph)| {
-                        matches!(self.tree.nodes[paragraph as usize].kind, MKind::Paragraph)
-                            && matches!(self.tree.nodes[item as usize].kind, MKind::ListItem { .. })
-                            && self.tree.nodes[item as usize].first == paragraph
-                    })
-                    .map(|(item, _)| item);
-                match item {
-                    Some(item) => {
+                // The check belongs to an item whose first child is the open paragraph.
+                let task = match self.stack.as_slice() {
+                    [.., item, paragraph]
+                        if matches!(
+                            self.tree.nodes[paragraph.ix as usize].kind,
+                            MKind::Paragraph
+                        ) && matches!(
+                            self.tree.nodes[item.ix as usize].kind,
+                            MKind::ListItem { .. }
+                        ) && self.tree.nodes[item.ix as usize].first == paragraph.ix =>
+                    {
+                        Some((item.ix, paragraph.ix))
+                    }
+                    _ => None,
+                };
+                match task {
+                    Some((item, paragraph)) => {
                         if let MKind::ListItem { checked: slot, .. } =
                             &mut self.tree.nodes[item as usize].kind
                         {
                             *slot = Some(checked);
                         }
                         self.task = Some(TaskCheck {
-                            paragraph: self.stack[depth - 1].ix,
+                            paragraph,
                             start,
                             end,
                         });
@@ -1607,7 +1622,8 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
         starts: Vec::new(),
         exits: Vec::new(),
     };
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+    let events = Parser::new_ext(source, options()).into_offset_iter();
+    for (event, range) in events {
         builder.event(event, range.start, range.end)?;
     }
     builder.flush_text()?;
