@@ -619,7 +619,7 @@ fn push_cow<'s>(target: &mut Cow<'s, str>, value: &str) {
 // ---------------------------------------------------------------------------
 
 struct Frame {
-    ix: Ix,
+    node: Ix,
     start: usize,
     end: usize,
     /// Spaces pulldown synthesized from a partly consumed tab at an indented code start.
@@ -628,7 +628,7 @@ struct Frame {
 
 /// A closed node whose end waits on what opens the line that closed it.
 struct Exit {
-    ix: Ix,
+    node: Ix,
     settle: Settle,
     /// pulldown's end: the start of the line that closed it.
     closing: usize,
@@ -698,12 +698,12 @@ impl<'s> Builder<'s> {
     fn parent(&self) -> Result<Ix, Error> {
         self.stack
             .last()
-            .map(|frame| frame.ix)
+            .map(|frame| frame.node)
             .ok_or(Error::Unbalanced)
     }
 
     fn kind_mut(&mut self) -> Option<&mut MKind<'s>> {
-        let ix = self.stack.last()?.ix;
+        let ix = self.stack.last()?.node;
         Some(&mut self.tree.nodes[ix as usize].kind)
     }
 
@@ -758,7 +758,7 @@ impl<'s> Builder<'s> {
         let ix = self.tree.push(kind, At::None);
         self.tree.append(parent, ix);
         self.stack.push(Frame {
-            ix,
+            node: ix,
             start,
             end,
             synthesized: 0,
@@ -770,7 +770,7 @@ impl<'s> Builder<'s> {
     fn quote_depth(&self) -> usize {
         self.stack
             .iter()
-            .filter(|frame| matches!(self.tree.nodes[frame.ix as usize].kind, MKind::Blockquote))
+            .filter(|frame| matches!(self.tree.nodes[frame.node as usize].kind, MKind::Blockquote))
             .count()
     }
 
@@ -778,7 +778,7 @@ impl<'s> Builder<'s> {
     fn in_container(&self) -> bool {
         self.stack.iter().any(|frame| {
             matches!(
-                self.tree.nodes[frame.ix as usize].kind,
+                self.tree.nodes[frame.node as usize].kind,
                 MKind::Blockquote | MKind::ListItem { .. } | MKind::FootnoteDefinition { .. }
             )
         })
@@ -790,7 +790,7 @@ impl<'s> Builder<'s> {
             return Err(Error::Unbalanced);
         }
         let Frame {
-            ix,
+            node: ix,
             mut start,
             mut end,
             synthesized,
@@ -824,7 +824,7 @@ impl<'s> Builder<'s> {
             let (line_start, line_end) = closing_line(source, end);
             line_end == source.len() && self.continued_prefix_end(line_start).0 == source.len()
         };
-        let parent = self.stack.last().map_or(NIL, |frame| frame.ix);
+        let parent = self.stack.last().map_or(NIL, |frame| frame.node);
         let mut exit = None;
         // A container's content end; its own end settles later (see `settle_exits`).
         let mut container_end = None;
@@ -845,7 +845,7 @@ impl<'s> Builder<'s> {
                 (end, defer) = fence_end(source, value, start, end, in_container);
                 if defer {
                     exit = Some(Exit {
-                        ix,
+                        node: ix,
                         settle: Settle::Fence {
                             in_blockquote,
                             prefixes: fence_prefixes,
@@ -913,7 +913,7 @@ impl<'s> Builder<'s> {
                 *item_spread = spread;
                 if pending {
                     exit = Some(Exit {
-                        ix,
+                        node: ix,
                         settle: Settle::Item { list: parent },
                         closing: end,
                         content_end: end,
@@ -969,7 +969,7 @@ impl<'s> Builder<'s> {
         }
         if let Some(content_end) = container_end {
             exit = Some(Exit {
-                ix,
+                node: ix,
                 settle: Settle::Container { eof_prefixed },
                 closing: end,
                 content_end,
@@ -1005,7 +1005,7 @@ impl<'s> Builder<'s> {
     fn settle_exits(&mut self, next: Option<(usize, Opens)>) {
         let exits = std::mem::take(&mut self.exits);
         for Exit {
-            ix,
+            node: ix,
             settle,
             closing,
             content_end,
@@ -1028,7 +1028,7 @@ impl<'s> Builder<'s> {
     fn settle_item(&mut self, ix: Ix, list: Ix, next: Option<(usize, Opens)>) {
         let source = self.tree.source;
         // Only a sibling's prefix: an outer list's closes this list first.
-        let sibling = self.stack.last().is_some_and(|frame| frame.ix == list);
+        let sibling = self.stack.last().is_some_and(|frame| frame.node == list);
         if let Some((_, last_end)) = self.tree.bytes(self.tree.nodes[ix as usize].last)
             && let At::Bytes(_, item_end) = &mut self.tree.nodes[ix as usize].at
         {
@@ -1156,7 +1156,7 @@ impl<'s> Builder<'s> {
         let source = self.tree.source;
         self.stack
             .iter()
-            .filter_map(|frame| match self.tree.nodes[frame.ix as usize].kind {
+            .filter_map(|frame| match self.tree.nodes[frame.node as usize].kind {
                 MKind::Blockquote => Some(Prefix::Quote),
                 // ponytail: four columns from the line start, exact at the top level.
                 MKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
@@ -1222,7 +1222,7 @@ impl<'s> Builder<'s> {
 
     /// Removes `ix`, the newest child of the current parent frame.
     fn unlink_last_child(&mut self, ix: Ix) {
-        let Some(parent) = self.stack.last().map(|frame| frame.ix) else {
+        let Some(parent) = self.stack.last().map(|frame| frame.node) else {
             return;
         };
         let previous = self.previous_sibling(parent, ix);
@@ -1306,7 +1306,10 @@ impl<'s> Builder<'s> {
             Event::End(TagEnd::Image) => {
                 let alt = self.alt.take().unwrap_or_default();
                 let Frame {
-                    ix, start, mut end, ..
+                    node: ix,
+                    start,
+                    mut end,
+                    ..
                 } = self.stack.pop().ok_or(Error::Unbalanced)?;
                 match &mut self.tree.nodes[ix as usize].kind {
                     MKind::Image { alt: slot, .. } => *slot = alt,
@@ -1383,7 +1386,7 @@ impl<'s> Builder<'s> {
                 let previous_end = self
                     .stack
                     .last()
-                    .and_then(|frame| self.tree.bytes(self.tree.nodes[frame.ix as usize].last))
+                    .and_then(|frame| self.tree.bytes(self.tree.nodes[frame.node as usize].last))
                     .map_or(0, |(_, end)| end as usize);
                 let escaped = self.text.is_none()
                     && start > previous_end
@@ -1445,14 +1448,14 @@ impl<'s> Builder<'s> {
                 let task = match self.stack.as_slice() {
                     [.., item, paragraph]
                         if matches!(
-                            self.tree.nodes[paragraph.ix as usize].kind,
+                            self.tree.nodes[paragraph.node as usize].kind,
                             MKind::Paragraph
                         ) && matches!(
-                            self.tree.nodes[item.ix as usize].kind,
+                            self.tree.nodes[item.node as usize].kind,
                             MKind::ListItem { .. }
-                        ) && self.tree.nodes[item.ix as usize].first == paragraph.ix =>
+                        ) && self.tree.nodes[item.node as usize].first == paragraph.node =>
                     {
-                        Some((item.ix, paragraph.ix))
+                        Some((item.node, paragraph.node))
                     }
                     _ => None,
                 };
@@ -1610,7 +1613,7 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
     let mut builder = Builder {
         tree,
         stack: vec![Frame {
-            ix: MTree::ROOT,
+            node: MTree::ROOT,
             start: 0,
             end: source.len(),
             synthesized: 0,
