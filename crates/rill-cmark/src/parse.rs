@@ -211,7 +211,6 @@ pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
     // used by inline passes. store them here for reuse
     inline_stack: InlineStack,
     link_stack: LinkStack,
-    wikilink_stack: LinkStack,
     code_delims: CodeDelims,
     math_text_delims: CodeDelims,
 }
@@ -270,7 +269,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         tree.reset();
         let inline_stack = Default::default();
         let link_stack = Default::default();
-        let wikilink_stack = Default::default();
         let html_scan_guard = Default::default();
         Parser {
             text,
@@ -280,7 +278,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             broken_link_callback,
             inline_stack,
             link_stack,
-            wikilink_stack,
             html_scan_guard,
             // always allow 100KiB
             link_ref_expansion_limit: text.len().max(100_000),
@@ -582,16 +579,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     self.tree[cur_ix].item.body = ItemBody::Text {
                         backslash_escaped: false,
                     };
-                    let link_open_doubled = self.tree[cur_ix]
-                        .next
-                        .map(|ix| self.tree[ix].item.body == ItemBody::MaybeLinkOpen)
-                        .unwrap_or(false);
-                    if self.options.contains(Options::ENABLE_WIKILINKS) && link_open_doubled {
-                        self.wikilink_stack.push(LinkStackEl {
-                            node: cur_ix,
-                            ty: LinkStackTy::Link,
-                        });
-                    }
                     self.link_stack.push(LinkStackEl {
                         node: cur_ix,
                         ty: LinkStackTy::Link,
@@ -601,16 +588,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     self.tree[cur_ix].item.body = ItemBody::Text {
                         backslash_escaped: false,
                     };
-                    let link_open_doubled = self.tree[cur_ix]
-                        .next
-                        .map(|ix| self.tree[ix].item.body == ItemBody::MaybeLinkOpen)
-                        .unwrap_or(false);
-                    if self.options.contains(Options::ENABLE_WIKILINKS) && link_open_doubled {
-                        self.wikilink_stack.push(LinkStackEl {
-                            node: cur_ix,
-                            ty: LinkStackTy::Image,
-                        });
-                    }
                     self.link_stack.push(LinkStackEl {
                         node: cur_ix,
                         ty: LinkStackTy::Image,
@@ -621,19 +598,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                         backslash_escaped: false,
                     };
                     let tos_link = self.link_stack.pop();
-                    if self.options.contains(Options::ENABLE_WIKILINKS)
-                        && self.tree[cur_ix]
-                            .next
-                            .map(|ix| {
-                                matches!(self.tree[ix].item.body, ItemBody::MaybeLinkClose(..))
-                            })
-                            .unwrap_or(false)
-                    {
-                        if let Some(node) = self.handle_wikilink(block_text, cur_ix, prev) {
-                            cur = self.tree[node].next;
-                            continue;
-                        }
-                    }
                     if let Some(tos) = tos_link {
                         // skip rendering if already in a link, unless its an
                         // image
@@ -874,7 +838,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             cur = self.tree[cur_ix].next;
         }
         self.link_stack.clear();
-        self.wikilink_stack.clear();
         self.code_delims.clear();
         self.math_text_delims.clear();
     }
@@ -987,95 +950,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             }
             p += c.len_utf8();
         }
-        None
-    }
-
-    /// Handles a wikilink.
-    ///
-    /// This function may bail early in case the link is malformed, so this
-    /// acts as a control flow guard. Returns the link node if a wikilink was
-    /// found and created.
-    fn handle_wikilink(
-        &mut self,
-        block_text: &'input str,
-        cur_ix: TreeIndex,
-        prev: Option<TreeIndex>,
-    ) -> Option<TreeIndex> {
-        let next_ix = self.tree[cur_ix].next.unwrap();
-        // this is a wikilink closing delim, try popping from
-        // the wikilink stack
-        if let Some(tos) = self.wikilink_stack.pop() {
-            if tos.ty == LinkStackTy::Disabled {
-                return None;
-            }
-            // fetches the beginning of the wikilink body
-            let Some(body_node) = self.tree[tos.node].next.and_then(|ix| self.tree[ix].next) else {
-                // skip if no next node exists, like at end of input
-                return None;
-            };
-            let start_ix = self.tree[body_node].item.start;
-            let end_ix = self.tree[cur_ix].item.start;
-            let wikilink = match scan_wikilink_pipe(
-                block_text,
-                start_ix, // bounded by closing tag
-                end_ix - start_ix,
-            ) {
-                Some((rest, wikitext)) => {
-                    // bail early if the wikiname would be empty
-                    if wikitext.is_empty() {
-                        return None;
-                    }
-                    // [[WikiName|rest]]
-                    let body_node = scan_nodes_to_ix(&self.tree, Some(body_node), rest);
-                    if let Some(body_node) = body_node {
-                        // break node so passes can actually format
-                        // the display text
-                        self.tree[body_node].item.start = rest;
-                        Some((true, body_node, wikitext))
-                    } else {
-                        None
-                    }
-                }
-                None => {
-                    let wikitext = &block_text[start_ix..end_ix];
-                    // bail early if the wikiname would be empty
-                    if wikitext.is_empty() {
-                        return None;
-                    }
-                    let body_node = self.tree.create_node(Item {
-                        start: start_ix,
-                        end: end_ix,
-                        body: ItemBody::Text {
-                            backslash_escaped: false,
-                        },
-                    });
-                    Some((false, body_node, wikitext))
-                }
-            };
-
-            if let Some((has_pothole, body_node, wikiname)) = wikilink {
-                let link_ix = self.allocs.allocate_link(
-                    LinkType::WikiLink { has_pothole },
-                    wikiname.into(),
-                    "".into(),
-                    "".into(),
-                );
-                if let Some(prev_ix) = prev {
-                    self.tree[prev_ix].next = None;
-                }
-                if tos.ty == LinkStackTy::Image {
-                    self.tree[tos.node].item.body = ItemBody::Image(link_ix);
-                } else {
-                    self.tree[tos.node].item.body = ItemBody::Link(link_ix);
-                }
-                self.tree[tos.node].child = Some(body_node);
-                self.tree[tos.node].next = self.tree[next_ix].next;
-                self.tree[tos.node].item.end = end_ix + 2;
-                self.disable_all_links();
-                return Some(tos.node);
-            }
-        }
-
         None
     }
 
@@ -1234,7 +1108,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
 
     fn disable_all_links(&mut self) {
         self.link_stack.disable_all_links();
-        self.wikilink_stack.disable_all_links();
     }
 
     /// Returns next byte index, url and title.
@@ -2480,29 +2353,6 @@ mod test {
     }
 
     #[test]
-    fn issue_1030() {
-        let mut opts = Options::empty();
-        opts.insert(Options::ENABLE_WIKILINKS);
-
-        let parser = Parser::new_ext("For a new ferrari, [[Wikientry|click here]]!", opts);
-
-        let offsets = parser
-            .into_offset_iter()
-            .map(|(_ev, range)| range)
-            .collect::<Vec<_>>();
-        let expected_offsets = vec![
-            (0..44),  // Paragraph START
-            (0..19),  // `For a new ferrari, `
-            (19..43), // Wikilink START
-            (31..41), // `click here`
-            (19..43), // Wikilink END
-            (43..44), // `!`
-            (0..44),  // Paragraph END
-        ];
-        assert_eq!(offsets, expected_offsets);
-    }
-
-    #[test]
     fn issue_320() {
         // dont crash
         parser_with_extensions(":\r\t> |\r:\r\t> |\r").count();
@@ -2896,34 +2746,6 @@ text
             Event::InlineHtml(CowStr::Boxed("<foo\nbar>".to_string().into())),
             Event::End(TagEnd::Paragraph),
             Event::End(TagEnd::BlockQuote(None)),
-        ];
-        assert_eq!(&events, &expected);
-    }
-
-    #[test]
-    fn wikilink_has_pothole() {
-        let input = "[[foo]] [[bar|baz]]";
-        let events: Vec<_> = Parser::new_ext(input, Options::ENABLE_WIKILINKS).collect();
-        let expected = [
-            Event::Start(Tag::Paragraph),
-            Event::Start(Tag::Link {
-                link_type: LinkType::WikiLink { has_pothole: false },
-                dest_url: CowStr::Borrowed("foo"),
-                title: CowStr::Borrowed(""),
-                id: CowStr::Borrowed(""),
-            }),
-            Event::Text(CowStr::Borrowed("foo")),
-            Event::End(TagEnd::Link),
-            Event::Text(CowStr::Borrowed(" ")),
-            Event::Start(Tag::Link {
-                link_type: LinkType::WikiLink { has_pothole: true },
-                dest_url: CowStr::Borrowed("bar"),
-                title: CowStr::Borrowed(""),
-                id: CowStr::Borrowed(""),
-            }),
-            Event::Text(CowStr::Borrowed("baz")),
-            Event::End(TagEnd::Link),
-            Event::End(TagEnd::Paragraph),
         ];
         assert_eq!(&events, &expected);
     }

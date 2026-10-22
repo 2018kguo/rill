@@ -909,20 +909,6 @@ pub(crate) fn scan_entity(bytes: &[u8]) -> (usize, Option<CowStr<'static>>) {
     (0, None)
 }
 
-pub(crate) fn scan_wikilink_pipe(data: &str, start_ix: usize, len: usize) -> Option<(usize, &str)> {
-    let bytes = data.as_bytes();
-    let end_ix = std::cmp::min(start_ix + len, bytes.len());
-    let mut i = start_ix;
-
-    while i < end_ix {
-        if bytes[i] == b'|' {
-            return Some((i + 1, &data[start_ix..i]));
-        }
-        i += 1;
-    }
-    None
-}
-
 // note: dest returned is raw, still needs to be unescaped
 // TODO: check that nested parens are really not allowed for refdefs
 // TODO(performance): this func should probably its own unescaping
