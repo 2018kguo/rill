@@ -2317,13 +2317,8 @@ fn create_lut(options: &Options) -> LookupTable {
     if options.contains(Options::ENABLE_TABLES) {
         bytes[b'|' as usize] = true;
     }
-    if options.contains(Options::ENABLE_STRIKETHROUGH)
-        || options.contains(Options::ENABLE_SUBSCRIPT)
-    {
+    if options.contains(Options::ENABLE_STRIKETHROUGH) {
         bytes[b'~' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_SUPERSCRIPT) {
-        bytes[b'^' as usize] = true;
     }
     if options.contains(Options::ENABLE_MATH) {
         bytes[b'$' as usize] = true;

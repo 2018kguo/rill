@@ -70,8 +70,6 @@ pub(crate) enum ItemBody {
     Emphasis,
     Strong,
     Strikethrough,
-    Superscript,
-    Subscript,
     Math(CowIndex, bool), // true for display math
     Code(CowIndex),
     Link(LinkIndex),
@@ -1121,7 +1119,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         let mut prev_ix: TreeIndex;
         let mut cur = self.tree.cur();
 
-
         while let Some(mut cur_ix) = cur {
             match self.tree[cur_ix].item.body {
                 ItemBody::MaybeEmphasis(mut count, can_open, can_close)
@@ -1159,36 +1156,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     1
                                 };
                                 let ty = if c == b'~' {
-                                    if inc == 2 {
-                                        if self.options.contains(Options::ENABLE_STRIKETHROUGH) {
-                                            ItemBody::Strikethrough
-                                        } else {
-                                            ItemBody::Text {
-                                                backslash_escaped: false,
-                                            }
-                                        }
-                                    } else {
-                                        if self.options.contains(Options::ENABLE_SUBSCRIPT) {
-                                            ItemBody::Subscript
-                                        } else if self
-                                            .options
-                                            .contains(Options::ENABLE_STRIKETHROUGH)
-                                        {
-                                            ItemBody::Strikethrough
-                                        } else {
-                                            ItemBody::Text {
-                                                backslash_escaped: false,
-                                            }
-                                        }
-                                    }
-                                } else if c == b'^' {
-                                    if self.options.contains(Options::ENABLE_SUPERSCRIPT) {
-                                        ItemBody::Superscript
-                                    } else {
-                                        ItemBody::Text {
-                                            backslash_escaped: false,
-                                        }
-                                    }
+                                    ItemBody::Strikethrough
                                 } else if inc == 2 {
                                     ItemBody::Strong
                                 } else {
@@ -2276,8 +2244,6 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
     match *body {
         ItemBody::Paragraph | ItemBody::TightParagraph => TagEnd::Paragraph,
         ItemBody::Emphasis => TagEnd::Emphasis,
-        ItemBody::Superscript => TagEnd::Superscript,
-        ItemBody::Subscript => TagEnd::Subscript,
         ItemBody::Strong => TagEnd::Strong,
         ItemBody::Strikethrough => TagEnd::Strikethrough,
         ItemBody::Link(..) => TagEnd::Link,
@@ -2332,8 +2298,6 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::Rule => return Event::Rule,
         ItemBody::Paragraph | ItemBody::TightParagraph => Tag::Paragraph,
         ItemBody::Emphasis => Tag::Emphasis,
-        ItemBody::Superscript => Tag::Superscript,
-        ItemBody::Subscript => Tag::Subscript,
         ItemBody::Strong => Tag::Strong,
         ItemBody::Strikethrough => Tag::Strikethrough,
         ItemBody::Link(link_ix) => {
