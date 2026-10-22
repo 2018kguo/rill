@@ -529,19 +529,17 @@ impl<'s> Builder<'s> {
         Ok(())
     }
 
-    /// Whether a blockquote encloses the node being closed.
-    /// Blockquotes enclosing the node being closed.
+    /// Blockquotes enclosing the node being closed (already popped off the stack).
     fn quote_depth(&self) -> usize {
         self.stack
             .iter()
-            .rev()
-            .skip(1)
             .filter(|frame| matches!(self.tree.nodes[frame.ix as usize].kind, MKind::Blockquote))
             .count()
     }
 
+    /// Whether a container encloses the node being closed (already popped off the stack).
     fn in_container(&self) -> bool {
-        self.stack.iter().rev().skip(1).any(|frame| {
+        self.stack.iter().any(|frame| {
             matches!(
                 self.tree.nodes[frame.ix as usize].kind,
                 MKind::Blockquote | MKind::ListItem { .. } | MKind::FootnoteDefinition { .. }
@@ -554,15 +552,21 @@ impl<'s> Builder<'s> {
         if self.stack.len() < 2 {
             return Err(Error::Unbalanced);
         }
-        let in_container = self.in_container();
-        let quote_depth = self.quote_depth();
-        let in_blockquote = quote_depth > 0;
         let Frame {
             ix,
             mut start,
             mut end,
             synthesized,
         } = self.stack.pop().ok_or(Error::Unbalanced)?;
+        // Only concrete blocks look at their containers, only lists and items at spread.
+        let (concrete, listing) = match self.tree.nodes[ix as usize].kind {
+            MKind::Code { .. } | MKind::Math { .. } | MKind::Html(_) => (true, false),
+            MKind::List { .. } | MKind::ListItem { .. } => (false, true),
+            _ => (false, false),
+        };
+        let in_container = concrete && self.in_container();
+        let quote_depth = if concrete { self.quote_depth() } else { 0 };
+        let in_blockquote = quote_depth > 0;
         let source = self.tree.source;
         let bytes = source.as_bytes();
         let first_span = {
@@ -573,7 +577,7 @@ impl<'s> Builder<'s> {
             let last = self.tree.nodes[ix as usize].last;
             (last != NIL).then(|| self.tree.bytes(last)).flatten()
         };
-        let spread = self.spread(ix);
+        let spread = listing && self.spread(ix);
         let pulldown_end = end;
         let pending = !self.exits.is_empty();
         let fence_prefixes = match &self.tree.nodes[ix as usize].kind {
