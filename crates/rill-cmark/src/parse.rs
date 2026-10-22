@@ -22,7 +22,6 @@
 
 use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::iter::FusedIterator;
 use std::ops::{Index, Range};
 
 use unicase::UniCase;
@@ -1954,57 +1953,6 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
     Event::Start(tag)
 }
 
-impl<'a> Iterator for Parser<'a> {
-    type Item = Event<'a>;
-
-    fn next(&mut self) -> Option<Event<'a>> {
-        match self.tree.cur() {
-            None => {
-                let ix = self.tree.pop()?;
-                let ix = if matches!(self.tree[ix].item.body, ItemBody::TightParagraph) {
-                    // tight paragraphs emit nothing
-                    self.tree.next_sibling(ix);
-                    return self.next();
-                } else {
-                    ix
-                };
-                let tag_end = body_to_tag_end(&self.tree[ix].item.body);
-                self.tree.next_sibling(ix);
-                Some(Event::End(tag_end))
-            }
-            Some(cur_ix) => {
-                let maybe_cur_ix =
-                    if matches!(self.tree[cur_ix].item.body, ItemBody::TightParagraph) {
-                        // tight paragraphs emit nothing
-                        self.tree.push();
-                        self.tree.cur()
-                    } else {
-                        Some(cur_ix)
-                    };
-                if let Some(cur_ix) = maybe_cur_ix {
-                    if self.tree[cur_ix].item.body.is_maybe_inline() {
-                        self.handle_inline();
-                    }
-
-                    let node = self.tree[cur_ix];
-                    let item = node.item;
-                    let event = item_to_event(item, self.text, &mut self.allocs);
-                    if let Event::Start(ref _tag) = event {
-                        self.tree.push();
-                    } else {
-                        self.tree.next_sibling(cur_ix);
-                    }
-                    Some(event)
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-impl<'a> FusedIterator for Parser<'a> {}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -2029,91 +1977,104 @@ mod test {
     #[test]
     fn single_open_fish_bracket() {
         // dont crash
-        assert_eq!(3, Parser::new("<").count());
+        assert_eq!(3, Parser::new("<").into_offset_iter().count());
     }
 
     #[test]
     fn lone_hashtag() {
         // dont crash
-        assert_eq!(2, Parser::new("#").count());
+        assert_eq!(2, Parser::new("#").into_offset_iter().count());
     }
 
     #[test]
     fn lots_of_backslashes() {
         // dont crash
-        Parser::new("\\\\\r\r").count();
-        Parser::new("\\\r\r\\.\\\\\r\r\\.\\").count();
+        Parser::new("\\\\\r\r").into_offset_iter().count();
+        Parser::new("\\\r\r\\.\\\\\r\r\\.\\")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_1095() {
         let s = "- [n]:Z\r\n\t\t";
-        let parser = Parser::new(s);
-        for _ in parser {}
+        for _ in Parser::new(s).into_offset_iter() {}
     }
 
     #[test]
     fn issue_320() {
         // dont crash
-        Parser::new(":\r\t> |\r:\r\t> |\r").count();
+        Parser::new(":\r\t> |\r:\r\t> |\r")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_319() {
         // dont crash
-        Parser::new("|\r-]([^|\r-]([^").count();
-        Parser::new("|\r\r=][^|\r\r=][^car").count();
+        Parser::new("|\r-]([^|\r-]([^").into_offset_iter().count();
+        Parser::new("|\r\r=][^|\r\r=][^car")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_303() {
         // dont crash
-        Parser::new("[^\r\ra]").count();
-        Parser::new("\r\r]Z[^\x00\r\r]Z[^\x00").count();
+        Parser::new("[^\r\ra]").into_offset_iter().count();
+        Parser::new("\r\r]Z[^\x00\r\r]Z[^\x00")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_313() {
         // dont crash
-        Parser::new("*]0[^\r\r*]0[^").count();
-        Parser::new("[^\r> `][^\r> `][^\r> `][").count();
+        Parser::new("*]0[^\r\r*]0[^").into_offset_iter().count();
+        Parser::new("[^\r> `][^\r> `][^\r> `][")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_311() {
         // dont crash
-        Parser::new("\\\u{0d}-\u{09}\\\u{0d}-\u{09}").count();
+        Parser::new("\\\u{0d}-\u{09}\\\u{0d}-\u{09}")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_283() {
         let input = std::str::from_utf8(b"\xf0\x9b\xb2\x9f<td:^\xf0\x9b\xb2\x9f").unwrap();
         // dont crash
-        Parser::new(input).count();
+        Parser::new(input).into_offset_iter().count();
     }
 
     #[test]
     fn issue_289() {
         // dont crash
-        Parser::new("> - \\\n> - ").count();
-        Parser::new("- \n\n").count();
+        Parser::new("> - \\\n> - ").into_offset_iter().count();
+        Parser::new("- \n\n").into_offset_iter().count();
     }
 
     #[test]
     fn issue_306() {
         // dont crash
-        Parser::new("*\r_<__*\r_<__*\r_<__*\r_<__").count();
+        Parser::new("*\r_<__*\r_<__*\r_<__*\r_<__")
+            .into_offset_iter()
+            .count();
     }
 
     #[test]
     fn issue_305() {
         // dont crash
-        Parser::new("_6**6*_*").count();
+        Parser::new("_6**6*_*").into_offset_iter().count();
     }
 
     #[test]
     fn another_emphasis_panic() {
-        Parser::new("*__#_#__*").count();
+        Parser::new("*__#_#__*").into_offset_iter().count();
     }
 
     #[test]
@@ -2269,7 +2230,10 @@ mod test {
     fn inline_html_inside_blockquote() {
         // Regression for #960
         let input = "> <foo\n> bar>";
-        let events: Vec<_> = Parser::new(input).collect();
+        let events: Vec<_> = Parser::new(input)
+            .into_offset_iter()
+            .map(|(ev, _)| ev)
+            .collect();
         let expected = [
             Event::Start(Tag::BlockQuote),
             Event::Start(Tag::Paragraph),
