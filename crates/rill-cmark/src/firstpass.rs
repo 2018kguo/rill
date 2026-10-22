@@ -2,11 +2,9 @@
 //! are in a linear chain with potential inline markup identified.
 
 use std::cmp::max;
-use std::ops::Range;
 
 use crate::parse::{
-    scan_containers, Allocations, FootnoteDef, HeadingAttributes, Item, ItemBody, LinkDef,
-    LINK_MAX_NESTED_PARENS,
+    scan_containers, Allocations, FootnoteDef, Item, ItemBody, LinkDef, LINK_MAX_NESTED_PARENS,
 };
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
@@ -770,7 +768,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     ) -> Option<usize> {
         let bytes = self.text.as_bytes();
         let (n, level) = scan_setext_heading(&bytes[ix..])?;
-        let mut attrs = None;
 
         if let Some(cur_ix) = self.tree.cur() {
             let parent_ix = self.tree.peek_up().unwrap();
@@ -780,53 +777,15 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             // of the parent) instead.
             let header_end = self.tree[cur_ix].item.end;
 
-            // extract the trailing attribute block
-            let (content_end, attrs_) =
-                self.extract_and_parse_heading_attribute_block(header_start, header_end);
-            attrs = attrs_;
-
             // strip trailing whitespace
-            let new_end = if has_trailing_content {
-                content_end
-            } else {
-                let mut last_line_start = header_start;
-                if attrs.is_some() {
-                    loop {
-                        let next_line_start =
-                            last_line_start + scan_nextline(&bytes[last_line_start..content_end]);
-                        if next_line_start >= content_end {
-                            break;
-                        }
-                        let mut line_start = LineStart::new(&bytes[next_line_start..content_end]);
-                        if scan_containers(&self.tree, &mut line_start, self.options)
-                            != self.tree.spine_len()
-                        {
-                            break;
-                        }
-                        last_line_start = next_line_start + line_start.bytes_scanned();
-                    }
-                }
-                let trailing_ws = scan_rev_while(
-                    &bytes[last_line_start..content_end],
-                    is_ascii_whitespace_no_nl,
-                );
-                content_end - trailing_ws
-            };
-
-            if attrs.is_some() {
-                // remove trailing block attributes
-                self.tree.truncate_siblings(new_end);
-            }
-
-            if let Some(cur_ix) = self.tree.cur() {
-                self.tree[cur_ix].item.end = new_end;
+            if !has_trailing_content {
+                let trailing_ws =
+                    scan_rev_while(&bytes[header_start..header_end], is_ascii_whitespace_no_nl);
+                self.tree[cur_ix].item.end = header_end - trailing_ws;
             }
         }
 
-        self.tree[node_ix].item.body = ItemBody::Heading(
-            level,
-            attrs.map(|attrs| self.allocs.allocate_heading(attrs)),
-        );
+        self.tree[node_ix].item.body = ItemBody::Heading(level);
 
         Some(ix + n)
     }
@@ -1526,7 +1485,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let bytes = self.text.as_bytes();
         if let Some(eol_bytes) = scan_eol(&bytes[ix..]) {
             self.tree[heading_ix].item.end = ix + eol_bytes;
-            self.tree[heading_ix].item.body = ItemBody::Heading(atx_level, None);
+            self.tree[heading_ix].item.body = ItemBody::Heading(atx_level);
             return ix + eol_bytes;
         }
         // skip leading spaces
@@ -1537,37 +1496,24 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let header_start = ix;
         let header_node_idx = self.tree.push(); // so that we can set the endpoint later
 
-        // trim the trailing attribute block before parsing the entire line, if necessary
-        let (end, content_end, attrs) = if self.options.contains(Options::ENABLE_HEADING_ATTRIBUTES)
+        let (line_ix, line_brk) = self.parse_line(ix, None, TableParseMode::Disabled);
+        ix = line_ix;
+        // Backslash at end is actually hard line break
+        if let Some(Item {
+            start,
+            end,
+            body: ItemBody::HardBreak(true),
+        }) = line_brk
         {
-            // the start of the next line is the end of the header since the
-            // header cannot have line breaks
-            let header_end = header_start + scan_nextline(&bytes[header_start..]);
-            let (content_end, attrs) =
-                self.extract_and_parse_heading_attribute_block(header_start, header_end);
-            self.parse_line(ix, Some(content_end), TableParseMode::Disabled);
-            (header_end, content_end, attrs)
-        } else {
-            let (line_ix, line_brk) = self.parse_line(ix, None, TableParseMode::Disabled);
-            ix = line_ix;
-            // Backslash at end is actually hard line break
-            if let Some(Item {
-                start,
-                end,
-                body: ItemBody::HardBreak(true),
-            }) = line_brk
-            {
-                self.tree.append_text(start, end, false);
-            }
-            (ix, ix, None)
-        };
-        self.tree[header_node_idx].item.end = end;
+            self.tree.append_text(start, end, false);
+        }
+        self.tree[header_node_idx].item.end = ix;
 
         // remove trailing matter from header text
         let mut empty_text_node = false;
         if let Some(cur_ix) = self.tree.cur() {
             // remove closing of the ATX heading
-            let header_text = &bytes[header_start..content_end];
+            let header_text = &bytes[header_start..ix];
             let mut limit = header_text
                 .iter()
                 .rposition(|&b| !(b == b'\n' || b == b'\r' || b == b' '))
@@ -1598,12 +1544,9 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         } else {
             self.tree.pop();
         }
-        self.tree[heading_ix].item.body = ItemBody::Heading(
-            atx_level,
-            attrs.map(|attrs| self.allocs.allocate_heading(attrs)),
-        );
+        self.tree[heading_ix].item.body = ItemBody::Heading(atx_level);
 
-        end
+        ix
     }
 
     /// Returns the number of bytes scanned on success.
@@ -1962,34 +1905,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         // make sure they match the number of columns we find in separator line
         alignment.len() == header_count
     }
-
-    /// Extracts and parses a heading attribute block if exists.
-    ///
-    /// Returns `(end_offset_of_heading_content, (id, classes))`.
-    ///
-    /// If `header_end` is less than or equal to `header_start`, the given
-    /// input is considered as empty.
-    fn extract_and_parse_heading_attribute_block(
-        &mut self,
-        header_start: usize,
-        header_end: usize,
-    ) -> (usize, Option<HeadingAttributes<'a>>) {
-        if !self.options.contains(Options::ENABLE_HEADING_ATTRIBUTES) {
-            return (header_end, None);
-        }
-
-        // extract the trailing attribute block
-        let header_bytes = &self.text.as_bytes()[header_start..header_end];
-        let (content_len, attr_block_range_rel) =
-            extract_attribute_block_content_from_header_text(header_bytes);
-        let content_end = header_start + content_len;
-        let attrs = attr_block_range_rel.and_then(|r| {
-            parse_inside_attribute_block(
-                &self.text[(header_start + r.start)..(header_start + r.end)],
-            )
-        });
-        (content_end, attrs)
-    }
 }
 
 /// Scanning modes for `Parser`'s `parse_line` method.
@@ -2207,113 +2122,4 @@ where
     }
 
     (ix, None)
-}
-
-/// Split the usual heading content range and the content inside the trailing attribute block.
-///
-/// Returns `(leading_content_len, Option<trailing_attr_block_range>)`.
-///
-/// Note that `trailing_attr_block_range` will be empty range when the block
-/// is `{}`, since the range is content inside the wrapping `{` and `}`.
-///
-/// The closing `}` of an attribute block can have trailing whitespaces.
-/// They are automatically trimmed when the attribute block is being searched.
-///
-/// However, this method does not trim the trailing whitespaces of heading content.
-/// It is callers' responsibility to trim them if necessary.
-fn extract_attribute_block_content_from_header_text(
-    heading: &[u8],
-) -> (usize, Option<Range<usize>>) {
-    let heading_len = heading.len();
-    let mut ix = heading_len;
-    ix -= scan_rev_while(heading, |b| {
-        b == b'\n' || b == b'\r' || b == b' ' || b == b'\t'
-    });
-    if ix == 0 {
-        return (heading_len, None);
-    }
-
-    let attr_block_close = ix - 1;
-    if heading.get(attr_block_close) != Some(&b'}') {
-        // The last character is not `}`. No attribute blocks found.
-        return (heading_len, None);
-    }
-    // move cursor before the closing right brace (`}`)
-    ix -= 1;
-
-    ix -= scan_rev_while(&heading[..ix], |b| {
-        // Characters to be excluded:
-        //  * `{` and `}`: special characters to open and close an attribute block.
-        //  * `\\`: a special character to escape many characters and disable some syntaxes.
-        //      + Handling of this escape character differs among markdown processors.
-        //      + Escaped characters will be separate text node from neighbors, so
-        //        it is not easy to handle unescaped string and trim the trailing block.
-        //  * `<` and `>`: special characters to start and end HTML tag.
-        //      + No known processors converts `{#<i>foo</i>}` into
-        //        `id="&lt;i&gt;foo&lt;/&gt;"` as of this writing, so hopefully
-        //        this restriction won't cause compatibility issues.
-        //  * `\n` and `\r`: a newline character.
-        //      + Setext heading can have multiple lines. However it is hard to support
-        //        attribute blocks that have newline inside, since the parsing proceeds line by
-        //        line and lines will be separate nodes even they are logically a single text.
-        !matches!(b, b'{' | b'}' | b'<' | b'>' | b'\\' | b'\n' | b'\r')
-    });
-    if ix == 0 {
-        // `{` is not found. No attribute blocks available.
-        return (heading_len, None);
-    }
-    let attr_block_open = ix - 1;
-    if heading[attr_block_open] != b'{' {
-        // `{` is not found. No attribute blocks available.
-        return (heading_len, None);
-    }
-
-    (attr_block_open, Some(ix..attr_block_close))
-}
-
-/// Parses an attribute block content, such as `.class1 #id .class2`.
-///
-/// Returns `(id, classes)`.
-///
-/// It is callers' responsibility to find opening and closing characters of the attribute
-/// block. Usually [`extract_attribute_block_content_from_header_text`] function does it for you.
-///
-/// Note that this parsing requires explicit whitespace separators between
-/// attributes. This is intentional design with the reasons below:
-///
-/// * to keep conversion simple and easy to understand for any possible input,
-/// * to avoid adding less obvious conversion rule that can reduce compatibility
-///   with other implementations more, and
-/// * to follow the major design of implementations with the support for the
-///   attribute blocks extension (as of this writing).
-///
-/// See also: [`Options::ENABLE_HEADING_ATTRIBUTES`].
-///
-/// [`Options::ENABLE_HEADING_ATTRIBUTES`]: `crate::Options::ENABLE_HEADING_ATTRIBUTES`
-fn parse_inside_attribute_block(inside_attr_block: &str) -> Option<HeadingAttributes<'_>> {
-    let mut id = None;
-    let mut classes = Vec::new();
-    let mut attrs = Vec::new();
-
-    for attr in inside_attr_block.split_ascii_whitespace() {
-        // iterator returned by `str::split_ascii_whitespace` never emits empty
-        // strings, so taking first byte won't panic.
-        if attr.len() > 1 {
-            let first_byte = attr.as_bytes()[0];
-            if first_byte == b'#' {
-                id = Some(attr[1..].into());
-            } else if first_byte == b'.' {
-                classes.push(attr[1..].into());
-            } else {
-                let split = attr.split_once('=');
-                if let Some((key, value)) = split {
-                    attrs.push((key.into(), Some(value.into())));
-                } else {
-                    attrs.push((attr.into(), None));
-                }
-            }
-        }
-    }
-
-    Some(HeadingAttributes { id, classes, attrs })
 }

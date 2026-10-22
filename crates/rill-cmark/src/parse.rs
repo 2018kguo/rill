@@ -23,7 +23,6 @@
 use std::cmp::{max, min};
 use std::collections::{HashMap, VecDeque};
 use std::iter::FusedIterator;
-use std::num::NonZeroUsize;
 use std::ops::{Index, Range};
 
 use unicase::UniCase;
@@ -98,7 +97,7 @@ pub(crate) enum ItemBody {
     Paragraph,
     TightParagraph,
     Rule,
-    Heading(HeadingLevel, Option<HeadingIndex>), // heading level
+    Heading(HeadingLevel),
     FencedCodeBlock(CowIndex),
     // rill: `$$` math flow; the index is its meta string.
     MathBlock(CowIndex),
@@ -1817,9 +1816,6 @@ pub(crate) struct CowIndex(usize);
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) struct AlignmentIndex(usize);
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub(crate) struct HeadingIndex(NonZeroUsize);
-
 #[derive(Clone)]
 pub(crate) struct Allocations<'a> {
     pub refdefs: RefDefs<'a>,
@@ -1827,17 +1823,8 @@ pub(crate) struct Allocations<'a> {
     links: Vec<(LinkType, CowStr<'a>, CowStr<'a>, CowStr<'a>)>,
     cows: Vec<CowStr<'a>>,
     alignments: Vec<Vec<Alignment>>,
-    headings: Vec<HeadingAttributes<'a>>,
     /// rill: every definition in source order (MDAST keeps duplicates); raw label source.
     pub definitions: Vec<(&'a str, LinkDef<'a>)>,
-}
-
-/// Used by the heading attributes extension.
-#[derive(Clone)]
-pub(crate) struct HeadingAttributes<'a> {
-    pub id: Option<CowStr<'a>>,
-    pub classes: Vec<CowStr<'a>>,
-    pub attrs: Vec<(CowStr<'a>, Option<CowStr<'a>>)>,
 }
 
 /// Keeps track of the reference definitions defined in the document.
@@ -1885,7 +1872,6 @@ impl<'a> Allocations<'a> {
             links: Vec::with_capacity(128),
             cows: Vec::new(),
             alignments: Vec::new(),
-            headings: Vec::new(),
             definitions: Vec::new(),
         }
     }
@@ -1912,15 +1898,6 @@ impl<'a> Allocations<'a> {
         let ix = self.alignments.len();
         self.alignments.push(alignment);
         AlignmentIndex(ix)
-    }
-
-    pub fn allocate_heading(&mut self, attrs: HeadingAttributes<'a>) -> HeadingIndex {
-        let ix = self.headings.len();
-        self.headings.push(attrs);
-        // This won't panic. `self.headings.len()` can't be `usize::MAX` since
-        // such a long Vec cannot fit in memory.
-        let ix_nonzero = NonZeroUsize::new(ix.wrapping_add(1)).expect("too many headings");
-        HeadingIndex(ix_nonzero)
     }
 
     pub fn take_cow(&mut self, ix: CowIndex) -> CowStr<'a> {
@@ -1958,14 +1935,6 @@ impl<'a> Index<AlignmentIndex> for Allocations<'a> {
 
     fn index(&self, ix: AlignmentIndex) -> &Self::Output {
         self.alignments.index(ix.0)
-    }
-}
-
-impl<'a> Index<HeadingIndex> for Allocations<'a> {
-    type Output = HeadingAttributes<'a>;
-
-    fn index(&self, ix: HeadingIndex) -> &Self::Output {
-        self.headings.index(ix.0.get() - 1)
     }
 }
 
@@ -2106,7 +2075,7 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
         ItemBody::Strikethrough => TagEnd::Strikethrough,
         ItemBody::Link(..) => TagEnd::Link,
         ItemBody::Image(..) => TagEnd::Image,
-        ItemBody::Heading(level, _) => TagEnd::Heading(level),
+        ItemBody::Heading(level) => TagEnd::Heading(level),
         ItemBody::IndentCodeBlock | ItemBody::FencedCodeBlock(..) => TagEnd::CodeBlock,
         ItemBody::MathBlock(..) => TagEnd::MathBlock,
         ItemBody::BlockQuote(kind) => TagEnd::BlockQuote(kind),
@@ -2173,16 +2142,7 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
                 id,
             }
         }
-        ItemBody::Heading(level, Some(heading_ix)) => {
-            let HeadingAttributes { id, classes, attrs } = allocs.index(heading_ix);
-            Tag::Heading {
-                level,
-                id: id.clone(),
-                classes: classes.clone(),
-                attrs: attrs.clone(),
-            }
-        }
-        ItemBody::Heading(level, None) => Tag::Heading {
+        ItemBody::Heading(level) => Tag::Heading {
             level,
             id: None,
             classes: Vec::new(),
