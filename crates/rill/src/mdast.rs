@@ -1032,7 +1032,7 @@ impl<'s> Builder<'s> {
         let source = self.tree.source;
         if !self.exits.is_empty() && !matches!(event, Event::End(_)) {
             let opens = match event {
-                Event::Start(Tag::BlockQuote(_) | Tag::List(_) | Tag::FootnoteDefinition(_)) => {
+                Event::Start(Tag::BlockQuote | Tag::List(_) | Tag::FootnoteDefinition(_)) => {
                     Opens::Container
                 }
                 Event::Start(Tag::Item) => Opens::Item,
@@ -1171,13 +1171,6 @@ impl<'s> Builder<'s> {
             Event::InlineHtml(html) => self.leaf(MKind::Html(cow(html)), bytes(start, end)),
             Event::Code(code) => self.leaf(MKind::InlineCode(cow(code)), bytes(start, end)),
             Event::InlineMath(value) => self.leaf(MKind::InlineMath(cow(value)), bytes(start, end)),
-            Event::DisplayMath(value) => self.leaf(
-                MKind::Math {
-                    value: cow(value),
-                    meta: None,
-                },
-                bytes(start, end),
-            ),
             Event::FootnoteReference(label) => self.leaf(
                 MKind::FootnoteReference {
                     identifier: normalize_identifier(&label),
@@ -1250,8 +1243,8 @@ impl<'s> Builder<'s> {
         let source = self.tree.source;
         let kind = match tag {
             Tag::Paragraph => MKind::Paragraph,
-            Tag::Heading { level, .. } => MKind::Heading(level as u8),
-            Tag::BlockQuote(_) => MKind::Blockquote,
+            Tag::Heading(level) => MKind::Heading(level as u8),
+            Tag::BlockQuote => MKind::Blockquote,
             Tag::CodeBlock(kind) => {
                 let fenced = kind.is_fenced();
                 let (lang, meta) = if fenced {
@@ -1344,12 +1337,6 @@ impl<'s> Builder<'s> {
                     },
                 }
             }
-            Tag::MetadataBlock(_)
-            | Tag::DefinitionList
-            | Tag::DefinitionListTitle
-            | Tag::DefinitionListDefinition
-            | Tag::Superscript
-            | Tag::Subscript => return Err(Error::DisabledExtension),
         };
         self.open(kind, start, end)
     }

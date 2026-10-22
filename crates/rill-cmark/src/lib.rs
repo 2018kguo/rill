@@ -61,51 +61,21 @@ impl<'a> CodeBlockKind<'a> {
     }
 }
 
-/// BlockQuote kind (Note, Tip, Important, Warning, Caution).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum BlockQuoteKind {
-    Note,
-    Tip,
-    Important,
-    Warning,
-    Caution,
-}
-
-/// Metadata block kind.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum MetadataBlockKind {
-    YamlStyle,
-    PlusesStyle,
-}
-
 /// Tags for elements that can contain other elements.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tag<'a> {
     /// A paragraph of text and other inline elements.
     Paragraph,
 
-    /// A heading, with optional identifier, classes and custom attributes.
-    /// The identifier is prefixed with `#` and the last one in the attributes
-    /// list is chosen, classes are prefixed with `.` and custom attributes
-    /// have no prefix and can optionally have a value (`myattr` or `myattr=myvalue`).
-    Heading {
-        level: HeadingLevel,
-        id: Option<CowStr<'a>>,
-        classes: Vec<CowStr<'a>>,
-        /// The first item of the tuple is the attr and second one the value.
-        attrs: Vec<(CowStr<'a>, Option<CowStr<'a>>)>,
-    },
+    /// A heading.
+    Heading(HeadingLevel),
 
     /// A block quote.
     ///
-    ///
     /// ```markdown
     /// > regular quote
-    ///
-    /// > [!NOTE]
-    /// > note quote
     /// ```
-    BlockQuote(Option<BlockQuoteKind>),
+    BlockQuote,
     /// A code block.
     CodeBlock(CodeBlockKind<'a>),
 
@@ -134,12 +104,7 @@ pub enum Tag<'a> {
     Item,
     /// A footnote definition. The value contained is the footnote's label by which it can
     /// be referred to.
-    ///
     FootnoteDefinition(CowStr<'a>),
-
-    DefinitionList,
-    DefinitionListTitle,
-    DefinitionListDefinition,
 
     /// A table. Contains a vector describing the text-alignment for each of its columns.
     Table(Vec<Alignment>),
@@ -166,15 +131,6 @@ pub enum Tag<'a> {
     /// ~strike through~
     /// ```
     Strikethrough,
-    ///
-    /// ```markdown
-    /// ^superscript^
-    /// ```
-    Superscript,
-    /// ```markdown
-    /// ~subscript~ ~~if also enabled this is strikethrough~~
-    /// ```
-    Subscript,
 
     /// A link.
     Link {
@@ -195,9 +151,6 @@ pub enum Tag<'a> {
         id: CowStr<'a>,
     },
 
-    /// A metadata block.
-    MetadataBlock(MetadataBlockKind),
-
     /// rill: a `$$` math flow block with its meta string.
     MathBlock(CowStr<'a>),
 }
@@ -206,8 +159,8 @@ impl<'a> Tag<'a> {
     pub fn to_end(&self) -> TagEnd {
         match self {
             Tag::Paragraph => TagEnd::Paragraph,
-            Tag::Heading { level, .. } => TagEnd::Heading(*level),
-            Tag::BlockQuote(kind) => TagEnd::BlockQuote(*kind),
+            Tag::Heading(level) => TagEnd::Heading(*level),
+            Tag::BlockQuote => TagEnd::BlockQuote,
             Tag::CodeBlock(_) => TagEnd::CodeBlock,
             Tag::HtmlBlock => TagEnd::HtmlBlock,
             Tag::List(number) => TagEnd::List(number.is_some()),
@@ -217,18 +170,12 @@ impl<'a> Tag<'a> {
             Tag::TableHead => TagEnd::TableHead,
             Tag::TableRow => TagEnd::TableRow,
             Tag::TableCell => TagEnd::TableCell,
-            Tag::Subscript => TagEnd::Subscript,
-            Tag::Superscript => TagEnd::Superscript,
             Tag::Emphasis => TagEnd::Emphasis,
             Tag::Strong => TagEnd::Strong,
             Tag::Strikethrough => TagEnd::Strikethrough,
             Tag::Link { .. } => TagEnd::Link,
             Tag::Image { .. } => TagEnd::Image,
-            Tag::MetadataBlock(kind) => TagEnd::MetadataBlock(*kind),
             Tag::MathBlock(_) => TagEnd::MathBlock,
-            Tag::DefinitionList => TagEnd::DefinitionList,
-            Tag::DefinitionListTitle => TagEnd::DefinitionListTitle,
-            Tag::DefinitionListDefinition => TagEnd::DefinitionListDefinition,
         }
     }
 }
@@ -239,7 +186,7 @@ pub enum TagEnd {
     Paragraph,
     Heading(HeadingLevel),
 
-    BlockQuote(Option<BlockQuoteKind>),
+    BlockQuote,
     CodeBlock,
 
     HtmlBlock,
@@ -249,10 +196,6 @@ pub enum TagEnd {
     Item,
     FootnoteDefinition,
 
-    DefinitionList,
-    DefinitionListTitle,
-    DefinitionListDefinition,
-
     Table,
     TableHead,
     TableRow,
@@ -261,13 +204,10 @@ pub enum TagEnd {
     Emphasis,
     Strong,
     Strikethrough,
-    Superscript,
-    Subscript,
 
     Link,
     Image,
 
-    MetadataBlock(MetadataBlockKind),
     MathBlock,
 }
 
@@ -334,14 +274,6 @@ pub enum LinkType {
     Autolink,
     /// Email address in autolink like `<john@example.org>`
     Email,
-    /// Wikilink link like `[[foo]]` or `[[foo|bar]]`
-    WikiLink {
-        /// `true` if the wikilink was piped.
-        ///
-        /// * `true` - `[[foo|bar]]`
-        /// * `false` - `[[foo]]`
-        has_pothole: bool,
-    },
 }
 
 impl LinkType {
@@ -380,15 +312,9 @@ pub enum Event<'a> {
     /// An inline math environment node.
     ///
     /// ```markdown
-    /// $math$
-    /// ```
-    InlineMath(CowStr<'a>),
-    /// A display math environment node.
-    ///
-    /// ```markdown
     /// $$math$$
     /// ```
-    DisplayMath(CowStr<'a>),
+    InlineMath(CowStr<'a>),
     /// An HTML node.
     ///
     /// A line of HTML inside [`Tag::HtmlBlock`] includes the line break.

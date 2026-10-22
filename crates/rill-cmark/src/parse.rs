@@ -32,7 +32,7 @@ use crate::linklabel::{scan_link_label_rest, FootnoteLabel, LinkLabel, Reference
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
-use crate::{Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
+use crate::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
 
 // Allowing arbitrary depth nested parentheses inside link destinations
 // can create denial of service vulnerabilities if we're not careful.
@@ -66,7 +66,7 @@ pub(crate) enum ItemBody {
     Emphasis,
     Strong,
     Strikethrough,
-    Math(CowIndex, bool), // true for display math
+    Math(CowIndex),
     Code(CowIndex),
     Link(LinkIndex),
     Image(LinkIndex),
@@ -100,7 +100,7 @@ pub(crate) enum ItemBody {
     MathBlock(CowIndex),
     IndentCodeBlock,
     HtmlBlock,
-    BlockQuote(Option<BlockQuoteKind>),
+    BlockQuote,
     List(bool, u8, u64), // is_tight, list character, list start index
     ListItem(usize),     // indent level
     FootnoteDefinition(CowIndex),
@@ -1275,7 +1275,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         let body = |allocs: &mut Allocations<'input>| {
             let cow_ix = allocs.allocate_cow(cow);
             if math {
-                ItemBody::Math(cow_ix, false)
+                ItemBody::Math(cow_ix)
             } else {
                 ItemBody::Code(cow_ix)
             }
@@ -1334,7 +1334,7 @@ pub(crate) fn scan_containers(tree: &Tree<Item>, line_start: &mut LineStart<'_>)
     let mut i = 0;
     for &node_ix in tree.walk_spine() {
         match tree[node_ix].item.body {
-            ItemBody::BlockQuote(..) => {
+            ItemBody::BlockQuote => {
                 let save = line_start.clone();
                 let _ = line_start.scan_space(3);
                 if !line_start.scan_blockquote_marker() {
@@ -2003,7 +2003,7 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
         ItemBody::Heading(level) => TagEnd::Heading(level),
         ItemBody::IndentCodeBlock | ItemBody::FencedCodeBlock(..) => TagEnd::CodeBlock,
         ItemBody::MathBlock(..) => TagEnd::MathBlock,
-        ItemBody::BlockQuote(kind) => TagEnd::BlockQuote(kind),
+        ItemBody::BlockQuote => TagEnd::BlockQuote,
         ItemBody::HtmlBlock => TagEnd::HtmlBlock,
         ItemBody::List(_, c, _) => {
             let is_ordered = c == b'.' || c == b')';
@@ -2066,18 +2066,13 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
                 id,
             }
         }
-        ItemBody::Heading(level) => Tag::Heading {
-            level,
-            id: None,
-            classes: Vec::new(),
-            attrs: Vec::new(),
-        },
+        ItemBody::Heading(level) => Tag::Heading(level),
         ItemBody::FencedCodeBlock(cow_ix) => {
             Tag::CodeBlock(CodeBlockKind::Fenced(allocs.take_cow(cow_ix)))
         }
         ItemBody::IndentCodeBlock => Tag::CodeBlock(CodeBlockKind::Indented),
         ItemBody::MathBlock(cow_ix) => Tag::MathBlock(allocs.take_cow(cow_ix)),
-        ItemBody::BlockQuote(kind) => Tag::BlockQuote(kind),
+        ItemBody::BlockQuote => Tag::BlockQuote,
         ItemBody::List(_, c, listitem_start) => {
             if c == b'.' || c == b')' {
                 Tag::List(Some(listitem_start))
@@ -2091,13 +2086,7 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::TableRow => Tag::TableRow,
         ItemBody::Table(alignment_ix) => Tag::Table(allocs.take_alignment(alignment_ix)),
         ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(allocs.take_cow(cow_ix)),
-        ItemBody::Math(cow_ix, is_display) => {
-            return if is_display {
-                Event::DisplayMath(allocs.take_cow(cow_ix))
-            } else {
-                Event::InlineMath(allocs.take_cow(cow_ix))
-            }
-        }
+        ItemBody::Math(cow_ix) => return Event::InlineMath(allocs.take_cow(cow_ix)),
         _ => panic!("unexpected item body {:?}", item.body),
     };
 
@@ -2554,11 +2543,11 @@ mod test {
         let input = "> <foo\n> bar>";
         let events: Vec<_> = Parser::new(input).collect();
         let expected = [
-            Event::Start(Tag::BlockQuote(None)),
+            Event::Start(Tag::BlockQuote),
             Event::Start(Tag::Paragraph),
             Event::InlineHtml(CowStr::Boxed("<foo\nbar>".to_string().into())),
             Event::End(TagEnd::Paragraph),
-            Event::End(TagEnd::BlockQuote(None)),
+            Event::End(TagEnd::BlockQuote),
         ];
         assert_eq!(&events, &expected);
     }
