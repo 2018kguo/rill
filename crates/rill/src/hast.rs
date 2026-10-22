@@ -375,7 +375,7 @@ fn trim_lines<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
 }
 
 /// micromark-util-sanitize-uri 2.0.1 `normalizeUri`.
-pub fn normalize_uri<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
+pub fn normalize_uri(value: Cow<'_, str>) -> Cow<'_, str> {
     let keep = |byte: u8| matches!(byte, b'!' | b'#' | b'$' | b'&'..=b';' | b'=' | b'?'..=b'Z' | b'_' | b'a'..=b'z' | b'~');
     let bytes = value.as_bytes();
     let escape_ok = |index: usize| {
@@ -386,7 +386,7 @@ pub fn normalize_uri<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
         (byte < 128 && byte != b'%' && keep(byte)) || (byte == b'%' && escape_ok(index))
     });
     if clean {
-        return value.clone();
+        return value;
     }
     let mut out = String::with_capacity(value.len() + 8);
     let mut index = 0;
@@ -424,7 +424,7 @@ fn js_whitespace(c: char) -> bool {
 
 /// The id footnote hrefs use for `id`, an uppercased identifier.
 fn footnote_safe_id(id: &str) -> String {
-    normalize_uri(&Cow::Owned(id.to_lowercase())).into_owned()
+    normalize_uri(Cow::Owned(id.to_lowercase())).into_owned()
 }
 
 /// What tells the `n`th call of one footnote apart: nothing for the first, `-n` after.
@@ -555,8 +555,10 @@ impl<'s> ToHast<'_, 's> {
     }
 
     fn one(&mut self, ix: Ix, parent: Ix) -> Chain {
-        let at = self.m.node(ix).at;
-        match &self.m.node(ix).kind {
+        // A copy of the shared borrow, so node fields outlive the `&mut self` calls.
+        let mdast = self.m;
+        let at = mdast.node(ix).at;
+        match &mdast.node(ix).kind {
             MKind::Root => {
                 let children = self.all(ix);
                 let children = self.h.wrap(children, false);
@@ -648,7 +650,7 @@ impl<'s> ToHast<'_, 's> {
             }
             MKind::Image { url, title, alt } => {
                 let mut props = vec![
-                    ("src", Val::Str(normalize_uri(url))),
+                    ("src", Val::Str(normalize_uri(url.clone()))),
                     ("alt", Val::Str(Cow::Owned(alt.clone()))),
                 ];
                 if let Some(title) = title {
@@ -668,7 +670,7 @@ impl<'s> ToHast<'_, 's> {
                 }
                 Some((url, title)) => {
                     let mut props = vec![
-                        ("src", Val::Str(normalize_uri(&url))),
+                        ("src", Val::Str(normalize_uri(url))),
                         ("alt", Val::Str(Cow::Owned(alt.clone()))),
                     ];
                     if let Some(title) = title {
@@ -687,7 +689,7 @@ impl<'s> ToHast<'_, 's> {
                 Chain::one(self.h.element_around("code", Vec::new(), at, text))
             }
             MKind::Link { url, title } => {
-                let mut props = vec![("href", Val::Str(normalize_uri(url)))];
+                let mut props = vec![("href", Val::Str(normalize_uri(url.clone())))];
                 if let Some(title) = title {
                     props.push(("title", Val::Str(title.clone())));
                 }
@@ -720,7 +722,7 @@ impl<'s> ToHast<'_, 's> {
                     contents
                 }
                 Some((url, title)) => {
-                    let mut props = vec![("href", Val::Str(normalize_uri(&url)))];
+                    let mut props = vec![("href", Val::Str(normalize_uri(url)))];
                     if let Some(title) = title {
                         props.push(("title", Val::Str(title)));
                     }
@@ -748,7 +750,7 @@ impl<'s> ToHast<'_, 's> {
                 Chain::one(self.h.element_with(tag, props, at, children))
             }
             MKind::ListItem { spread, checked } => self.list_item(ix, parent, *spread, *checked),
-            MKind::Table(align) => self.table(ix, &align.clone(), at),
+            MKind::Table(align) => self.table(ix, align, at),
             MKind::Text(value) => Chain::one(self.h.push(HKind::Text(trim_lines(value)), at)),
             MKind::Math { value, .. } => {
                 self.math = true;
@@ -1088,20 +1090,26 @@ pub fn to_hast<'s>(m: &MTree<'s>) -> Converted<'s> {
 // rehype-raw 7.0.0 (parse5 7.3.0 via hast-util-raw 9.1.0) property round trip
 // ---------------------------------------------------------------------------
 
+/// Whether splitting `value` on ASCII whitespace gives just `value`.
+fn one_token(value: &str) -> bool {
+    !value.is_empty() && !value.bytes().any(|byte| byte.is_ascii_whitespace())
+}
+
 /// hast-util-to-parse5 attribute serialization then hastscript property parsing.
 fn round_trip<'s>(key: &str, value: Val<'s>) -> Option<Val<'s>> {
+    let space_separated = matches!(key, "className" | "ariaDescribedBy");
     let attribute: Cow<'s, str> = match value {
-        Val::Class(name) => {
-            return Some(match key {
-                "className" | "ariaDescribedBy" => Val::Class(name),
-                _ => Val::Str(Cow::Borrowed(name)),
-            });
+        Val::Class(name) if space_separated => return Some(Val::Class(name)),
+        Val::Class(name) => return Some(Val::Str(Cow::Borrowed(name))),
+        // Joining then splitting gives the list back.
+        Val::List(list) if space_separated && list.iter().all(|item| one_token(item)) => {
+            return Some(Val::List(list));
         }
         Val::Bool(false) => return None,
         Val::Bool(true) => Cow::Borrowed(""),
         Val::Num(number) => Cow::Owned(number.to_string()),
         Val::Str(string) => string,
-        Val::List(mut list) if list.len() == 1 => list.pop().unwrap_or_default(),
+        Val::List(mut list) if list.len() == 1 => list.pop().expect("the guard saw one item"),
         Val::List(list) => Cow::Owned(list.join(" ")),
     };
     Some(match key {
@@ -1110,8 +1118,8 @@ fn round_trip<'s>(key: &str, value: Val<'s>) -> Option<Val<'s>> {
             Ok(number) => Val::Num(number),
             Err(_) => Val::Str(attribute),
         },
-        "className" | "ariaDescribedBy" => {
-            if !attribute.is_empty() && attribute.bytes().all(|b| !b.is_ascii_whitespace()) {
+        _ if space_separated => {
+            if one_token(&attribute) {
                 Val::List(vec![attribute])
             } else {
                 Val::List(
@@ -1375,25 +1383,28 @@ fn sanitize_props<'s>(
     props: Props<'s>,
     code_classes: &'static [&'static str],
 ) -> Props<'s> {
-    let mut result: Props<'s> = Vec::with_capacity(props.len());
-    for (key, value) in props {
-        let allowed = match (tag, key) {
-            ("code", "className") => Some(Allowed::Language(code_classes)),
-            _ => specific(tag, key),
-        };
-        let value = match allowed {
-            Some(allowed) => sanitize_value(&allowed, key, value),
-            None => Err(value),
-        };
-        let safe = match value {
-            Ok(safe) => Some(safe),
-            Err(value) if GLOBAL.contains(&key) => sanitize_value(&Allowed::Any, key, value).ok(),
-            Err(_) => None,
-        };
-        if let Some(safe) = safe {
-            result.push((key, if clobbered(key) { clobber(safe) } else { safe }));
-        }
-    }
+    // Collecting into the same element type reuses the input's allocation.
+    let mut result: Props<'s> = props
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let allowed = match (tag, key) {
+                ("code", "className") => Some(Allowed::Language(code_classes)),
+                _ => specific(tag, key),
+            };
+            let value = match allowed {
+                Some(allowed) => sanitize_value(&allowed, key, value),
+                None => Err(value),
+            };
+            let safe = match value {
+                Ok(safe) => safe,
+                Err(value) if GLOBAL.contains(&key) => {
+                    sanitize_value(&Allowed::Any, key, value).ok()?
+                }
+                Err(_) => return None,
+            };
+            Some((key, if clobbered(key) { clobber(safe) } else { safe }))
+        })
+        .collect();
     if tag == "input" {
         if get(&result, "disabled").is_none() {
             result.push(("disabled", Val::Bool(true)));
@@ -1510,7 +1521,8 @@ struct Finisher<'a, 's> {
     code_classes: &'static [&'static str],
     /// `None` with math: KaTeX runs before sanitize and harden, in JavaScript.
     harden: Option<&'a Harden>,
-    ancestors: Vec<&'static str>,
+    /// How many `table` elements enclose the current one.
+    table_depth: usize,
 }
 
 fn table_section(tag: &str) -> bool {
@@ -1611,9 +1623,10 @@ impl<'s> Finisher<'_, 's> {
                 .filter_map(|(key, value)| round_trip(key, value).map(|value| (key, value)))
                 .collect();
         }
-        self.ancestors.push(tag);
+        let table = usize::from(tag == "table");
+        self.table_depth += table;
         self.children(ix);
-        self.ancestors.pop();
+        self.table_depth -= table;
         if !self.sanitize {
             // KaTeX first: sanitize and harden run in JavaScript after it.
             self.tree.append(out, ix);
@@ -1621,7 +1634,7 @@ impl<'s> Finisher<'_, 's> {
         }
         let mut safe = TAG_NAMES.contains(&tag);
         if safe && matches!(tag, "tbody" | "td" | "th" | "thead" | "tfoot" | "tr") {
-            safe = self.ancestors.contains(&"table");
+            safe = self.table_depth > 0;
         }
         if !safe {
             if tag != "script" {
@@ -2194,7 +2207,7 @@ fn build<'s>(
         sanitize,
         code_classes: options.sanitize.code_classes,
         harden: (!math).then_some(&options.harden),
-        ancestors: Vec::new(),
+        table_depth: 0,
     }
     .children(root);
     if !math {
