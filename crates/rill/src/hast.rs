@@ -949,16 +949,15 @@ impl<'s> ToHast<'_, 's> {
         let mut cells = EMPTY;
         let mut source = self.mdast.node(row).first;
         for alignment in align {
-            let mut props = Vec::new();
             let value = match alignment {
                 AlignKind::Left => Some("left"),
                 AlignKind::Right => Some("right"),
                 AlignKind::Center => Some("center"),
                 AlignKind::None => None,
             };
-            if let Some(value) = value {
-                props.push(("align", Val::Str(Cow::Borrowed(value))));
-            }
+            let props = value.map_or_else(Vec::new, |value| {
+                vec![("align", Val::Str(Cow::Borrowed(value)))]
+            });
             let cell = if source == NIL {
                 self.hast.element(tag, props, At::None)
             } else {

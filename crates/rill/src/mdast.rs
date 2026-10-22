@@ -953,13 +953,13 @@ impl<'s> Builder<'s> {
     /// fence ends where `closeFlow` stopped feeding it: at the closing line's start when that
     /// line opens a container or item, else where it already ends.
     fn settle_exits(&mut self, next: Option<(usize, Opens)>) {
-        let exits = std::mem::take(&mut self.exits);
+        let mut exits = std::mem::take(&mut self.exits);
         for Exit {
             node: ix,
             settle,
             closing,
             content_end,
-        } in exits
+        } in exits.drain(..)
         {
             match settle {
                 Settle::Item { list } => self.settle_item(ix, list, next),
@@ -972,6 +972,8 @@ impl<'s> Builder<'s> {
                 }
             }
         }
+        // Settling never defers more, so the emptied buffer goes back for the next exits.
+        self.exits = exits;
     }
 
     /// A list item ends no earlier than its last child.
