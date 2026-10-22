@@ -2037,28 +2037,25 @@ pub struct Rendered {
 /// Markdown → Streamdown's HAST, as JSON.
 pub fn render(source: &str, options: &Options) -> Result<Rendered, Error> {
     let source = mdast::without_nul(source);
-    let Built {
-        kind,
-        points,
-        tree,
-        root,
-    } = build(&source, options)?;
-    let mut json = Json {
-        tree: &tree,
-        points: &points,
-        out: String::with_capacity(source.len() * 6 + 64),
-    };
-    json.node(root);
+    let built = build(&source, options)?;
+    let tree = built.json(String::with_capacity(built.json_capacity(&source)));
     Ok(Rendered {
-        kind,
-        tree: json.out,
+        kind: built.kind,
+        tree,
     })
 }
 
 /// `{"kind":"complete"|"raw"|"math","tree":HAST}`.
 pub fn render_json(source: &str, options: &Options) -> Result<String, Error> {
-    let Rendered { kind, tree } = render(source, options)?;
-    Ok(format!("{{\"kind\":\"{kind}\",\"tree\":{tree}}}"))
+    let source = mdast::without_nul(source);
+    let built = build(&source, options)?;
+    let mut out = String::with_capacity(built.json_capacity(&source) + 32);
+    out.push_str("{\"kind\":\"");
+    out.push_str(built.kind.as_str());
+    out.push_str("\",\"tree\":");
+    let mut out = built.json(out);
+    out.push('}');
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2235,6 +2232,25 @@ struct Built<'s> {
     points: Points,
     tree: HTree<'s>,
     root: Ix,
+}
+
+impl Built<'_> {
+    /// The HAST as JSON, appended to `out`.
+    fn json(&self, out: String) -> String {
+        let mut json = Json {
+            tree: &self.tree,
+            points: &self.points,
+            out,
+        };
+        json.node(self.root);
+        json.out
+    }
+
+    /// Room for the JSON: the text, plus up to about 110 bytes of syntax and position per
+    /// node.
+    fn json_capacity(&self, source: &str) -> usize {
+        source.len() + self.tree.nodes.len() * 112
+    }
 }
 
 fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {

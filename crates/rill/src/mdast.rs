@@ -370,7 +370,8 @@ impl<'s> MTree<'s> {
     /// The tree as remark's MDAST JSON, positions in UTF-16 units.
     #[must_use]
     pub fn to_json(&self) -> String {
-        let mut out = String::with_capacity(self.source.len() * 6 + 64);
+        // The text, plus up to about 150 bytes of syntax and position per node.
+        let mut out = String::with_capacity(self.source.len() + self.nodes.len() * 150);
         self.write_json(&mut out, MTree::ROOT);
         out
     }
