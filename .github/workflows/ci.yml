@@ -36,6 +36,8 @@ jobs:
         run: |
           cargo build --release --example stdio
           node conformance/diff.mjs
+          # Footnotes cited from inside other footnotes, every order up to five pieces.
+          node conformance/diff.mjs --pieces '["[^a]","[^b]","[^c]","\n\n[^a]: ","\n\n[^b]: ","\n\n[^c]: ","x"]' --length 5
       - name: JavaScript package
         working-directory: js
         run: |

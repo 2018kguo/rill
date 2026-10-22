@@ -909,7 +909,12 @@ impl<'s> ToHast<'_, 's> {
 
     fn footer(&mut self) -> Option<Ix> {
         let mut items = EMPTY;
-        for (reference_index, id) in self.footnote_order.clone().into_iter().enumerate() {
+        // Rendering a definition can cite footnotes not seen yet, which join the order
+        // and get their own item, so the length is read on every pass.
+        for reference_index in 0.. {
+            let Some(id) = self.footnote_order.get(reference_index).cloned() else {
+                break;
+            };
             let Some(&definition) = self.footnotes.get(&id) else {
                 continue;
             };

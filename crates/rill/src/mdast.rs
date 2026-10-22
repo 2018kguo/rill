@@ -7,6 +7,7 @@ use std::borrow::Cow;
 
 use rill_cmark::{Alignment, Event, LinkType, Options, Parser, Tag, TagEnd};
 
+use crate::autolink::{self, Finder, Piece};
 use crate::json::{json_string, json_u32};
 
 /// mdast `referenceType`.
@@ -1695,22 +1696,21 @@ fn write_point(out: &mut String, point: Pt) {
 // ---------------------------------------------------------------------------
 
 fn autolink_transform(tree: &mut MTree<'_>) {
-    use crate::autolink::{Finder, find_email, find_url};
-    for finder in [find_url as Finder, find_email as Finder] {
+    let finders: [Finder; 2] = [autolink::find_url, autolink::find_email];
+    for finder in finders {
         transform_children(tree, MTree::ROOT, finder);
     }
 }
 
 /// mdast-util-find-and-replace: changed text nodes become new, unpositioned nodes.
-fn transform_children(tree: &mut MTree<'_>, parent: Ix, finder: crate::autolink::Finder) {
-    use crate::autolink::{Piece, replace};
+fn transform_children(tree: &mut MTree<'_>, parent: Ix, finder: Finder) {
     let mut previous = NIL;
     let mut cursor = tree.nodes[parent as usize].first;
     while cursor != NIL {
         let next = tree.nodes[cursor as usize].next;
         match &tree.nodes[cursor as usize].kind {
             MKind::Text(value) => {
-                if let Some(pieces) = replace(value, finder) {
+                if let Some(pieces) = autolink::replace(value, finder) {
                     let mut chain_first = NIL;
                     let mut chain_last = NIL;
                     for piece in pieces {
