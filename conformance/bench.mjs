@@ -5,7 +5,14 @@ import { processor } from "./pipeline.mjs";
 
 const dir = new URL("../examples/", import.meta.url);
 const one = readdirSync(dir)
-  .filter((name) => name.endsWith(".md") && !name.includes("math") && !name.includes("html"))
+  .filter(
+    (name) =>
+      name.endsWith(".md") &&
+      !name.includes("math") &&
+      !name.includes("html") &&
+      // Ends in an open code fence, which would swallow every repeat after it.
+      !name.includes("streaming"),
+  )
   .sort()
   .map((name) => readFileSync(new URL(name, dir), "utf8"))
   .join("\n\n");

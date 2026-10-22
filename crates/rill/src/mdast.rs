@@ -85,34 +85,13 @@ pub struct Pt {
     pub offset: u32,
 }
 
-/// Index of the first non-ASCII byte, checking 16 bytes at a time.
-fn first_non_ascii(bytes: &[u8]) -> Option<usize> {
-    let ascii_run = bytes
-        .chunks_exact(16)
-        .take_while(|chunk| chunk.is_ascii())
-        .count()
-        * 16;
-    let rest = bytes[ascii_run..]
-        .iter()
-        .position(|byte| !byte.is_ascii())?;
-    Some(ascii_run + rest)
-}
-
 /// Byte offset → unist point in UTF-16 units, as remark reports them. Offsets must fall on
 /// character boundaries.
 pub struct Points {
     line_starts: Vec<u32>,
-    /// For each non-ASCII character, the byte just past it and how many more UTF-8 bytes
-    /// than UTF-16 units the source holds up to there. Empty for ASCII sources.
-    narrowing: Vec<Narrowing>,
-}
-
-/// How far UTF-16 offsets trail byte offsets from `end` on (to the next entry).
-struct Narrowing {
-    /// The byte just past a non-ASCII character.
-    end: u32,
-    /// Extra UTF-8 bytes over UTF-16 units in the source up to `end`.
-    narrowed: u32,
+    /// The UTF-16 offset of every byte that starts a character, and of the end. Empty for
+    /// ASCII sources, where the two agree.
+    utf16: Vec<u32>,
 }
 
 impl Points {
@@ -126,37 +105,24 @@ impl Points {
                 line_starts.push(found as u32 + 1);
             }
         }
-        let mut narrowing = Vec::new();
-        let mut narrowed = 0;
-        let mut at = 0;
-        while let Some(skip) = first_non_ascii(&bytes[at..]) {
-            at += skip;
-            let character = source[at..]
-                .chars()
-                .next()
-                .expect("whole characters are skipped, so `at` starts one");
-            at += character.len_utf8();
-            narrowed += (character.len_utf8() - character.len_utf16()) as u32;
-            narrowing.push(Narrowing {
-                end: at as u32,
-                narrowed,
-            });
+        let mut utf16 = Vec::new();
+        if !source.is_ascii() {
+            utf16.reserve(bytes.len() + 1);
+            let mut units = 0;
+            for &byte in bytes {
+                utf16.push(units);
+                // Each character is one unit, counted at its first byte; four-byte ones
+                // (outside the BMP) are two.
+                units += u32::from(byte & 0xC0 != 0x80) + u32::from(byte >= 0xF0);
+            }
+            utf16.push(units);
         }
-        Points {
-            line_starts,
-            narrowing,
-        }
+        Points { line_starts, utf16 }
     }
 
     #[must_use]
     pub fn units(&self, byte: u32) -> u32 {
-        match self
-            .narrowing
-            .partition_point(|narrowing| narrowing.end <= byte)
-        {
-            0 => byte,
-            index => byte - self.narrowing[index - 1].narrowed,
-        }
+        self.utf16.get(byte as usize).copied().unwrap_or(byte)
     }
 
     #[must_use]

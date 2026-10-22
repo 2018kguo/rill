@@ -1,5 +1,5 @@
 //! `cargo run --release -p rill --example bench`: parse and render the bundled examples
-//! without math or raw HTML (those hand off to JavaScript) repeated to about 100 KB,
+//! that end closed and stay in Rust (no math, raw HTML or open fences) repeated to about 100 KB,
 //! reporting the median of many runs. `conformance/bench.mjs` times JavaScript on the same.
 
 use std::time::Instant;
@@ -13,7 +13,9 @@ fn main() {
         .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
         .filter(|path| {
             let name = path.to_string_lossy();
-            !name.contains("math") && !name.contains("html")
+            // Math and raw HTML hand off to JavaScript, and the streaming example ends in
+            // an open code fence that would swallow every repeat after it.
+            !name.contains("math") && !name.contains("html") && !name.contains("streaming")
         })
         .collect();
     entries.sort();
