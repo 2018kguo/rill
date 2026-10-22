@@ -9,4 +9,3 @@ publish = false
 
 [dependencies]
 memchr = "2.8"
-unicase = "2.10"

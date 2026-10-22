@@ -204,7 +204,6 @@ name = "rill-cmark"
 version = "0.1.0"
 dependencies = [
  "memchr",
- "unicase",
 ]
 
 [[package]]
@@ -285,12 +284,6 @@ dependencies = [
  "displaydoc",
  "zerovec",
 ]
-
-[[package]]
-name = "unicase"
-version = "2.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-ident"

@@ -8,11 +8,9 @@ use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
 use crate::{
-    linklabel::{scan_link_label_rest, LinkLabel},
+    linklabel::{normalize_label, scan_link_label_rest, LinkLabel},
     HeadingLevel,
 };
-
-use unicase::UniCase;
 
 /// Runs the first pass, which resolves the block structure of the document,
 /// and returns the resulting tree.
@@ -1451,7 +1449,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             }
         }
         i += scan_whitespace_no_nl(&bytes[i..]);
-        self.allocs.footdefs.0.insert(UniCase::new(label.clone()));
+        self.allocs.footdefs.0.insert(normalize_label(&label));
         self.tree.append(Item {
             start,
             end: 0, // will get set later
@@ -1501,7 +1499,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
         i += 1;
         let (bytecount, link_def) = self.scan_refdef(start + i)?;
-        Some((bytecount + i, UniCase::new(label), link_def))
+        Some((bytecount + i, normalize_label(&label), link_def))
     }
 
     /// Returns number of bytes and number of newlines

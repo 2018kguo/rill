@@ -24,10 +24,10 @@ use std::cmp::{max, min};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ops::{Index, Range};
 
-use unicase::UniCase;
-
 use crate::firstpass::run_first_pass;
-use crate::linklabel::{scan_link_label_rest, FootnoteLabel, LinkLabel, ReferenceLabel};
+use crate::linklabel::{
+    normalize_label, scan_link_label_rest, FootnoteLabel, LinkLabel, ReferenceLabel,
+};
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
@@ -1686,9 +1686,9 @@ impl<'input, 'b, 's> RefDefs<'input>
 where
     's: 'b,
 {
-    /// Performs a lookup on reference label using unicode case folding.
+    /// Performs a lookup on a reference label, normalized as micromark does.
     pub fn get(&'s self, key: &'b str) -> Option<&'b LinkDef<'input>> {
-        self.0.get(&UniCase::new(key.into()))
+        self.0.get(&normalize_label(key))
     }
 }
 
@@ -1696,9 +1696,9 @@ impl<'input, 'b, 's> FootnoteDefs<'input>
 where
     's: 'b,
 {
-    /// Performs a lookup on reference label using unicode case folding.
+    /// Performs a lookup on a footnote label, normalized as micromark does.
     pub fn contains(&'s self, key: &'b str) -> bool {
-        self.0.contains(&UniCase::new(key.into()))
+        self.0.contains(&normalize_label(key))
     }
 }
 
