@@ -40,10 +40,8 @@ mod strings;
 mod tree;
 mod unicode_tables;
 
-use std::fmt::Display;
-
 pub use crate::parse::{
-    BrokenLink, BrokenLinkCallback, DefaultBrokenLinkCallback, OffsetIter, Parser, RefDefs,
+    BrokenLink, BrokenLinkCallback, DefaultBrokenLinkCallback, OffsetIter, Parser,
 };
 pub use crate::scanners::decode_string;
 pub use crate::strings::{CowStr, InlineStr};
@@ -58,19 +56,8 @@ pub enum CodeBlockKind<'a> {
 }
 
 impl<'a> CodeBlockKind<'a> {
-    pub fn is_indented(&self) -> bool {
-        matches!(*self, CodeBlockKind::Indented)
-    }
-
     pub fn is_fenced(&self) -> bool {
         matches!(*self, CodeBlockKind::Fenced(_))
-    }
-
-    pub fn into_static(self) -> CodeBlockKind<'static> {
-        match self {
-            CodeBlockKind::Indented => CodeBlockKind::Indented,
-            CodeBlockKind::Fenced(s) => CodeBlockKind::Fenced(s.into_static()),
-        }
     }
 }
 
@@ -244,68 +231,6 @@ impl<'a> Tag<'a> {
             Tag::DefinitionListDefinition => TagEnd::DefinitionListDefinition,
         }
     }
-
-    pub fn into_static(self) -> Tag<'static> {
-        match self {
-            Tag::Paragraph => Tag::Paragraph,
-            Tag::Heading {
-                level,
-                id,
-                classes,
-                attrs,
-            } => Tag::Heading {
-                level,
-                id: id.map(|s| s.into_static()),
-                classes: classes.into_iter().map(|s| s.into_static()).collect(),
-                attrs: attrs
-                    .into_iter()
-                    .map(|(k, v)| (k.into_static(), v.map(|s| s.into_static())))
-                    .collect(),
-            },
-            Tag::BlockQuote(k) => Tag::BlockQuote(k),
-            Tag::CodeBlock(kb) => Tag::CodeBlock(kb.into_static()),
-            Tag::HtmlBlock => Tag::HtmlBlock,
-            Tag::List(v) => Tag::List(v),
-            Tag::Item => Tag::Item,
-            Tag::FootnoteDefinition(a) => Tag::FootnoteDefinition(a.into_static()),
-            Tag::Table(v) => Tag::Table(v),
-            Tag::TableHead => Tag::TableHead,
-            Tag::TableRow => Tag::TableRow,
-            Tag::TableCell => Tag::TableCell,
-            Tag::Emphasis => Tag::Emphasis,
-            Tag::Strong => Tag::Strong,
-            Tag::Strikethrough => Tag::Strikethrough,
-            Tag::Superscript => Tag::Superscript,
-            Tag::Subscript => Tag::Subscript,
-            Tag::Link {
-                link_type,
-                dest_url,
-                title,
-                id,
-            } => Tag::Link {
-                link_type,
-                dest_url: dest_url.into_static(),
-                title: title.into_static(),
-                id: id.into_static(),
-            },
-            Tag::Image {
-                link_type,
-                dest_url,
-                title,
-                id,
-            } => Tag::Image {
-                link_type,
-                dest_url: dest_url.into_static(),
-                title: title.into_static(),
-                id: id.into_static(),
-            },
-            Tag::MetadataBlock(v) => Tag::MetadataBlock(v),
-            Tag::MathBlock(meta) => Tag::MathBlock(meta.into_static()),
-            Tag::DefinitionList => Tag::DefinitionList,
-            Tag::DefinitionListTitle => Tag::DefinitionListTitle,
-            Tag::DefinitionListDefinition => Tag::DefinitionListDefinition,
-        }
-    }
 }
 
 /// The end of a `Tag`.
@@ -365,19 +290,6 @@ pub enum HeadingLevel {
     H4,
     H5,
     H6,
-}
-
-impl Display for HeadingLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::H1 => write!(f, "h1"),
-            Self::H2 => write!(f, "h2"),
-            Self::H3 => write!(f, "h3"),
-            Self::H4 => write!(f, "h4"),
-            Self::H5 => write!(f, "h5"),
-            Self::H6 => write!(f, "h6"),
-        }
-    }
 }
 
 /// Returned when trying to convert a `usize` into a `Heading` but it fails
@@ -531,31 +443,6 @@ pub enum Event<'a> {
         dest: CowStr<'a>,
         title: Option<CowStr<'a>>,
     },
-}
-
-impl<'a> Event<'a> {
-    pub fn into_static(self) -> Event<'static> {
-        match self {
-            Event::Start(t) => Event::Start(t.into_static()),
-            Event::End(e) => Event::End(e),
-            Event::Text(s) => Event::Text(s.into_static()),
-            Event::Code(s) => Event::Code(s.into_static()),
-            Event::InlineMath(s) => Event::InlineMath(s.into_static()),
-            Event::DisplayMath(s) => Event::DisplayMath(s.into_static()),
-            Event::Html(s) => Event::Html(s.into_static()),
-            Event::InlineHtml(s) => Event::InlineHtml(s.into_static()),
-            Event::FootnoteReference(s) => Event::FootnoteReference(s.into_static()),
-            Event::SoftBreak => Event::SoftBreak,
-            Event::HardBreak => Event::HardBreak,
-            Event::Rule => Event::Rule,
-            Event::TaskListMarker(b) => Event::TaskListMarker(b),
-            Event::Definition { label, dest, title } => Event::Definition {
-                label: label.into_static(),
-                dest: dest.into_static(),
-                title: title.map(CowStr::into_static),
-            },
-        }
-    }
 }
 
 /// Table column text alignment.

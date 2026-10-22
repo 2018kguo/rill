@@ -1531,7 +1531,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             return None;
         }
         i += 1;
-        let (bytecount, link_def) = self.scan_refdef(start, start + i)?;
+        let (bytecount, link_def) = self.scan_refdef(start + i)?;
         Some((bytecount + i, UniCase::new(label), link_def))
     }
 
@@ -1655,7 +1655,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
     /// Returns # of bytes and definition.
     /// Assumes the label of the reference including colon has already been scanned.
-    fn scan_refdef(&self, span_start: usize, start: usize) -> Option<(usize, LinkDef<'a>)> {
+    fn scan_refdef(&self, start: usize) -> Option<(usize, LinkDef<'a>)> {
         let bytes = self.text.as_bytes();
 
         // whitespace between label and url (including up to one newline)
@@ -1670,14 +1670,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         i += dest_length;
 
         // no title
-        let mut backup = (
-            i - start,
-            LinkDef {
-                dest,
-                title: None,
-                span: span_start..i,
-            },
-        );
+        let mut backup = (i - start, LinkDef { dest, title: None });
 
         // scan whitespace between dest and label
         let (mut i, newlines) =
@@ -1702,7 +1695,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             i += title_length;
             if scan_blank_line(&bytes[i..]).is_some() {
                 backup.0 = i - start;
-                backup.1.span = span_start..i;
                 backup.1.title = Some(unescape(title, self.tree.is_in_table()));
                 return Some(backup);
             }

@@ -264,12 +264,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         }
     }
 
-    /// Returns a reference to the internal `RefDefs` object, which provides access
-    /// to the internal map of reference definitions.
-    pub fn reference_definitions(&self) -> &RefDefs<'_> {
-        &self.allocs.refdefs
-    }
-
     /// Use a link label to fetch a type, url, and title.
     ///
     /// This function enforces the [`link_ref_expansion_limit`].
@@ -1694,22 +1688,11 @@ enum LinkStackTy {
     Disabled,
 }
 
-/// Contains the destination URL, title and source span of a reference definition.
+/// Contains the destination URL and title of a reference definition.
 #[derive(Clone, Debug)]
 pub struct LinkDef<'a> {
     pub dest: CowStr<'a>,
     pub title: Option<CowStr<'a>>,
-    pub span: Range<usize>,
-}
-
-impl<'a> LinkDef<'a> {
-    pub fn into_static(self) -> LinkDef<'static> {
-        LinkDef {
-            dest: self.dest.into_static(),
-            title: self.title.map(|s| s.into_static()),
-            span: self.span,
-        }
-    }
 }
 
 /// Contains the destination URL, title and source span of a reference definition.
@@ -1797,11 +1780,6 @@ where
     /// Performs a lookup on reference label using unicode case folding.
     pub fn get(&'s self, key: &'b str) -> Option<&'b LinkDef<'input>> {
         self.0.get(&UniCase::new(key.into()))
-    }
-
-    /// Provides an iterator over all the document's reference definitions.
-    pub fn iter(&'s self) -> impl Iterator<Item = (&'s str, &'s LinkDef<'input>)> {
-        self.0.iter().map(|(k, v)| (k.as_ref(), v))
     }
 }
 
@@ -1961,13 +1939,6 @@ impl<'input> BrokenLinkCallback<'input> for DefaultBrokenLinkCallback {
 #[derive(Debug)]
 pub struct OffsetIter<'a, F = DefaultBrokenLinkCallback> {
     inner: Parser<'a, F>,
-}
-
-impl<'a, F: BrokenLinkCallback<'a>> OffsetIter<'a, F> {
-    /// Returns a reference to the internal reference definition tracker.
-    pub fn reference_definitions(&self) -> &RefDefs<'_> {
-        self.inner.reference_definitions()
-    }
 }
 
 impl<'a, F: BrokenLinkCallback<'a>> Iterator for OffsetIter<'a, F> {
@@ -2549,29 +2520,6 @@ mod test {
             }
         }
         assert_eq!(found, 1);
-    }
-
-    #[test]
-    fn ref_defs() {
-        let input = r###"[a B c]: http://example.com
-[another]: https://google.com
-
-text
-
-[final ONE]: http://wikipedia.org
-"###;
-        let mut parser = Parser::new(input);
-
-        assert!(parser.reference_definitions().get("a b c").is_some());
-        assert!(parser.reference_definitions().get("nope").is_none());
-
-        if let Some(_event) = parser.next() {
-            // testing keys with shorter lifetimes than parser and its input
-            let s = "final one".to_owned();
-            let link_def = parser.reference_definitions().get(&s).unwrap();
-            let span = &input[link_def.span.clone()];
-            assert_eq!(span, "[final ONE]: http://wikipedia.org");
-        }
     }
 
     #[test]
