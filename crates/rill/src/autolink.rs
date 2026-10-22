@@ -33,6 +33,7 @@ fn add(nodes: &mut Vec<Piece>, piece: Piece) {
 
 /// mdast-util-find-and-replace for one global regex over one text value; `None` when
 /// nothing changed.
+#[must_use]
 pub fn replace(value: &str, finder: Finder) -> Option<Vec<Piece>> {
     let mut nodes = Vec::new();
     let mut start = 0;
@@ -98,6 +99,7 @@ fn ascii_word(byte: u8) -> bool {
 }
 
 /// `/(https?:\/\/|www(?=\.))([-.\w]+)([^ \t\r\n]*)/gi` with `findUrl`.
+#[must_use]
 pub fn find_url(value: &str, from: usize) -> Option<Match> {
     let bytes = value.as_bytes();
     // Every match holds `://` or `www.`; most text has neither.
@@ -229,6 +231,7 @@ fn split_url(url: &str) -> usize {
 ///
 /// The leftmost match is found per `@`: its candidate starts are the positions of the
 /// atext run before it whose lookbehind holds, tried left to right from `from`.
+#[must_use]
 pub fn find_email(value: &str, from: usize) -> Option<Match> {
     let bytes = value.as_bytes();
     let atext = |byte: u8| ascii_word(byte) || matches!(byte, b'-' | b'.' | b'+');
