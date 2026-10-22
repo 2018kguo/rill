@@ -24,10 +24,6 @@
 //! Changes from upstream are marked `rill:`. The `rill` crate builds MDAST and HAST from
 //! its events; use it rather than this crate directly.
 
-// When compiled for the rustc compiler itself we want to make sure that this is
-// an unstable crate.
-
-// Forbid unsafe code unless the SIMD feature is enabled.
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 

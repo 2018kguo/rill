@@ -11,6 +11,3 @@ publish = false
 bitflags = "2.13"
 memchr = "2.8"
 unicase = "2.10"
-
-[features]
-simd = []
