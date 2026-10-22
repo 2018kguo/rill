@@ -43,12 +43,13 @@ pub mod wasm {
         pub fn kind(&self) -> String {
             self.kind.to_owned()
         }
-        /// Copies the opcodes out; call once.
-        pub fn ops(&self) -> Vec<u32> {
-            self.ops.clone()
+        /// Moves the opcodes out; a second call returns none.
+        pub fn ops(&mut self) -> Vec<u32> {
+            std::mem::take(&mut self.ops)
         }
-        pub fn strings(&self) -> String {
-            self.strings.clone()
+        /// Moves the string table out; a second call returns an empty string.
+        pub fn strings(&mut self) -> String {
+            std::mem::take(&mut self.strings)
         }
     }
 
