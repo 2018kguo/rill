@@ -854,7 +854,6 @@ impl<'s> Builder<'s> {
                 if !opens_container
                     && let MKind::Code { value, .. } | MKind::Math { value, .. } =
                         &mut self.tree.nodes[ix as usize].kind
-                    && value.ends_with(['\n', '\r'])
                 {
                     pop_line_ending(value);
                 }
@@ -1764,9 +1763,8 @@ fn indented_tail(source: &str, end: usize) -> (usize, String) {
         at = line_end;
     }
     suffix.truncate(committed);
-    let mut suffix = Cow::Owned(suffix);
-    pop_line_ending(&mut suffix);
-    (tail, suffix.into_owned())
+    suffix.truncate(without_line_ending(&suffix));
+    (tail, suffix)
 }
 
 /// Whether a heading's source opens with an ATX sequence: one to six `#`, then a space,
@@ -1943,9 +1941,7 @@ fn fence_at_eof(source: &str, prefixes: &[Prefix], start: usize) -> (usize, Stri
     }
     if last_empty {
         // micromark's data ends with the line ending before an empty last line.
-        let mut cow = Cow::Owned(value);
-        pop_line_ending(&mut cow);
-        value = cow.into_owned();
+        value.truncate(without_line_ending(&value));
     }
     (at, value)
 }
@@ -2122,9 +2118,8 @@ fn unclosed_fence_body(source: &str, start: usize) -> Cow<'_, str> {
             if rest.is_empty() && spaces > 0 {
                 // The indent emptied the last line: micromark's data ends with the line
                 // ending before it, which the value drops.
-                let mut out = Cow::Owned(out);
-                pop_line_ending(&mut out);
-                return out;
+                out.truncate(without_line_ending(&out));
+                return Cow::Owned(out);
             }
             out.push_str(rest);
             return Cow::Owned(out);
@@ -2135,8 +2130,8 @@ fn unclosed_fence_body(source: &str, start: usize) -> Cow<'_, str> {
     }
 }
 
-/// Drops one terminal line ending (`\n`, `\r\n` or `\r`).
-fn pop_line_ending(value: &mut Cow<'_, str>) {
+/// `value`'s length without one terminal line ending (`\n`, `\r\n` or `\r`).
+fn without_line_ending(value: &str) -> usize {
     let mut length = value.len();
     if value.ends_with('\n') {
         length -= 1;
@@ -2144,6 +2139,12 @@ fn pop_line_ending(value: &mut Cow<'_, str>) {
     if value[..length].ends_with('\r') {
         length -= 1;
     }
+    length
+}
+
+/// Drops one terminal line ending (`\n`, `\r\n` or `\r`).
+fn pop_line_ending(value: &mut Cow<'_, str>) {
+    let length = without_line_ending(value);
     match value {
         Cow::Borrowed(borrowed) => *value = Cow::Borrowed(&borrowed[..length]),
         Cow::Owned(owned) => owned.truncate(length),
