@@ -8,16 +8,41 @@
     "url": "git+https://github.com/2018kguo/rill.git",
     "directory": "js"
   },
-  "keywords": ["markdown", "streamdown", "remark", "rehype", "webassembly", "ai", "chat"],
+  "keywords": [
+    "markdown",
+    "streamdown",
+    "remark",
+    "rehype",
+    "webassembly",
+    "ai",
+    "chat"
+  ],
   "type": "module",
   "sideEffects": false,
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./streamdown": { "types": "./dist/streamdown.d.ts", "default": "./dist/streamdown.js" },
-    "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "default": "./dist/core.js"
+    },
+    "./streamdown": {
+      "types": "./dist/streamdown.d.ts",
+      "default": "./dist/streamdown.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
     "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm"
   },
-  "files": ["dist", "wasm", "src"],
+  "files": [
+    "dist",
+    "wasm",
+    "src"
+  ],
   "scripts": {
     "build": "sh ../scripts/build-wasm.sh && tsc -p .",
     "prepack": "npm run build",
@@ -32,7 +57,9 @@
     "unified": "^11"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/react": "19.2.2",

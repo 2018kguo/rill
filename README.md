@@ -201,7 +201,7 @@ pub fn render_hast(source: &str) -> Result<rill::wasm::RenderedHast, JsError> {
 
 ```ts
 import init, { renderHast } from "./pkg/my_markdown.js";
-import { createRill } from "@2018kguo/rill";
+import { createRill } from "@2018kguo/rill/core"; // core: no prebuilt WebAssembly
 import { rillPlugins } from "@2018kguo/rill/streamdown";
 
 await init();

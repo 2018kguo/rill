@@ -8,7 +8,7 @@ import { defaultRehypePlugins, defaultRemarkPlugins } from "streamdown";
 import { unified } from "unified";
 import type { PluggableList, Processor } from "unified";
 
-import type { HastNode, Rill, RillKind } from "./index.ts";
+import type { HastNode, Rill, RillKind } from "./core.ts";
 
 /** Which pipeline rendered a document; `javascript` is the fallback. */
 export type RenderKind = RillKind | "javascript";
