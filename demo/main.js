@@ -1,7 +1,8 @@
 import { toHtml } from "hast-util-to-html";
 
 import { processor, tails } from "../conformance/pipeline.mjs";
-import init, { renderJson } from "../js/wasm/rill.js";
+import { createRill } from "../js/src/core.ts";
+import init, { renderHast } from "../js/wasm/rill.js";
 import emphasis from "../examples/01-emphasis.md" with { type: "text" };
 import containers from "../examples/02-containers.md" with { type: "text" };
 import tables from "../examples/03-tables.md" with { type: "text" };
@@ -46,8 +47,12 @@ const PATHS = {
   math: "+ JS tail for KaTeX",
 };
 let lastKind = "complete";
+// The npm package's own path: opcodes from WebAssembly, decoded into HAST.
+const engine = createRill(renderHast);
 function rill(source) {
-  const { kind, tree } = JSON.parse(renderJson(source));
+  const rendered = engine.render(source);
+  if (!rendered) return javascript(source);
+  const { kind, tree } = rendered;
   lastKind = kind;
   const tail = tails[kind];
   return tail ? tail.runSync(tree, source) : tree;

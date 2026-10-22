@@ -22,7 +22,7 @@ pub use mdast::{Error, parse_json};
 /// The WebAssembly boundary the `@2018kguo/rill` JavaScript package reads: a rendered
 /// document as HAST opcodes. A build with its own [`Plugin`]s exports one function that
 /// returns [`render`](wasm::render)'s result; `--features wasm-exports` adds the stock
-/// exports that the prebuilt package ships.
+/// `renderHast` export that the prebuilt package ships.
 #[cfg(feature = "wasm")]
 pub mod wasm {
     use wasm_bindgen::prelude::*;
@@ -71,25 +71,12 @@ pub mod wasm {
         use wasm_bindgen::prelude::*;
 
         use super::RenderedHast;
-        use crate::{Options, hast, mdast};
+        use crate::Options;
 
         /// Streamdown's pipeline with its default options.
         #[wasm_bindgen(js_name = renderHast)]
         pub fn render_hast(source: &str) -> Result<RenderedHast, JsError> {
             super::render(source, &Options::default())
-        }
-
-        /// MDAST JSON for `source`.
-        #[wasm_bindgen(js_name = parseMdast)]
-        pub fn parse_mdast(source: &str) -> Result<String, JsError> {
-            mdast::parse_json(source).map_err(|error| JsError::new(&error.to_string()))
-        }
-
-        /// `{"kind","tree"}` HAST JSON for `source`.
-        #[wasm_bindgen(js_name = renderJson)]
-        pub fn render_json(source: &str) -> Result<String, JsError> {
-            hast::render_json(source, &Options::default())
-                .map_err(|error| JsError::new(&error.to_string()))
         }
     }
 }

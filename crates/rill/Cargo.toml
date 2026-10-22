@@ -23,5 +23,5 @@ url = "2.5"
 # `rill::wasm`: the opcode boundary the JavaScript package reads, for builds with their
 # own plugins.
 wasm = ["dep:wasm-bindgen"]
-# The stock exports (`renderHast`, `parseMdast`, `renderJson`) the prebuilt package ships.
+# The stock export (`renderHast`) the prebuilt package ships.
 wasm-exports = ["wasm"]
