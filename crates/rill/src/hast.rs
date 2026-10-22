@@ -422,6 +422,20 @@ fn js_whitespace(c: char) -> bool {
     rill_cmark::autolink_literal::unicode_whitespace(c)
 }
 
+/// The id footnote hrefs use for `id`, an uppercased identifier.
+fn footnote_safe_id(id: &str) -> String {
+    normalize_uri(&Cow::Owned(id.to_lowercase())).into_owned()
+}
+
+/// What tells the `n`th call of one footnote apart: nothing for the first, `-n` after.
+fn call_suffix(n: usize) -> String {
+    if n > 1 {
+        format!("-{n}")
+    } else {
+        String::new()
+    }
+}
+
 fn revert_suffix(kind: ReferenceKind, label: &str, identifier: &str) -> String {
     match kind {
         ReferenceKind::Collapsed => "][]".into(),
@@ -434,13 +448,20 @@ fn revert_suffix(kind: ReferenceKind, label: &str, identifier: &str) -> String {
 // mdast-util-to-hast 13.2.1
 // ---------------------------------------------------------------------------
 
+/// One footnote's citations so far.
+struct FootnoteCalls {
+    /// The uppercased identifier.
+    id: String,
+    count: usize,
+}
+
 struct ToHast<'t, 's> {
     m: &'t MTree<'s>,
     h: HTree<'s>,
     definitions: HashMap<String, (Cow<'s, str>, Option<Cow<'s, str>>)>,
     footnotes: HashMap<String, Ix>,
-    footnote_order: Vec<String>,
-    footnote_counts: HashMap<String, usize>,
+    /// Cited footnotes in first-citation order, which numbers them.
+    footnote_calls: Vec<FootnoteCalls>,
     /// Raw HTML or links inside links: parse5 effects the native raw stage omits.
     raw_boundary: bool,
     link_depth: usize,
@@ -590,21 +611,18 @@ impl<'s> ToHast<'_, 's> {
             MKind::ThematicBreak => Chain::one(self.h.element("hr", Vec::new(), at)),
             MKind::FootnoteReference { identifier, .. } => {
                 let id = identifier.to_uppercase();
-                let safe_id = normalize_uri(&Cow::Owned(id.to_lowercase())).into_owned();
-                let counter = match self.footnote_order.iter().position(|known| *known == id) {
-                    Some(index) if self.footnote_counts.contains_key(&id) => index + 1,
-                    _ => {
-                        self.footnote_order.push(id.clone());
-                        self.footnote_order.len()
+                let safe_id = footnote_safe_id(&id);
+                let index = match self.footnote_calls.iter().position(|calls| calls.id == id) {
+                    Some(index) => index,
+                    None => {
+                        self.footnote_calls.push(FootnoteCalls { id, count: 0 });
+                        self.footnote_calls.len() - 1
                     }
                 };
-                let reuse = self.footnote_counts.get(&id).copied().unwrap_or(0) + 1;
-                self.footnote_counts.insert(id, reuse);
-                let suffix = if reuse > 1 {
-                    format!("-{reuse}")
-                } else {
-                    String::new()
-                };
+                let calls = &mut self.footnote_calls[index];
+                calls.count += 1;
+                let suffix = call_suffix(calls.count);
+                let counter = index + 1;
                 let props = vec![
                     (
                         "href",
@@ -917,30 +935,23 @@ impl<'s> ToHast<'_, 's> {
         // Rendering a definition can cite footnotes not seen yet, which join the order
         // and get their own item, so the length is read on every pass.
         for reference_index in 0.. {
-            let Some(id) = self.footnote_order.get(reference_index).cloned() else {
+            let Some(calls) = self.footnote_calls.get(reference_index) else {
                 break;
             };
-            let Some(&definition) = self.footnotes.get(&id) else {
+            let Some(&definition) = self.footnotes.get(&calls.id) else {
                 continue;
             };
-            let MKind::FootnoteDefinition { identifier, .. } = &self.m.node(definition).kind else {
-                continue;
-            };
-            let safe_id =
-                normalize_uri(&Cow::Owned(identifier.to_uppercase().to_lowercase())).into_owned();
+            let safe_id = footnote_safe_id(&calls.id);
             let mut content = self.all(definition);
-            let counts = self.footnote_counts.get(&id).copied().unwrap_or(0);
+            // Read after rendering the definition, which can cite its own footnote.
+            let count = self.footnote_calls[reference_index].count;
             let mut back = EMPTY;
-            for rereference in 1..=counts {
+            for rereference in 1..=count {
                 if back.first != NIL {
                     let space = self.h.text(" ");
                     self.h.append(&mut back, space);
                 }
-                let suffix = if rereference > 1 {
-                    format!("-{rereference}")
-                } else {
-                    String::new()
-                };
+                let suffix = call_suffix(rereference);
                 let arrow = self.h.text("↩");
                 let mut children = Chain::one(arrow);
                 if rereference > 1 {
@@ -1051,8 +1062,7 @@ pub fn to_hast<'s>(m: &MTree<'s>) -> Converted<'s> {
         },
         definitions: HashMap::new(),
         footnotes: HashMap::new(),
-        footnote_order: Vec::new(),
-        footnote_counts: HashMap::new(),
+        footnote_calls: Vec::new(),
         raw_boundary: false,
         link_depth: 0,
         math: false,
