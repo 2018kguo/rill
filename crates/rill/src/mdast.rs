@@ -771,122 +771,151 @@ impl<'s> Builder<'s> {
     /// fence ends where `closeFlow` stopped feeding it: at the closing line's start when that
     /// line opens a container or item, else where it already ends.
     fn settle_exits(&mut self, next: Option<(usize, Opens)>) {
-        let source = self.tree.source;
+        let exits = std::mem::take(&mut self.exits);
         for Exit {
             ix,
             settle,
             closing,
             content_end,
-        } in std::mem::take(&mut self.exits)
+        } in exits
         {
-            if let Settle::Item { list } = settle {
-                // Only a sibling's prefix: an outer list's closes this list first.
-                let sibling = self.stack.last().is_some_and(|frame| frame.ix == list);
-                if let Some((_, last_end)) = self.tree.bytes(self.tree.nodes[ix as usize].last)
-                    && let At::Bytes(_, item_end) = &mut self.tree.nodes[ix as usize].at
-                {
-                    // prepareList: with no line ending before the next item's prefix, the
-                    // item ends where that prefix does.
-                    *item_end = match next {
-                        Some((next_start, Opens::Item))
-                            if sibling
-                                && source.get(last_end as usize..next_start).is_some_and(
-                                    |between| {
-                                        between.bytes().all(|b| matches!(b, b' ' | b'\t' | b'>'))
-                                    },
-                                ) =>
-                        {
-                            list_item_prefix_end(source, next_start) as u32
-                        }
-                        _ => (*item_end).max(last_end),
-                    };
+            match settle {
+                Settle::Item { list } => self.settle_item(ix, list, next),
+                Settle::Fence {
+                    in_blockquote,
+                    prefixes,
+                } => self.settle_fence(ix, in_blockquote, &prefixes, closing, next),
+                Settle::Container { eof_prefixed } => {
+                    self.settle_container(ix, eof_prefixed, closing, content_end, next);
                 }
-                continue;
             }
-            let (line_start, line_end) = closing_line(source, closing);
-            let on_line = |start: usize| (line_start..=line_end).contains(&start);
-            if let Settle::Fence {
-                in_blockquote,
-                prefixes,
-            } = &settle
-            {
-                if next.is_none()
-                    && let At::Bytes(fence_start, _) = self.tree.nodes[ix as usize].at
-                {
-                    let (end, eof_value) = fence_at_eof(source, prefixes, fence_start as usize);
-                    let node = &mut self.tree.nodes[ix as usize];
-                    node.at = At::Bytes(fence_start, end as u32);
-                    if let MKind::Code { value, .. } | MKind::Math { value, .. } = &mut node.kind {
-                        *value = Cow::Owned(eof_value);
+        }
+    }
+
+    /// A list item ends no earlier than its last child.
+    fn settle_item(&mut self, ix: Ix, list: Ix, next: Option<(usize, Opens)>) {
+        let source = self.tree.source;
+        // Only a sibling's prefix: an outer list's closes this list first.
+        let sibling = self.stack.last().is_some_and(|frame| frame.ix == list);
+        if let Some((_, last_end)) = self.tree.bytes(self.tree.nodes[ix as usize].last)
+            && let At::Bytes(_, item_end) = &mut self.tree.nodes[ix as usize].at
+        {
+            // prepareList: with no line ending before the next item's prefix, the
+            // item ends where that prefix does.
+            *item_end =
+                match next {
+                    Some((next_start, Opens::Item))
+                        if sibling
+                            && source.get(last_end as usize..next_start).is_some_and(
+                                |between| between.bytes().all(|b| matches!(b, b' ' | b'\t' | b'>')),
+                            ) =>
+                    {
+                        list_item_prefix_end(source, next_start) as u32
                     }
-                    continue;
-                }
-                let in_blockquote = *in_blockquote;
-                // A line ending joins the code only before a non-lazy line, so a lazy
-                // closing line leaves the one before it. A blockquote does not continue
-                // over a blank line without `>`, so such lines close it earlier.
-                let closing_line = line_start;
-                let mut line_start = line_start;
-                while in_blockquote && line_start > 0 {
-                    let previous = source[..line_start - 1]
-                        .rfind(['\n', '\r'])
-                        .map_or(0, |eol| eol + 1);
-                    let line = source[previous..line_start].trim_end_matches(['\n', '\r']);
-                    if previous == 0 || !line.trim_matches([' ', '\t']).is_empty() {
-                        break;
-                    }
-                    line_start = previous;
-                }
-                let opens_container = line_start == closing_line
-                    && matches!(next, Some((next_start, Opens::Container | Opens::Item)) if on_line(next_start));
-                let end = if opens_container || line_start == 0 {
-                    line_start
-                } else if source[..line_start].ends_with("\r\n") {
-                    line_start - 2
-                } else {
-                    line_start - 1
+                    _ => (*item_end).max(last_end),
                 };
-                if let At::Bytes(_, node_end) = &mut self.tree.nodes[ix as usize].at {
-                    *node_end = (*node_end).max(end as u32);
-                }
-                // `onexitcodefenced` strips one final line ending from data that, closed
-                // lazily, already stops before the last one: a blank last line goes.
-                if !opens_container
-                    && let MKind::Code { value, .. } | MKind::Math { value, .. } =
-                        &mut self.tree.nodes[ix as usize].kind
-                {
-                    pop_line_ending(value);
-                }
-                continue;
+        }
+    }
+
+    /// An unclosed fence in containers, closed by the line at `closing`.
+    fn settle_fence(
+        &mut self,
+        ix: Ix,
+        in_blockquote: bool,
+        prefixes: &[Prefix],
+        closing: usize,
+        next: Option<(usize, Opens)>,
+    ) {
+        let source = self.tree.source;
+        if next.is_none()
+            && let At::Bytes(fence_start, _) = self.tree.nodes[ix as usize].at
+        {
+            let (end, eof_value) = fence_at_eof(source, prefixes, fence_start as usize);
+            let node = &mut self.tree.nodes[ix as usize];
+            node.at = At::Bytes(fence_start, end as u32);
+            if let MKind::Code { value, .. } | MKind::Math { value, .. } = &mut node.kind {
+                *value = Cow::Owned(eof_value);
             }
-            let point = match next {
-                _ if closing >= source.len() => source.len(),
-                Some((next_start, Opens::Container)) if on_line(next_start) => {
-                    self.continued_prefix_end(line_start).0
-                }
-                // `flowStart` at EOF right after the prefixes; anything more is a lazy line.
-                None if matches!(settle, Settle::Container { eof_prefixed: true }) => source.len(),
-                _ => line_start,
-            };
-            // The walk back stops at content, which a child's settled end may extend.
-            let content_end = self
-                .tree
-                .bytes(self.tree.nodes[ix as usize].last)
-                .map_or(content_end, |(_, last_end)| {
-                    content_end.max(last_end as usize)
-                });
-            let end = container_exit(source, point, content_end).max(content_end);
-            if let At::Bytes(_, node_end) = &mut self.tree.nodes[ix as usize].at {
-                *node_end = end as u32;
+            return;
+        }
+        let (closing_line, line_end) = closing_line(source, closing);
+        // A line ending joins the code only before a non-lazy line, so a lazy closing line
+        // leaves the one before it. A blockquote does not continue over a blank line
+        // without `>`, so such lines close it earlier.
+        let mut line_start = closing_line;
+        while in_blockquote && line_start > 0 {
+            let previous = source[..line_start - 1]
+                .rfind(['\n', '\r'])
+                .map_or(0, |eol| eol + 1);
+            let line = source[previous..line_start].trim_end_matches(['\n', '\r']);
+            if previous == 0 || !line.trim_matches([' ', '\t']).is_empty() {
+                break;
             }
-            if let MKind::List { spread, .. } = &mut self.tree.nodes[ix as usize].kind {
-                // prepareList: line endings between the content and the exit count toward
-                // spread, and the last item reaches the exit unless one follows its content.
-                if line_endings(&source.as_bytes()[content_end..end]) >= 2 {
-                    *spread = true;
-                }
-                self.extend_last_item(ix, end);
+            line_start = previous;
+        }
+        let opens_container = line_start == closing_line
+            && matches!(next, Some((next_start, Opens::Container | Opens::Item))
+                if (closing_line..=line_end).contains(&next_start));
+        let end = if opens_container || line_start == 0 {
+            line_start
+        } else if source[..line_start].ends_with("\r\n") {
+            line_start - 2
+        } else {
+            line_start - 1
+        };
+        if let At::Bytes(_, node_end) = &mut self.tree.nodes[ix as usize].at {
+            *node_end = (*node_end).max(end as u32);
+        }
+        // `onexitcodefenced` strips one final line ending from data that, closed lazily,
+        // already stops before the last one: a blank last line goes.
+        if !opens_container
+            && let MKind::Code { value, .. } | MKind::Math { value, .. } =
+                &mut self.tree.nodes[ix as usize].kind
+        {
+            pop_line_ending(value);
+        }
+    }
+
+    /// A blockquote, list or footnote definition closed by the line at `closing`.
+    fn settle_container(
+        &mut self,
+        ix: Ix,
+        eof_prefixed: bool,
+        closing: usize,
+        content_end: usize,
+        next: Option<(usize, Opens)>,
+    ) {
+        let source = self.tree.source;
+        let (line_start, line_end) = closing_line(source, closing);
+        let point = match next {
+            _ if closing >= source.len() => source.len(),
+            Some((next_start, Opens::Container))
+                if (line_start..=line_end).contains(&next_start) =>
+            {
+                self.continued_prefix_end(line_start).0
             }
+            // `flowStart` at EOF right after the prefixes; anything more is a lazy line.
+            None if eof_prefixed => source.len(),
+            _ => line_start,
+        };
+        // The walk back stops at content, which a child's settled end may extend.
+        let content_end = self
+            .tree
+            .bytes(self.tree.nodes[ix as usize].last)
+            .map_or(content_end, |(_, last_end)| {
+                content_end.max(last_end as usize)
+            });
+        let end = container_exit(source, point, content_end).max(content_end);
+        if let At::Bytes(_, node_end) = &mut self.tree.nodes[ix as usize].at {
+            *node_end = end as u32;
+        }
+        if let MKind::List { spread, .. } = &mut self.tree.nodes[ix as usize].kind {
+            // prepareList: line endings between the content and the exit count toward
+            // spread, and the last item reaches the exit unless one follows its content.
+            if line_endings(&source.as_bytes()[content_end..end]) >= 2 {
+                *spread = true;
+            }
+            self.extend_last_item(ix, end);
         }
     }
 
