@@ -27,6 +27,7 @@ pub enum Edge {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub enum Val<'s> {
     Str(Cow<'s, str>),
     Bool(bool),
@@ -34,8 +35,6 @@ pub enum Val<'s> {
     List(Vec<Cow<'s, str>>),
     /// A one-class list, `["name"]`, without allocating.
     Class(&'static str),
-    /// A number serialized as a string, like `String(n)`.
-    Digits(usize),
 }
 
 /// An element's properties, in hast's order.
@@ -296,17 +295,6 @@ pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Val<'s>> {
 
 fn class<'s>(name: &'static str) -> Val<'s> {
     Val::Class(name)
-}
-
-impl<'s> Val<'s> {
-    /// Normalizes the allocation-free variants for code that inspects values.
-    fn expanded(self) -> Val<'s> {
-        match self {
-            Val::Class(name) => Val::List(vec![Cow::Borrowed(name)]),
-            Val::Digits(n) => Val::Str(Cow::Owned(n.to_string())),
-            other => other,
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,20 +1060,19 @@ pub fn to_hast<'s>(m: &MTree<'s>) -> Converted<'s> {
 
 /// hast-util-to-parse5 attribute serialization then hastscript property parsing.
 fn round_trip<'s>(key: &str, value: Val<'s>) -> Option<Val<'s>> {
-    if let Val::Class(name) = value {
-        return Some(match key {
-            "className" | "ariaDescribedBy" => Val::Class(name),
-            _ => Val::Str(Cow::Borrowed(name)),
-        });
-    }
-    let attribute: Cow<'s, str> = match value.expanded() {
+    let attribute: Cow<'s, str> = match value {
+        Val::Class(name) => {
+            return Some(match key {
+                "className" | "ariaDescribedBy" => Val::Class(name),
+                _ => Val::Str(Cow::Borrowed(name)),
+            });
+        }
         Val::Bool(false) => return None,
         Val::Bool(true) => Cow::Borrowed(""),
         Val::Num(number) => Cow::Owned(number.to_string()),
         Val::Str(string) => string,
         Val::List(mut list) if list.len() == 1 => list.pop().unwrap_or_default(),
         Val::List(list) => Cow::Owned(list.join(" ")),
-        Val::Class(_) | Val::Digits(_) => return None,
     };
     Some(match key {
         "checked" | "disabled" => Val::Bool(true),
@@ -1294,7 +1281,7 @@ fn primitive_ok(allowed: &Allowed, key: &str, value: &Val<'_>) -> bool {
         Val::Str(s) => Cow::Borrowed(s.as_ref()),
         Val::Num(n) => Cow::Owned(n.to_string()),
         Val::Bool(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
-        Val::List(_) | Val::Class(_) | Val::Digits(_) => return false,
+        Val::List(_) | Val::Class(_) => return false,
     };
     if !safe_protocol(key, &string) {
         return false;
@@ -1318,7 +1305,7 @@ fn clobbered(key: &str) -> bool {
 }
 
 fn clobber(value: Val<'_>) -> Val<'_> {
-    match value.expanded() {
+    match value {
         Val::Str(s) => Val::Str(Cow::Owned(format!("user-content-{s}"))),
         Val::Num(n) => Val::Str(Cow::Owned(format!("user-content-{n}"))),
         Val::Bool(b) => Val::Str(Cow::Owned(format!("user-content-{b}"))),
@@ -1327,7 +1314,7 @@ fn clobber(value: Val<'_>) -> Val<'_> {
                 .map(|s| Cow::Owned(format!("user-content-{s}")))
                 .collect(),
         ),
-        other => other,
+        Val::Class(name) => Val::List(vec![Cow::Owned(format!("user-content-{name}"))]),
     }
 }
 
@@ -1342,7 +1329,6 @@ fn sanitize_value<'s>(allowed: &Allowed, key: &str, value: Val<'s>) -> Result<Va
             },
         );
     }
-    let value = value.expanded();
     match value {
         Val::List(list) => Ok(Val::List(
             list.into_iter()
@@ -1822,11 +1808,6 @@ impl Json<'_, '_> {
                 self.out.push_str(name);
                 self.out.push_str("\"]");
             }
-            Val::Digits(n) => {
-                self.out.push('"');
-                json_u32(&mut self.out, *n as u32);
-                self.out.push('"');
-            }
             Val::List(list) => {
                 self.out.push('[');
                 for (i, item) in list.iter().enumerate() {
@@ -2103,11 +2084,6 @@ impl Encoder<'_, '_> {
             Val::Bool(true) => self.ops.push(op::TRUE),
             Val::Bool(false) => self.ops.push(op::FALSE),
             Val::Num(n) => self.ops.extend([op::NUMBER, *n as u32]),
-            Val::Digits(n) => {
-                self.ops.push(op::STRING);
-                let digits = n.to_string();
-                self.string(&digits);
-            }
             Val::Class(name) => {
                 self.ops.extend([op::LIST, 1]);
                 self.name(name);
