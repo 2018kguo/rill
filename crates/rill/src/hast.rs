@@ -63,6 +63,16 @@ pub struct HNode<'s> {
     pub end: Edge,
 }
 
+impl HNode<'_> {
+    /// hast-util-sanitize keeps only complete positions.
+    fn drop_partial_position(&mut self) {
+        if self.start == Edge::None || self.end == Edge::None {
+            self.start = Edge::None;
+            self.end = Edge::None;
+        }
+    }
+}
+
 pub struct HTree<'s> {
     pub nodes: Vec<HNode<'s>>,
     /// `data.quirksMode` from `rehype-raw`.
@@ -221,14 +231,16 @@ impl<'s> HTree<'s> {
         })
     }
 
-    fn tag(&self, ix: Ix) -> Option<&'static str> {
+    /// An element's tag name.
+    pub fn tag_name(&self, ix: Ix) -> Option<&'static str> {
         match &self.nodes[ix as usize].kind {
             HKind::Element { tag, .. } => Some(tag),
             _ => None,
         }
     }
 
-    fn props_mut(&mut self, ix: Ix) -> Option<&mut Props<'s>> {
+    /// An element's properties.
+    pub fn properties_mut(&mut self, ix: Ix) -> Option<&mut Props<'s>> {
         match &mut self.nodes[ix as usize].kind {
             HKind::Element { props, .. } => Some(props),
             _ => None,
@@ -243,15 +255,13 @@ impl<'s> HTree<'s> {
             self.append(&mut out, newline);
         }
         let mut cursor = nodes.first;
-        let mut first = true;
         while cursor != NIL {
             let next = self.nodes[cursor as usize].next;
-            if !first {
+            if cursor != nodes.first {
                 let newline = self.text("\n");
                 self.append(&mut out, newline);
             }
             self.append(&mut out, cursor);
-            first = false;
             cursor = next;
         }
         if loose && nodes.first != NIL {
@@ -288,16 +298,6 @@ impl<'s> HTree<'s> {
         }
         self.set_children(parent, chain);
     }
-
-    /// An element's tag name.
-    pub fn tag_name(&self, ix: Ix) -> Option<&'static str> {
-        self.tag(ix)
-    }
-
-    /// An element's properties.
-    pub fn properties_mut(&mut self, ix: Ix) -> Option<&mut Props<'s>> {
-        self.props_mut(ix)
-    }
 }
 
 /// Sets property `key`, replacing any value it had.
@@ -314,10 +314,6 @@ pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Val<'s>> {
         .iter()
         .find(|(name, _)| *name == key)
         .map(|(_, value)| value)
-}
-
-fn class<'s>(name: &'static str) -> Val<'s> {
-    Val::Class(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -635,7 +631,7 @@ impl<'s> ToHast<'_, 's> {
                         Val::Str(Cow::Owned(format!("user-content-fnref-{safe_id}{suffix}"))),
                     ),
                     ("dataFootnoteRef", Val::Bool(true)),
-                    ("ariaDescribedBy", class("footnote-label")),
+                    ("ariaDescribedBy", Val::Class("footnote-label")),
                 ];
                 if self.link_depth > 0 {
                     self.raw_boundary = true;
@@ -744,7 +740,7 @@ impl<'s> ToHast<'_, 's> {
                     )
                 });
                 if has_task {
-                    props.push(("className", class("contains-task-list")));
+                    props.push(("className", Val::Class("contains-task-list")));
                 }
                 let children = self.h.wrap(results, true);
                 Chain::one(self.h.element_with(tag, props, at, children))
@@ -808,7 +804,7 @@ impl<'s> ToHast<'_, 's> {
         };
         let mut props = Vec::new();
         if let Some(checked) = checked {
-            if results.first == NIL || self.h.tag(results.first) != Some("p") {
+            if results.first == NIL || self.h.tag_name(results.first) != Some("p") {
                 let paragraph = self.h.element("p", Vec::new(), At::None);
                 self.h.prepend(&mut results, paragraph);
             }
@@ -829,17 +825,16 @@ impl<'s> ToHast<'_, 's> {
             );
             self.h.prepend(&mut children, input);
             self.h.set_children(paragraph, children);
-            props.push(("className", class("task-list-item")));
+            props.push(("className", Val::Class("task-list-item")));
         }
-        let tail_is_paragraph = results.last != NIL && self.h.tag(results.last) == Some("p");
+        let tail_is_paragraph = results.last != NIL && self.h.tag_name(results.last) == Some("p");
         let nonempty = results.first != NIL;
         let mut children = EMPTY;
         let mut cursor = results.first;
-        let mut index = 0;
         while cursor != NIL {
             let next = self.h.nodes[cursor as usize].next;
-            let is_paragraph = self.h.tag(cursor) == Some("p");
-            if loose || index != 0 || !is_paragraph {
+            let is_paragraph = self.h.tag_name(cursor) == Some("p");
+            if loose || cursor != results.first || !is_paragraph {
                 let newline = self.h.text("\n");
                 self.h.append(&mut children, newline);
             }
@@ -850,7 +845,6 @@ impl<'s> ToHast<'_, 's> {
                 self.h.append(&mut children, cursor);
             }
             cursor = next;
-            index += 1;
         }
         if nonempty && (loose || !tail_is_paragraph) {
             let newline = self.h.text("\n");
@@ -976,14 +970,14 @@ impl<'s> ToHast<'_, 's> {
                                 reference_index + 1
                             ))),
                         ),
-                        ("className", class("data-footnote-backref")),
+                        ("className", Val::Class("data-footnote-backref")),
                     ],
                     At::None,
                     children,
                 );
                 self.h.append(&mut back, link);
             }
-            if content.last != NIL && self.h.tag(content.last) == Some("p") {
+            if content.last != NIL && self.h.tag_name(content.last) == Some("p") {
                 let tail = content.last;
                 let mut inner = self.h.children_of(tail);
                 let tail_text =
@@ -1019,7 +1013,7 @@ impl<'s> ToHast<'_, 's> {
         let label = self.h.element_around(
             "h2",
             vec![
-                ("className", class("sr-only")),
+                ("className", Val::Class("sr-only")),
                 ("id", Val::Str(Cow::Borrowed("footnote-label"))),
             ],
             At::None,
@@ -1039,7 +1033,7 @@ impl<'s> ToHast<'_, 's> {
             "section",
             vec![
                 ("dataFootnotes", Val::Bool(true)),
-                ("className", class("footnotes")),
+                ("className", Val::Class("footnotes")),
             ],
             At::None,
             children,
@@ -1516,7 +1510,7 @@ impl Default for Harden {
 
 struct Finisher<'a, 's> {
     tree: &'a mut HTree<'s>,
-    /// `None`: KaTeX runs first, so sanitize and harden wait for JavaScript too.
+    /// `false`: KaTeX runs first, so sanitize and harden wait for JavaScript too.
     sanitize: bool,
     code_classes: &'static [&'static str],
     /// `None` with math: KaTeX runs before sanitize and harden, in JavaScript.
@@ -1560,14 +1554,15 @@ impl<'s> Finisher<'_, 's> {
             return;
         }
         let end = self.tree.nodes[ix as usize].end;
-        let value = match &mut self.tree.nodes[ix as usize].kind {
-            HKind::Text(value) => std::mem::take(value),
-            _ => Cow::Borrowed(""),
+        let HKind::Text(value) = &mut self.tree.nodes[ix as usize].kind else {
+            unreachable!("mergeable nodes are text");
         };
+        let value = std::mem::take(value);
         let into = &mut self.tree.nodes[level.last as usize];
-        if let HKind::Text(existing) = &mut into.kind {
-            existing.to_mut().push_str(&value);
-        }
+        let HKind::Text(existing) = &mut into.kind else {
+            unreachable!("mergeable nodes are text");
+        };
+        existing.to_mut().push_str(&value);
         into.end = end;
     }
 
@@ -1578,7 +1573,7 @@ impl<'s> Finisher<'_, 's> {
         let mut fostered = Vec::new();
         while cursor != NIL {
             let next = self.tree.nodes[cursor as usize].next;
-            if self.tree.tag(cursor) == Some("table") {
+            if self.tree.tag_name(cursor) == Some("table") {
                 fostered.clear();
                 self.take_foster(cursor, &mut fostered);
                 for &text in &fostered {
@@ -1605,24 +1600,22 @@ impl<'s> Finisher<'_, 's> {
     }
 
     fn text(&mut self, ix: Ix, out: &mut Chain) {
-        // hast-util-sanitize keeps only complete positions.
-        let node = &mut self.tree.nodes[ix as usize];
-        if self.sanitize && (node.start == Edge::None || node.end == Edge::None) {
-            node.start = Edge::None;
-            node.end = Edge::None;
+        if self.sanitize {
+            self.tree.nodes[ix as usize].drop_partial_position();
         }
         self.tree.append(out, ix);
     }
 
     fn element(&mut self, ix: Ix, out: &mut Chain) {
-        let tag = self.tree.tag(ix).unwrap_or("");
-        if let HKind::Element { props, meta, .. } = &mut self.tree.nodes[ix as usize].kind {
-            *meta = None;
-            *props = std::mem::take(props)
-                .into_iter()
-                .filter_map(|(key, value)| round_trip(key, value).map(|value| (key, value)))
-                .collect();
-        }
+        let HKind::Element { tag, props, meta } = &mut self.tree.nodes[ix as usize].kind else {
+            unreachable!("children() sends only elements here");
+        };
+        let tag = *tag;
+        *meta = None;
+        *props = std::mem::take(props)
+            .into_iter()
+            .filter_map(|(key, value)| round_trip(key, value).map(|value| (key, value)))
+            .collect();
         let table = usize::from(tag == "table");
         self.table_depth += table;
         self.children(ix);
@@ -1643,14 +1636,9 @@ impl<'s> Finisher<'_, 's> {
             }
             return;
         }
-        let node = &mut self.tree.nodes[ix as usize];
-        if node.start == Edge::None || node.end == Edge::None {
-            node.start = Edge::None;
-            node.end = Edge::None;
-        }
-        if let Some(props) = self.tree.props_mut(ix) {
-            *props = sanitize_props(tag, std::mem::take(props), self.code_classes);
-        }
+        self.tree.nodes[ix as usize].drop_partial_position();
+        let props = self.tree.properties_mut(ix).expect("an element");
+        *props = sanitize_props(tag, std::mem::take(props), self.code_classes);
         if self
             .harden
             .is_none_or(|harden| self.harden(ix, tag, harden))
@@ -1667,9 +1655,7 @@ impl<'s> Finisher<'_, 's> {
             "img" => ("src", true),
             _ => return true,
         };
-        let Some(props) = self.tree.props_mut(ix) else {
-            return true;
-        };
+        let props = self.tree.properties_mut(ix).expect("an element");
         let transformed = match get(props, key) {
             Some(Val::Str(url)) => transform_url(url, image),
             _ => Err(Blocked),
@@ -1705,11 +1691,7 @@ impl<'s> Finisher<'_, 's> {
             Some(Val::Bool(b)) => b.to_string(),
             _ => "undefined".to_owned(),
         };
-        let props = self
-            .tree
-            .props_mut(ix)
-            .map(std::mem::take)
-            .unwrap_or_default();
+        let props = std::mem::take(self.tree.properties_mut(ix).expect("an element"));
         let (props, children): (Props<'s>, Option<Ix>) = match (image, policy) {
             (false, BlockPolicy::TextOnly) => (Vec::new(), None),
             (false, _) => {
@@ -1750,22 +1732,14 @@ impl<'s> Finisher<'_, 's> {
                     )
                 };
                 let label = self.tree.text(Cow::Owned(text));
-                let node = &mut self.tree.nodes[ix as usize];
-                node.first = label;
-                node.last = label;
+                self.tree.set_children(ix, Chain::one(label));
                 (props, None)
             }
         };
         if let Some(suffix) = children {
-            let node = &self.tree.nodes[ix as usize];
-            let mut chain = Chain {
-                first: node.first,
-                last: node.last,
-            };
-            self.tree.append(&mut chain, suffix);
-            let node = &mut self.tree.nodes[ix as usize];
-            node.first = chain.first;
-            node.last = chain.last;
+            let mut children = self.tree.children_of(ix);
+            self.tree.append(&mut children, suffix);
+            self.tree.set_children(ix, children);
         }
         let node = &mut self.tree.nodes[ix as usize];
         node.kind = HKind::Element {
