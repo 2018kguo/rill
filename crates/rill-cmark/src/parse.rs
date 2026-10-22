@@ -33,8 +33,7 @@ use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
 use crate::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, MetadataBlockKind,
-    Options, Tag, TagEnd,
+    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Tag, TagEnd,
 };
 
 // Allowing arbitrary depth nested parentheses inside link destinations
@@ -107,7 +106,6 @@ pub(crate) enum ItemBody {
     List(bool, u8, u64), // is_tight, list character, list start index
     ListItem(usize),     // indent level
     FootnoteDefinition(CowIndex),
-    MetadataBlock(MetadataBlockKind),
 
     // Tables
     Table(AlignmentIndex),
@@ -2090,7 +2088,6 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
         ItemBody::TableRow => TagEnd::TableRow,
         ItemBody::Table(..) => TagEnd::Table,
         ItemBody::FootnoteDefinition(..) => TagEnd::FootnoteDefinition,
-        ItemBody::MetadataBlock(kind) => TagEnd::MetadataBlock(kind),
         _ => panic!("unexpected item body {:?}", body),
     }
 }
@@ -2167,7 +2164,6 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::TableRow => Tag::TableRow,
         ItemBody::Table(alignment_ix) => Tag::Table(allocs.take_alignment(alignment_ix)),
         ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(allocs.take_cow(cow_ix)),
-        ItemBody::MetadataBlock(kind) => Tag::MetadataBlock(kind),
         ItemBody::Math(cow_ix, is_display) => {
             return if is_display {
                 Event::DisplayMath(allocs.take_cow(cow_ix))

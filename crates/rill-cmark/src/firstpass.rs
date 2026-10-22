@@ -6,6 +6,7 @@ use std::cmp::max;
 use crate::parse::{
     scan_containers, Allocations, FootnoteDef, Item, ItemBody, LinkDef, LINK_MAX_NESTED_PARENS,
 };
+use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
 use crate::Options;
@@ -13,7 +14,6 @@ use crate::{
     linklabel::{scan_link_label_rest, LinkLabel},
     HeadingLevel,
 };
-use crate::{scanners::*, MetadataBlockKind};
 
 use unicase::UniCase;
 
@@ -256,20 +256,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
 
         let ix = start_ix + line_start.bytes_scanned();
-
-        // metadata blocks cannot be indented
-        if indent == 0 {
-            if let Some((_n, metadata_block_ch)) = scan_metadata_block(
-                &bytes[ix..],
-                self.options
-                    .contains(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS),
-                self.options
-                    .contains(Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS),
-            ) {
-                self.finish_list(start_ix);
-                return self.parse_metadata_block(ix, metadata_block_ch);
-            }
-        }
 
         // HTML Blocks
         if bytes[ix] == b'<' {
@@ -1316,46 +1302,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             self.append_code_text(remaining_space, ix, next_ix);
             ix = next_ix;
         }
-    }
-
-    fn parse_metadata_block(&mut self, start_ix: usize, metadata_block_ch: u8) -> usize {
-        let bytes = self.text.as_bytes();
-        let metadata_block_kind = match metadata_block_ch {
-            b'-' => MetadataBlockKind::YamlStyle,
-            b'+' => MetadataBlockKind::PlusesStyle,
-            _ => panic!("Erroneous metadata block character when parsing metadata block"),
-        };
-        // 3 delimiter characters
-        let mut ix = start_ix + 3 + scan_nextline(&bytes[start_ix + 3..]);
-        self.tree.append(Item {
-            start: start_ix,
-            end: 0, // will get set later
-            body: ItemBody::MetadataBlock(metadata_block_kind),
-        });
-        self.tree.push();
-        loop {
-            let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
-            if n_containers < self.tree.spine_len() {
-                break;
-            }
-            if let (_, 0) = calc_indent(&bytes[ix..], 4) {
-                if let Some(n) = scan_closing_metadata_block(&bytes[ix..], metadata_block_ch) {
-                    ix += n;
-                    break;
-                }
-            }
-            let remaining_space = line_start.remaining_space();
-            ix += line_start.bytes_scanned();
-            let next_ix = ix + scan_nextline(&bytes[ix..]);
-            self.append_code_text(remaining_space, ix, next_ix);
-            ix = next_ix;
-        }
-
-        self.pop(ix);
-
-        // try to read trailing whitespace or it will register as a completely blank line
-        ix + scan_blank_line(&bytes[ix..]).unwrap_or(0)
     }
 
     fn append_code_text(&mut self, remaining_space: usize, start: usize, end: usize) {
