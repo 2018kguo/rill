@@ -3,9 +3,7 @@
 
 use std::cmp::max;
 
-use crate::parse::{
-    scan_containers, Allocations, FootnoteDef, Item, ItemBody, LinkDef, LINK_MAX_NESTED_PARENS,
-};
+use crate::parse::{scan_containers, Allocations, Item, ItemBody, LinkDef, LINK_MAX_NESTED_PARENS};
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
@@ -1453,10 +1451,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             }
         }
         i += scan_whitespace_no_nl(&bytes[i..]);
-        self.allocs
-            .footdefs
-            .0
-            .insert(UniCase::new(label.clone()), FootnoteDef { use_count: 0 });
+        self.allocs.footdefs.0.insert(UniCase::new(label.clone()));
         self.tree.append(Item {
             start,
             end: 0, // will get set later

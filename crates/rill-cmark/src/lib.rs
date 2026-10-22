@@ -27,8 +27,6 @@
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
 
-pub mod utils;
-
 mod attention;
 pub mod autolink_literal;
 mod entities;
@@ -43,7 +41,6 @@ mod unicode_tables;
 pub use crate::parse::{OffsetIter, Parser};
 pub use crate::scanners::decode_string;
 pub use crate::strings::{CowStr, InlineStr};
-pub use crate::utils::*;
 
 /// Codeblock kind.
 #[derive(Clone, Debug, PartialEq)]

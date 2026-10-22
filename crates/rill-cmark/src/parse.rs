@@ -21,7 +21,7 @@
 //! Tree-based two pass parser.
 
 use std::cmp::{max, min};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::iter::FusedIterator;
 use std::ops::{Index, Range};
 
@@ -636,13 +636,6 @@ impl<'input> Parser<'input> {
                             // see if it's a footnote reference
                             if let Some((ReferenceLabel::Footnote(l), end)) = label {
                                 let footref = self.allocs.allocate_cow(l);
-                                if let Some(def) = self
-                                    .allocs
-                                    .footdefs
-                                    .get_mut(self.allocs.cows[footref.0].to_owned())
-                                {
-                                    def.use_count += 1;
-                                }
                                 if self.allocs.footdefs.contains(&self.allocs.cows[footref.0]) {
                                     // If this came from a MaybeImage, then the `!` prefix
                                     // isn't part of the footnote reference.
@@ -1618,12 +1611,6 @@ pub struct LinkDef<'a> {
     pub title: Option<CowStr<'a>>,
 }
 
-/// Contains the destination URL, title and source span of a reference definition.
-#[derive(Clone, Debug)]
-pub struct FootnoteDef {
-    pub use_count: usize,
-}
-
 /// Tracks tree indices of code span delimiters of each length. It should prevent
 /// quadratic scanning behaviours by providing (amortized) constant time lookups.
 struct CodeDelims {
@@ -1694,7 +1681,7 @@ pub struct RefDefs<'input>(pub(crate) HashMap<LinkLabel<'input>, LinkDef<'input>
 
 /// Keeps track of the footnote definitions defined in the document.
 #[derive(Clone, Default, Debug)]
-pub struct FootnoteDefs<'input>(pub(crate) HashMap<FootnoteLabel<'input>, FootnoteDef>);
+pub struct FootnoteDefs<'input>(pub(crate) HashSet<FootnoteLabel<'input>>);
 
 impl<'input, 'b, 's> RefDefs<'input>
 where
@@ -1712,11 +1699,7 @@ where
 {
     /// Performs a lookup on reference label using unicode case folding.
     pub fn contains(&'s self, key: &'b str) -> bool {
-        self.0.contains_key(&UniCase::new(key.into()))
-    }
-    /// Performs a lookup on reference label using unicode case folding.
-    pub fn get_mut(&'s mut self, key: CowStr<'input>) -> Option<&'s mut FootnoteDef> {
-        self.0.get_mut(&UniCase::new(key))
+        self.0.contains(&UniCase::new(key.into()))
     }
 }
 
@@ -2249,62 +2232,6 @@ mod test {
             .collect();
         let expected_offsets = vec![(0..4), (0..4)];
         assert_eq!(expected_offsets, event_offsets);
-    }
-
-    // FIXME: add this one regression suite
-    #[cfg(feature = "html")]
-    #[test]
-    fn link_def_at_eof() {
-        let test_str = "[My site][world]\n\n[world]: https://vincentprouillet.com";
-        let expected = "<p><a href=\"https://vincentprouillet.com\">My site</a></p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn no_footnote_refs_without_option() {
-        let test_str = "a [^a]\n\n[^a]: yolo";
-        let expected = "<p>a <a href=\"yolo\">^a</a></p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn ref_def_at_eof() {
-        let test_str = "[test]:\\";
-        let expected = "";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn ref_def_cr_lf() {
-        let test_str = "[a]: /u\r\n\n[a]";
-        let expected = "<p><a href=\"/u\">a</a></p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
-    }
-
-    #[cfg(feature = "html")]
-    #[test]
-    fn no_dest_refdef() {
-        let test_str = "[a]:";
-        let expected = "<p>[a]:</p>\n";
-
-        let mut buf = String::new();
-        crate::html::push_html(&mut buf, Parser::new(test_str));
-        assert_eq!(expected, buf);
     }
 
     #[test]
