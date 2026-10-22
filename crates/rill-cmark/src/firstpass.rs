@@ -1245,82 +1245,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         LoopInstruction::ContinueAndSkip(0)
                     }
                 }
-                b'.' => {
-                    if ix + 2 < bytes.len() && bytes[ix + 1] == b'.' && bytes[ix + 2] == b'.' {
-                        self.tree.append_text(begin_text, ix, backslash_escaped);
-                        backslash_escaped = false;
-                        self.tree.append(Item {
-                            start: ix,
-                            end: ix + 3,
-                            body: ItemBody::SynthesizeChar('…'),
-                        });
-                        begin_text = ix + 3;
-                        LoopInstruction::ContinueAndSkip(2)
-                    } else {
-                        LoopInstruction::ContinueAndSkip(0)
-                    }
-                }
-                b'-' => {
-                    let count = 1 + scan_ch_repeat(&bytes[(ix + 1)..], b'-');
-                    if count == 1 {
-                        LoopInstruction::ContinueAndSkip(0)
-                    } else {
-                        let itembody = if count == 2 {
-                            ItemBody::SynthesizeChar('–')
-                        } else if count == 3 {
-                            ItemBody::SynthesizeChar('—')
-                        } else {
-                            let (ems, ens) = match count % 6 {
-                                0 | 3 => (count / 3, 0),
-                                2 | 4 => (0, count / 2),
-                                1 => (count / 3 - 1, 2),
-                                _ => (count / 3, 1),
-                            };
-                            // – and — are 3 bytes each in utf8
-                            let mut buf = String::with_capacity(3 * (ems + ens));
-                            for _ in 0..ems {
-                                buf.push('—');
-                            }
-                            for _ in 0..ens {
-                                buf.push('–');
-                            }
-                            ItemBody::SynthesizeText(self.allocs.allocate_cow(buf.into()))
-                        };
-
-                        self.tree.append_text(begin_text, ix, backslash_escaped);
-                        backslash_escaped = false;
-                        self.tree.append(Item {
-                            start: ix,
-                            end: ix + count,
-                            body: itembody,
-                        });
-                        begin_text = ix + count;
-                        LoopInstruction::ContinueAndSkip(count - 1)
-                    }
-                }
-                c @ b'\'' | c @ b'"' => {
-                    let string_suffix = &self.text[ix..];
-                    let can_open =
-                        delim_run_can_open(&self.text[start..], string_suffix, 1, ix - start, mode);
-                    let can_close = delim_run_can_close(
-                        &self.text[start..],
-                        string_suffix,
-                        1,
-                        ix - start,
-                        mode,
-                    );
-
-                    self.tree.append_text(begin_text, ix, backslash_escaped);
-                    backslash_escaped = false;
-                    self.tree.append(Item {
-                        start: ix,
-                        end: ix + 1,
-                        body: ItemBody::MaybeSmartQuote(c, can_open, can_close),
-                    });
-                    begin_text = ix + 1;
-
-                    LoopInstruction::ContinueAndSkip(0)
-                }
                 _ => LoopInstruction::ContinueAndSkip(0),
             }
         });
@@ -2381,96 +2305,6 @@ fn fixup_end_of_definition_list(tree: &mut Tree<Item>, list_ix: TreeIndex) {
     }
 }
 
-/// Determines whether the delimiter run starting at given index is
-/// left-flanking, as defined by the commonmark spec (and isn't intraword
-/// for _ delims).
-/// suffix is &s[ix..], which is passed in as an optimization, since taking
-/// a string subslice is O(n).
-fn delim_run_can_open(
-    s: &str,
-    suffix: &str,
-    run_len: usize,
-    ix: usize,
-    mode: TableParseMode,
-) -> bool {
-    let next_char = if let Some(c) = suffix[run_len..].chars().next() {
-        c
-    } else {
-        return false;
-    };
-    if next_char.is_whitespace() {
-        return false;
-    }
-    if ix == 0 {
-        return true;
-    }
-    if mode == TableParseMode::Active {
-        if s.as_bytes()[..ix].ends_with(b"|") && !s.as_bytes()[..ix].ends_with(br"\|") {
-            return true;
-        }
-        if next_char == '|' {
-            return false;
-        }
-    }
-    let delim = suffix.bytes().next().unwrap();
-    // `*` and `~~` can be intraword, `_` and `~` cannot
-    if delim == b'*' && !is_punctuation(next_char) {
-        return true;
-    }
-    if delim == b'~' && run_len > 1 {
-        return true;
-    }
-    let prev_char = s[..ix].chars().last().unwrap();
-    if delim == b'~' && prev_char == '~' && !is_punctuation(next_char) {
-        return true;
-    }
-
-    prev_char.is_whitespace()
-        || is_punctuation(prev_char) && (delim != b'\'' || ![']', ')'].contains(&prev_char))
-}
-
-/// Determines whether the delimiter run starting at given index is
-/// right-flanking, as defined by the commonmark spec (and isn't intraword
-/// for _ delims)
-fn delim_run_can_close(
-    s: &str,
-    suffix: &str,
-    run_len: usize,
-    ix: usize,
-    mode: TableParseMode,
-) -> bool {
-    if ix == 0 {
-        return false;
-    }
-    let prev_char = s[..ix].chars().last().unwrap();
-    if prev_char.is_whitespace() {
-        return false;
-    }
-    let next_char = if let Some(c) = suffix[run_len..].chars().next() {
-        c
-    } else {
-        return true;
-    };
-    if mode == TableParseMode::Active {
-        if s.as_bytes()[..ix].ends_with(b"|") && !s.as_bytes()[..ix].ends_with(br"\|") {
-            return false;
-        }
-        if next_char == '|' {
-            return true;
-        }
-    }
-    let delim = suffix.bytes().next().unwrap();
-    // `*` and `~~` can be intraword, `_` and `~` cannot
-    if (delim == b'*' || (delim == b'~' && run_len > 1)) && !is_punctuation(prev_char) {
-        return true;
-    }
-    if delim == b'~' && prev_char == '~' {
-        return true;
-    }
-
-    next_char.is_whitespace() || is_punctuation(next_char)
-}
-
 fn create_lut(options: &Options) -> LookupTable {
     #[cfg(all(target_arch = "x86_64", feature = "simd"))]
     {
@@ -2507,11 +2341,6 @@ fn special_bytes(options: &Options) -> [bool; 256] {
     }
     if options.contains(Options::ENABLE_MATH) {
         bytes[b'$' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_SMART_PUNCTUATION) {
-        for &byte in &[b'.', b'-', b'"', b'\''] {
-            bytes[byte as usize] = true;
-        }
     }
 
     bytes
@@ -2751,12 +2580,6 @@ mod simd {
         if options.contains(Options::ENABLE_MATH) {
             add_lookup_byte(&mut lookup, b'$');
         }
-        if options.contains(Options::ENABLE_SMART_PUNCTUATION) {
-            for &byte in &[b'.', b'-', b'"', b'\''] {
-                add_lookup_byte(&mut lookup, byte);
-            }
-        }
-
         lookup
     }
 

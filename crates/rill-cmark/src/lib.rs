@@ -39,7 +39,6 @@ mod entities;
 mod firstpass;
 mod linklabel;
 mod parse;
-mod puncttable;
 mod scanners;
 mod strings;
 mod tree;

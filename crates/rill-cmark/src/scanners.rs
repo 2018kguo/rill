@@ -23,12 +23,15 @@
 use std::char;
 
 use crate::parse::HtmlScanGuard;
-pub(crate) use crate::puncttable::{is_ascii_punctuation, is_punctuation};
 use crate::strings::CowStr;
 use crate::{entities, HeadingLevel};
 use crate::{Alignment, LinkType};
 
 use memchr::memchr;
+
+pub(crate) fn is_ascii_punctuation(c: u8) -> bool {
+    c.is_ascii_punctuation()
+}
 
 // sorted for binary search
 const HTML_TAGS: [&str; 62] = [

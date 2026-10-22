@@ -58,9 +58,6 @@ pub(crate) enum ItemBody {
 
     // repeats, can_open, can_close
     MaybeEmphasis(usize, bool, bool),
-    // can_open, can_close, brace context
-    // quote byte, can_open, can_close
-    MaybeSmartQuote(u8, bool, bool),
     MaybeCode(usize, bool),     // number of backticks, preceded by backslash
     MaybeMathText(usize, bool), // rill: number of dollars, preceded by backslash
     MaybeHtml,
@@ -139,7 +136,6 @@ impl ItemBody {
         matches!(
             *self,
             MaybeEmphasis(..)
-                | MaybeSmartQuote(..)
                 | MaybeCode(..)
                 | MaybeMathText(..)
                 | MaybeHtml
@@ -153,7 +149,6 @@ impl ItemBody {
         matches!(
             *self,
             MaybeEmphasis(..)
-                | MaybeSmartQuote(..)
                 | MaybeCode(..)
                 | MaybeMathText(..)
                 | MaybeHtml
@@ -1126,8 +1121,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         let mut prev_ix: TreeIndex;
         let mut cur = self.tree.cur();
 
-        let mut single_quote_open: Option<TreeIndex> = None;
-        let mut double_quote_open: bool = false;
 
         while let Some(mut cur_ix) = cur {
             match self.tree[cur_ix].item.body {
@@ -1254,32 +1247,6 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                         prev = Some(prev_ix);
                         cur = self.tree[prev_ix].next;
                     }
-                }
-                ItemBody::MaybeSmartQuote(c, can_open, can_close) => {
-                    self.tree[cur_ix].item.body = match c {
-                        b'\'' => {
-                            if let (Some(open_ix), true) = (single_quote_open, can_close) {
-                                self.tree[open_ix].item.body = ItemBody::SynthesizeChar('‘');
-                                single_quote_open = None;
-                            } else if can_open {
-                                single_quote_open = Some(cur_ix);
-                            }
-                            ItemBody::SynthesizeChar('’')
-                        }
-                        _ /* double quote */ => {
-                            if can_close && double_quote_open {
-                                double_quote_open = false;
-                                ItemBody::SynthesizeChar('”')
-                            } else {
-                                if can_open && !double_quote_open {
-                                    double_quote_open = true;
-                                }
-                                ItemBody::SynthesizeChar('“')
-                            }
-                        }
-                    };
-                    prev = cur;
-                    cur = self.tree[cur_ix].next;
                 }
                 ItemBody::HardBreak(true) => {
                     if self.tree[cur_ix].next.is_none() {
