@@ -444,6 +444,13 @@ fn revert_suffix(kind: ReferenceKind, label: &str, identifier: &str) -> String {
 // mdast-util-to-hast 13.2.1
 // ---------------------------------------------------------------------------
 
+/// What a link or image reference resolves to.
+#[derive(Clone)]
+struct Definition<'s> {
+    url: Cow<'s, str>,
+    title: Option<Cow<'s, str>>,
+}
+
 /// One footnote's citations so far.
 struct FootnoteCalls {
     /// The uppercased identifier.
@@ -454,7 +461,8 @@ struct FootnoteCalls {
 struct ToHast<'t, 's> {
     m: &'t MTree<'s>,
     h: HTree<'s>,
-    definitions: HashMap<String, (Cow<'s, str>, Option<Cow<'s, str>>)>,
+    /// Definitions by uppercased identifier; the first of a duplicate wins.
+    definitions: HashMap<String, Definition<'s>>,
     footnotes: HashMap<String, Ix>,
     /// Cited footnotes in first-citation order, which numbers them.
     footnote_calls: Vec<FootnoteCalls>,
@@ -475,7 +483,10 @@ impl<'s> ToHast<'_, 's> {
             } => {
                 self.definitions
                     .entry(identifier.to_uppercase())
-                    .or_insert_with(|| (url.clone(), title.clone()));
+                    .or_insert_with(|| Definition {
+                        url: url.clone(),
+                        title: title.clone(),
+                    });
             }
             MKind::FootnoteDefinition { identifier, .. } => {
                 self.footnotes
@@ -644,16 +655,7 @@ impl<'s> ToHast<'_, 's> {
                 self.raw_boundary = true;
                 Chain::one(self.h.push(HKind::Raw(value.clone()), at))
             }
-            MKind::Image { url, title, alt } => {
-                let mut props = vec![
-                    ("src", Val::Str(normalize_uri(url.clone()))),
-                    ("alt", Val::Str(Cow::Owned(alt.clone()))),
-                ];
-                if let Some(title) = title {
-                    props.push(("title", Val::Str(title.clone())));
-                }
-                Chain::one(self.h.element("img", props, at))
-            }
+            MKind::Image { url, title, alt } => self.image(url.clone(), title.clone(), alt, at),
             MKind::ImageReference {
                 kind,
                 identifier,
@@ -664,16 +666,7 @@ impl<'s> ToHast<'_, 's> {
                     let suffix = revert_suffix(*kind, label, identifier);
                     Chain::one(self.h.text(Cow::Owned(format!("![{alt}{suffix}"))))
                 }
-                Some((url, title)) => {
-                    let mut props = vec![
-                        ("src", Val::Str(normalize_uri(url))),
-                        ("alt", Val::Str(Cow::Owned(alt.clone()))),
-                    ];
-                    if let Some(title) = title {
-                        props.push(("title", Val::Str(title)));
-                    }
-                    Chain::one(self.h.element("img", props, at))
-                }
+                Some(Definition { url, title }) => self.image(url, title, alt, at),
             },
             MKind::InlineCode(value) => {
                 let value = if value.contains(['\n', '\r']) {
@@ -684,13 +677,7 @@ impl<'s> ToHast<'_, 's> {
                 let text = self.h.push(HKind::Text(value), at);
                 Chain::one(self.h.element_around("code", Vec::new(), at, text))
             }
-            MKind::Link { url, title } => {
-                let mut props = vec![("href", Val::Str(normalize_uri(url.clone())))];
-                if let Some(title) = title {
-                    props.push(("title", Val::Str(title.clone())));
-                }
-                self.link(ix, props)
-            }
+            MKind::Link { url, title } => self.link(ix, url.clone(), title.clone()),
             MKind::LinkReference {
                 kind,
                 identifier,
@@ -717,13 +704,7 @@ impl<'s> ToHast<'_, 's> {
                     }
                     contents
                 }
-                Some((url, title)) => {
-                    let mut props = vec![("href", Val::Str(normalize_uri(url)))];
-                    if let Some(title) = title {
-                        props.push(("title", Val::Str(title)));
-                    }
-                    self.link(ix, props)
-                }
+                Some(Definition { url, title }) => self.link(ix, url, title),
             },
             MKind::List { ordered, start, .. } => {
                 let tag = if *ordered { "ol" } else { "ul" };
@@ -778,7 +759,28 @@ impl<'s> ToHast<'_, 's> {
         }
     }
 
-    fn link(&mut self, ix: Ix, props: Props<'s>) -> Chain {
+    fn image(
+        &mut self,
+        url: Cow<'s, str>,
+        title: Option<Cow<'s, str>>,
+        alt: &str,
+        at: At,
+    ) -> Chain {
+        let mut props = vec![
+            ("src", Val::Str(normalize_uri(url))),
+            ("alt", Val::Str(Cow::Owned(alt.to_owned()))),
+        ];
+        if let Some(title) = title {
+            props.push(("title", Val::Str(title)));
+        }
+        Chain::one(self.h.element("img", props, at))
+    }
+
+    fn link(&mut self, ix: Ix, url: Cow<'s, str>, title: Option<Cow<'s, str>>) -> Chain {
+        let mut props = vec![("href", Val::Str(normalize_uri(url)))];
+        if let Some(title) = title {
+            props.push(("title", Val::Str(title)));
+        }
         if self.link_depth > 0 {
             self.raw_boundary = true;
         }
