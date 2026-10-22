@@ -594,36 +594,21 @@ impl<'s> Builder<'s> {
         };
         let parent = self.stack.last().map_or(NIL, |frame| frame.ix);
         let mut exit = None;
+        // A container's content end; its own end settles later (see `settle_exits`).
+        let mut container_end = None;
+        let content_end = |start: usize| {
+            last_span.map_or_else(
+                || trim_blank_lines(source, start, end),
+                |(_, last)| last as usize,
+            )
+        };
         match &mut self.tree.nodes[ix as usize].kind {
-            MKind::Code { value, fenced, .. } => {
-                if *fenced {
-                    let defer;
-                    (end, defer) = fence_end(source, value, start, end, in_container);
-                    if defer {
-                        exit = Some(Exit {
-                            ix,
-                            settle: Settle::Fence {
-                                in_blockquote,
-                                prefixes: fence_prefixes.clone(),
-                            },
-                            closing: pulldown_end,
-                            content_end: 0,
-                        });
-                    }
-                } else {
-                    start = indented_code_start(source, start, synthesized);
-                    end = trim_blank_lines(source, start, end);
-                    // ponytail: top level only; container prefixes would need the spine.
-                    if !in_container {
-                        let (tail, suffix) = indented_tail(source, end);
-                        end = tail;
-                        if !suffix.is_empty() {
-                            value.to_mut().push_str(&suffix);
-                        }
-                    }
-                }
+            MKind::Code {
+                value,
+                fenced: true,
+                ..
             }
-            MKind::Math { value, .. } => {
+            | MKind::Math { value, .. } => {
                 let defer;
                 (end, defer) = fence_end(source, value, start, end, in_container);
                 if defer {
@@ -631,11 +616,23 @@ impl<'s> Builder<'s> {
                         ix,
                         settle: Settle::Fence {
                             in_blockquote,
-                            prefixes: fence_prefixes.clone(),
+                            prefixes: fence_prefixes,
                         },
                         closing: pulldown_end,
                         content_end: 0,
                     });
+                }
+            }
+            MKind::Code { value, .. } => {
+                start = indented_code_start(source, start, synthesized);
+                end = trim_blank_lines(source, start, end);
+                // ponytail: top level only; container prefixes would need the spine.
+                if !in_container {
+                    let (tail, suffix) = indented_tail(source, end);
+                    end = tail;
+                    if !suffix.is_empty() {
+                        value.to_mut().push_str(&suffix);
+                    }
                 }
             }
             MKind::Html(value) => {
@@ -658,28 +655,11 @@ impl<'s> Builder<'s> {
                     start = first as usize;
                 }
                 *list_spread = spread;
-                let content_end = last_span
-                    .map_or(trim_blank_lines(source, start, end), |(_, last)| {
-                        last as usize
-                    });
-                exit = Some(Exit {
-                    ix,
-                    settle: Settle::Container { eof_prefixed },
-                    closing: end,
-                    content_end,
-                });
-                end = content_end;
+                container_end = Some(content_end(start));
             }
-            MKind::Blockquote => {
-                let content_end = trim_blank_lines(source, start, end);
-                exit = Some(Exit {
-                    ix,
-                    settle: Settle::Container { eof_prefixed },
-                    closing: end,
-                    content_end,
-                });
-                end = content_end;
-            }
+            MKind::Blockquote => container_end = Some(trim_blank_lines(source, start, end)),
+            // gfm-footnote definitions are micromark containers too.
+            MKind::FootnoteDefinition { .. } => container_end = Some(content_end(start)),
             MKind::ListItem {
                 spread: item_spread,
                 ..
@@ -708,20 +688,6 @@ impl<'s> Builder<'s> {
                     });
                 }
             }
-            // gfm-footnote definitions are micromark containers too.
-            MKind::FootnoteDefinition { .. } => {
-                let content_end = last_span
-                    .map_or(trim_blank_lines(source, start, end), |(_, last)| {
-                        last as usize
-                    });
-                exit = Some(Exit {
-                    ix,
-                    settle: Settle::Container { eof_prefixed },
-                    closing: end,
-                    content_end,
-                });
-                end = content_end;
-            }
             MKind::TableCell => {
                 if start > 0 && bytes[start - 1] == b'|' {
                     start -= 1;
@@ -741,17 +707,9 @@ impl<'s> Builder<'s> {
                 end = trim_line_ending(source, start, end);
                 // micromark: a setext heading's content includes the definitions that
                 // opened its paragraph, so the heading starts at the first of them.
-                if !atx_heading(&bytes[start..])
-                    && let Some(parent) = self.stack.last().map(|frame| frame.ix)
-                {
-                    let mut previous = NIL;
-                    let mut cursor = self.tree.nodes[parent as usize].first;
-                    while cursor != NIL && cursor != ix {
-                        previous = cursor;
-                        cursor = self.tree.nodes[cursor as usize].next;
-                    }
+                if parent != NIL && !atx_heading(&bytes[start..]) {
                     let mut earliest = start;
-                    let mut candidate = previous;
+                    let mut candidate = self.previous_sibling(parent, ix);
                     // Definitions directly before, each ending on the line before.
                     while candidate != NIL {
                         let MKind::Definition { .. } = self.tree.nodes[candidate as usize].kind
@@ -776,6 +734,15 @@ impl<'s> Builder<'s> {
                 end = trim_line_ending(source, start, end);
             }
             _ => {}
+        }
+        if let Some(content_end) = container_end {
+            exit = Some(Exit {
+                ix,
+                settle: Settle::Container { eof_prefixed },
+                closing: end,
+                content_end,
+            });
+            end = content_end;
         }
         self.tree.nodes[ix as usize].at = At::Bytes(start as u32, end as u32);
         if let Some((paragraph, check_start, check_end)) = self.task
