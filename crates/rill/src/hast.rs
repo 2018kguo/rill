@@ -2058,9 +2058,7 @@ struct Encoder<'a, 's> {
     ops: Vec<u32>,
     strings: String,
     units: u32,
-    /// Tag and property names already in the table. There are a few dozen at most, so a
-    /// scan beats hashing each name.
-    interned: Vec<(&'static str, (u32, u32))>,
+    interned: HashMap<&'static str, (u32, u32)>,
 }
 
 impl Encoder<'_, '_> {
@@ -2089,12 +2087,11 @@ impl Encoder<'_, '_> {
     }
 
     fn name(&mut self, value: &'static str) {
-        let known = self.interned.iter().find(|(name, _)| *name == value);
-        let (start, end) = match known {
-            Some(&(_, range)) => range,
+        let (start, end) = match self.interned.get(value) {
+            Some(range) => *range,
             None => {
                 let range = self.table(value);
-                self.interned.push((value, range));
+                self.interned.insert(value, range);
                 range
             }
         };
@@ -2272,7 +2269,7 @@ pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
         ops: Vec::with_capacity(tree.nodes.len() * 8),
         strings: String::new(),
         units: 0,
-        interned: Vec::new(),
+        interned: HashMap::new(),
     };
     encoder.node(root);
     Ok(Encoded {
