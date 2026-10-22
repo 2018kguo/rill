@@ -43,14 +43,20 @@ pub enum Val<'s> {
 /// An element's properties, in hast's order.
 pub type Props<'s> = Vec<(&'static str, Val<'s>)>;
 
+/// An element's hast `data`, boxed because only some code elements have any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Data {
+    /// `data.meta` from mdast-util-to-hast's code handler.
+    pub meta: Box<str>,
+}
+
 #[derive(Clone, Debug)]
 pub enum HKind<'s> {
     Root,
     Element {
         tag: &'static str,
         props: Props<'s>,
-        /// `data.meta` from mdast-util-to-hast's code handler.
-        meta: Option<String>,
+        data: Option<Box<Data>>,
     },
     Text(Cow<'s, str>),
     Raw(Cow<'s, str>),
@@ -156,7 +162,7 @@ impl<'s> HTree<'s> {
             HKind::Element {
                 tag,
                 props,
-                meta: None,
+                data: None,
             },
             at,
         )
@@ -623,17 +629,17 @@ impl<'s> ToHast<'_, 's> {
                         Val::List(vec![Cow::Owned(format!("language-{first}"))]),
                     ));
                 }
-                let meta = code
+                let data = code
                     .meta
-                    .as_deref()
+                    .clone()
                     .filter(|meta| !meta.is_empty())
-                    .map(str::to_owned);
+                    .map(|meta| Box::new(Data { meta }));
                 let text = self.hast.text(value);
                 let code = self.hast.parent(
                     HKind::Element {
                         tag: "code",
                         props,
-                        meta,
+                        data,
                     },
                     at,
                     Chain::one(text),
@@ -1657,11 +1663,11 @@ impl<'s> Finisher<'_, 's> {
     }
 
     fn element(&mut self, ix: Ix, out: &mut Chain) {
-        let HKind::Element { tag, props, meta } = &mut self.tree.nodes[ix as usize].kind else {
+        let HKind::Element { tag, props, data } = &mut self.tree.nodes[ix as usize].kind else {
             unreachable!("children() sends only elements here");
         };
         let tag = *tag;
-        *meta = None;
+        *data = None;
         *props = std::mem::take(props)
             .into_iter()
             .filter_map(|(key, value)| round_trip(key, value).map(|value| (key, value)))
@@ -1794,7 +1800,7 @@ impl<'s> Finisher<'_, 's> {
         node.kind = HKind::Element {
             tag: "span",
             props,
-            meta: None,
+            data: None,
         };
         node.start = Edge::None;
         node.end = Edge::None;
@@ -1893,7 +1899,7 @@ impl Json<'_, '_> {
                     self.out.push_str(",\"data\":{\"quirksMode\":false}");
                 }
             }
-            HKind::Element { tag, props, meta } => {
+            HKind::Element { tag, props, data } => {
                 self.out.push_str("{\"type\":\"element\",\"tagName\":\"");
                 self.out.push_str(tag);
                 self.out.push_str("\",\"properties\":{");
@@ -1908,9 +1914,9 @@ impl Json<'_, '_> {
                 }
                 self.out.push_str("},\"children\":");
                 self.children(ix);
-                if let Some(meta) = meta {
+                if let Some(data) = data {
                     self.out.push_str(",\"data\":{\"meta\":");
-                    json_string(&mut self.out, meta);
+                    json_string(&mut self.out, &data.meta);
                     self.out.push('}');
                 }
             }
@@ -2184,7 +2190,7 @@ impl Encoder<'_, '_> {
                 self.ops.extend([op::ROOT, u32::from(tree.quirks)]);
                 self.children(ix);
             }
-            HKind::Element { tag, props, meta } => {
+            HKind::Element { tag, props, data } => {
                 self.ops.push(op::ELEMENT);
                 self.name(tag);
                 self.ops.push(props.len() as u32);
@@ -2192,10 +2198,10 @@ impl Encoder<'_, '_> {
                     self.name(key);
                     self.value(value);
                 }
-                match meta {
-                    Some(meta) => {
+                match data {
+                    Some(data) => {
                         self.ops.push(1);
-                        self.string(meta);
+                        self.string(&data.meta);
                     }
                     None => self.ops.push(0),
                 }
