@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::json::{json_string, json_u32};
-use crate::mdast::{self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, ReferenceKind};
+use crate::mdast::{
+    self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, Reference, ReferenceKind,
+};
 use crate::url::Url;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +25,8 @@ use crate::url::Url;
 pub enum Edge {
     None,
     Byte(u32),
-    Pt(Pt),
+    /// One unit past the line ending at this byte (see [`Points::past_line_ending`]).
+    PastLineEnding(u32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -114,7 +117,7 @@ impl Edge {
         match self {
             Edge::None => None,
             Edge::Byte(byte) => Some(points.pt(byte)),
-            Edge::Pt(pt) => Some(pt),
+            Edge::PastLineEnding(byte) => Some(points.past_line_ending(byte)),
         }
     }
 }
@@ -123,7 +126,9 @@ fn edges(at: At) -> (Edge, Edge) {
     match at {
         At::None => (Edge::None, Edge::None),
         At::Bytes(start, end) => (Edge::Byte(start), Edge::Byte(end)),
-        At::Points(start, end) => (Edge::Pt(start), Edge::Pt(end)),
+        At::PastLineEnding { line_ending, end } => {
+            (Edge::PastLineEnding(line_ending), Edge::Byte(end))
+        }
     }
 }
 
@@ -444,10 +449,18 @@ fn call_suffix(n: usize) -> String {
     }
 }
 
-fn revert_suffix(kind: ReferenceKind, label: &str, identifier: &str) -> String {
-    match kind {
+/// What follows an unresolved reference's content when it reverts to text.
+fn revert_suffix(reference: &Reference) -> String {
+    match reference.kind {
         ReferenceKind::Collapsed => "][]".into(),
-        ReferenceKind::Full => format!("][{}]", if label.is_empty() { identifier } else { label }),
+        ReferenceKind::Full => {
+            let label = if reference.label.is_empty() {
+                &reference.identifier
+            } else {
+                &reference.label
+            };
+            format!("][{label}]")
+        }
         ReferenceKind::Shortcut => "]".into(),
     }
 }
@@ -487,22 +500,17 @@ struct ToHast<'t, 's> {
 impl<'s> ToHast<'_, 's> {
     fn collect(&mut self, ix: Ix) {
         match &self.mdast.node(ix).kind {
-            MKind::Definition {
-                url,
-                title,
-                identifier,
-                ..
-            } => {
+            MKind::Definition(definition) => {
                 self.definitions
-                    .entry(identifier.to_uppercase())
+                    .entry(definition.identifier.to_uppercase())
                     .or_insert_with(|| Definition {
-                        url: url.clone(),
-                        title: title.clone(),
+                        url: definition.url.clone(),
+                        title: definition.title.clone(),
                     });
             }
-            MKind::FootnoteDefinition { identifier, .. } => {
+            MKind::FootnoteDefinition(association) => {
                 self.footnotes
-                    .entry(identifier.to_uppercase())
+                    .entry(association.identifier.to_uppercase())
                     .or_insert(ix);
             }
             _ => {}
@@ -510,6 +518,13 @@ impl<'s> ToHast<'_, 's> {
         for child in self.mdast.children(ix) {
             self.collect(child);
         }
+    }
+
+    /// The definition `reference` resolves to.
+    fn definition(&self, reference: &Reference) -> Option<Definition<'s>> {
+        self.definitions
+            .get(&reference.identifier.to_uppercase())
+            .cloned()
     }
 
     fn defined(&self, identifier: &str) -> bool {
@@ -520,8 +535,8 @@ impl<'s> ToHast<'_, 's> {
     fn returns_array(&self, ix: Ix) -> bool {
         match &self.mdast.node(ix).kind {
             MKind::Break => true,
-            MKind::LinkReference { identifier, .. } | MKind::ImageReference { identifier, .. } => {
-                !self.defined(identifier)
+            MKind::LinkReference(reference) | MKind::ImageReference(reference) => {
+                !self.defined(&reference.identifier)
             }
             _ => false,
         }
@@ -591,16 +606,14 @@ impl<'s> ToHast<'_, 's> {
                 self.hast.append(&mut chain, newline);
                 chain
             }
-            MKind::Code {
-                value, lang, meta, ..
-            } => {
-                let value = if value.is_empty() {
+            MKind::Code(code) => {
+                let value = if code.value.is_empty() {
                     Cow::Borrowed("")
                 } else {
-                    Cow::Owned(format!("{value}\n"))
+                    Cow::Owned(format!("{}\n", code.value))
                 };
                 let mut props = Vec::new();
-                if let Some(lang) = lang.as_deref().filter(|lang| !lang.is_empty()) {
+                if let Some(lang) = code.lang.as_deref().filter(|lang| !lang.is_empty()) {
                     let first = lang
                         .split(js_whitespace)
                         .next()
@@ -610,7 +623,11 @@ impl<'s> ToHast<'_, 's> {
                         Val::List(vec![Cow::Owned(format!("language-{first}"))]),
                     ));
                 }
-                let meta = meta.clone().filter(|meta| !meta.is_empty());
+                let meta = code
+                    .meta
+                    .as_deref()
+                    .filter(|meta| !meta.is_empty())
+                    .map(str::to_owned);
                 let text = self.hast.text(value);
                 let code = self.hast.parent(
                     HKind::Element {
@@ -633,8 +650,8 @@ impl<'s> ToHast<'_, 's> {
                 self.element(tag, ix, Vec::new())
             }
             MKind::ThematicBreak => Chain::one(self.hast.element("hr", Vec::new(), at)),
-            MKind::FootnoteReference { identifier, .. } => {
-                let id = identifier.to_uppercase();
+            MKind::FootnoteReference(association) => {
+                let id = association.identifier.to_uppercase();
                 let safe_id = footnote_safe_id(&id);
                 let index = match self.footnote_calls.iter().position(|calls| calls.id == id) {
                     Some(index) => index,
@@ -670,18 +687,16 @@ impl<'s> ToHast<'_, 's> {
                 self.raw_boundary = true;
                 Chain::one(self.hast.push(HKind::Raw(value.clone()), at))
             }
-            MKind::Image { url, title, alt } => self.image(url.clone(), title.clone(), alt, at),
-            MKind::ImageReference {
-                kind,
-                identifier,
-                label,
-                alt,
-            } => match self.definitions.get(&identifier.to_uppercase()).cloned() {
+            MKind::Image(image) => {
+                self.image(image.url.clone(), image.title.clone(), &image.alt, at)
+            }
+            MKind::ImageReference(reference) => match self.definition(reference) {
                 None => {
-                    let suffix = revert_suffix(*kind, label, identifier);
+                    let suffix = revert_suffix(reference);
+                    let alt = &reference.alt;
                     Chain::one(self.hast.text(Cow::Owned(format!("![{alt}{suffix}"))))
                 }
-                Some(Definition { url, title }) => self.image(url, title, alt, at),
+                Some(Definition { url, title }) => self.image(url, title, &reference.alt, at),
             },
             MKind::InlineCode(value) => {
                 let value = if value.contains(['\n', '\r']) {
@@ -692,14 +707,10 @@ impl<'s> ToHast<'_, 's> {
                 let text = self.hast.push(HKind::Text(value), at);
                 Chain::one(self.hast.element_around("code", Vec::new(), at, text))
             }
-            MKind::Link { url, title } => self.link(ix, url.clone(), title.clone()),
-            MKind::LinkReference {
-                kind,
-                identifier,
-                label,
-            } => match self.definitions.get(&identifier.to_uppercase()).cloned() {
+            MKind::Link(link) => self.link(ix, link.url.clone(), link.title.clone()),
+            MKind::LinkReference(reference) => match self.definition(reference) {
                 None => {
-                    let suffix = revert_suffix(*kind, label, identifier);
+                    let suffix = revert_suffix(reference);
                     let mut contents = self.all(ix);
                     let head = (contents.first != NIL)
                         .then(|| &mut self.hast.nodes[contents.first as usize].kind);
@@ -744,9 +755,9 @@ impl<'s> ToHast<'_, 's> {
             MKind::ListItem { spread, checked } => self.list_item(ix, parent, *spread, *checked),
             MKind::Table(align) => self.table(ix, align, at),
             MKind::Text(value) => Chain::one(self.hast.push(HKind::Text(trim_lines(value)), at)),
-            MKind::Math { value, .. } => {
+            MKind::Math(math) => {
                 self.math = true;
-                let text = self.hast.text(value.clone());
+                let text = self.hast.text(math.value.clone());
                 let class = Val::List(vec![
                     Cow::Borrowed("language-math"),
                     Cow::Borrowed("math-display"),
@@ -903,18 +914,17 @@ impl<'s> ToHast<'_, 's> {
                     last: rows.last,
                 };
                 let children = self.hast.wrap(body_rows, Spacing::Loose);
-                let second = self.mdast.node(first_row).next;
-                let start = self.mdast.pt_range(self.mdast.node(second).at);
-                let end = self
-                    .mdast
-                    .pt_range(self.mdast.node(self.mdast.node(ix).last).at);
-                let body_at = match (start, end) {
-                    (Some((start, _)), Some((_, end))) => At::Points(start, end),
-                    _ => At::None,
-                };
                 let body = self
                     .hast
-                    .element_with("tbody", Vec::new(), body_at, children);
+                    .element_with("tbody", Vec::new(), At::None, children);
+                // From the second row's start to the last row's end.
+                let second = self.mdast.node(first_row).next;
+                let (start, _) = edges(self.mdast.node(second).at);
+                let (_, end) = edges(self.mdast.node(self.mdast.node(ix).last).at);
+                if start != Edge::None && end != Edge::None {
+                    self.hast.nodes[body as usize].start = start;
+                    self.hast.nodes[body as usize].end = end;
+                }
                 self.hast.append(&mut content, body);
             }
         }
