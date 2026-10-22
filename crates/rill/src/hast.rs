@@ -1494,7 +1494,7 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
     }
     if url.starts_with('#')
         && !image
-        && Url::parse_with_base(url, HARDEN_BASE).is_some_and(|test| test.hash == url)
+        && Url::parse_with_base(url, HARDEN_BASE).is_some_and(|test| test.hash() == url)
     {
         return Ok(None);
     }
@@ -1507,7 +1507,7 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
     }
     if let Some(after) = url.strip_prefix("blob:") {
         let parsed = Url::parse(url).ok_or(Blocked)?;
-        return if parsed.scheme == "blob" && !after.is_empty() && after != "invalid" {
+        return if parsed.scheme() == "blob" && !after.is_empty() && after != "invalid" {
             Ok(None)
         } else {
             Err(Blocked)
@@ -1518,16 +1518,13 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
         None if path_relative(url) => Url::parse_with_base(url, HARDEN_BASE).ok_or(Blocked)?,
         None => return Err(Blocked),
     };
-    if matches!(
-        parsed.scheme.as_str(),
-        "javascript" | "data" | "file" | "vbscript"
-    ) {
+    if matches!(parsed.scheme(), "javascript" | "data" | "file" | "vbscript") {
         return Err(Blocked);
     }
-    let result = if matches!(parsed.scheme.as_str(), "http" | "https") && path_relative(url) {
-        format!("{}{}{}", parsed.pathname, parsed.search, parsed.hash)
+    let result = if matches!(parsed.scheme(), "http" | "https") && path_relative(url) {
+        format!("{}{}{}", parsed.pathname(), parsed.search(), parsed.hash())
     } else {
-        parsed.href
+        parsed.into_href()
     };
     Ok((result != url).then_some(result))
 }

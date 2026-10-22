@@ -2,46 +2,52 @@
 //! `URL`, the parser rehype-harden itself uses, so its IDNA and normalization tables stay
 //! out of the module; native builds use the `url` crate.
 
-/// A parsed URL, with each field as JavaScript's `URL` reports it.
-pub struct Url {
-    /// The scheme, lowercase and without the trailing `:`.
-    pub scheme: String,
-    pub href: String,
-    pub pathname: String,
-    /// `?query`, or empty when the query is missing or empty.
-    pub search: String,
-    /// `#fragment`, or empty when the fragment is missing or empty.
-    pub hash: String,
-}
+/// A parsed URL whose fields read as JavaScript's `URL` reports them. Natively the
+/// fields are slices of the one serialized `href`.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct Url(url::Url);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Url {
     /// `new URL(input)`, or `None` where it throws.
     pub fn parse(input: &str) -> Option<Url> {
-        url::Url::parse(input).ok().map(Url::from)
+        url::Url::parse(input).ok().map(Url)
     }
 
     /// `new URL(input, base)`, or `None` where it throws.
     pub fn parse_with_base(input: &str, base: &str) -> Option<Url> {
         let base = url::Url::parse(base).ok()?;
-        base.join(input).ok().map(Url::from)
+        base.join(input).ok().map(Url)
     }
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-impl From<url::Url> for Url {
-    fn from(parsed: url::Url) -> Url {
-        let prefixed = |sigil: char, part: Option<&str>| match part {
-            Some(part) if !part.is_empty() => format!("{sigil}{part}"),
-            _ => String::new(),
-        };
-        Url {
-            scheme: parsed.scheme().to_owned(),
-            pathname: parsed.path().to_owned(),
-            search: prefixed('?', parsed.query()),
-            hash: prefixed('#', parsed.fragment()),
-            href: parsed.into(),
+    /// The scheme, lowercase and without the trailing `:`.
+    pub fn scheme(&self) -> &str {
+        self.0.scheme()
+    }
+
+    pub fn pathname(&self) -> &str {
+        self.0.path()
+    }
+
+    /// `?query`, or empty when the query is missing or empty.
+    pub fn search(&self) -> &str {
+        use url::Position;
+        match self.0.query() {
+            Some(query) if !query.is_empty() => &self.0[Position::AfterPath..Position::AfterQuery],
+            _ => "",
         }
+    }
+
+    /// `#fragment`, or empty when the fragment is missing or empty.
+    pub fn hash(&self) -> &str {
+        match self.0.fragment() {
+            Some(fragment) if !fragment.is_empty() => &self.0[url::Position::AfterQuery..],
+            _ => "",
+        }
+    }
+
+    pub fn into_href(self) -> String {
+        self.0.into()
     }
 }
 
@@ -81,8 +87,41 @@ mod js {
     }
 }
 
+/// A parsed URL, with each field as JavaScript's `URL` reports it.
+#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
+pub struct Url {
+    scheme: String,
+    href: String,
+    pathname: String,
+    search: String,
+    hash: String,
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl Url {
+    /// The scheme, lowercase and without the trailing `:`.
+    pub fn scheme(&self) -> &str {
+        &self.scheme
+    }
+
+    pub fn pathname(&self) -> &str {
+        &self.pathname
+    }
+
+    /// `?query`, or empty when the query is missing or empty.
+    pub fn search(&self) -> &str {
+        &self.search
+    }
+
+    /// `#fragment`, or empty when the fragment is missing or empty.
+    pub fn hash(&self) -> &str {
+        &self.hash
+    }
+
+    pub fn into_href(self) -> String {
+        self.href
+    }
+
     /// `new URL(input)`, or `None` where it throws.
     pub fn parse(input: &str) -> Option<Url> {
         js::JsUrl::new(input).ok().map(Url::from)
