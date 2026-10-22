@@ -13,10 +13,14 @@ import type { HastNode, Rill, RillKind } from "./core.ts";
 /** Which pipeline rendered a document; `javascript` is the fallback. */
 export type RenderKind = RillKind | "javascript";
 
-export type RillPluginsOptions<A extends unknown[]> = {
+/**
+ * Documents longer than this (UTF-16 units) render in JavaScript. WebAssembly memory
+ * grows to fit the largest document and never shrinks; this keeps it to tens of MB.
+ */
+export const DEFAULT_MAX_SOURCE_LENGTH = 128 * 1024;
+
+type BaseOptions<A extends unknown[]> = {
   rill: Rill<A>;
-  /** Extra arguments for a custom build's render export. */
-  args?: A;
   /**
    * The JavaScript pipeline rill replaces, which must be what its WebAssembly does:
    * the fallback, and (rehype) the tail for raw HTML. Defaults to Streamdown's.
@@ -28,13 +32,19 @@ export type RillPluginsOptions<A extends unknown[]> = {
    * your own `rehypePlugins`; defaults to Streamdown's otherwise.
    */
   mathTail?: PluggableList;
-  /** Plugins of your own, run after the pipeline on its result. */
-  after?: { remark?: PluggableList; rehype?: PluggableList };
+  /** Rehype plugins of your own, run on the finished tree. */
+  after?: PluggableList;
+  /** Longer documents render in JavaScript (see `DEFAULT_MAX_SOURCE_LENGTH`). */
+  maxSourceLength?: number;
   /** Called once per render with the pipeline that produced it. */
   onRender?: (kind: RenderKind, ms: number, source: string) => void;
   /** Called when rill fails on a document; that document renders in JavaScript. */
   onError?: (error: unknown) => void;
 };
+
+/** `args` (the custom build's extra arguments) is required when its export takes any. */
+export type RillPluginsOptions<A extends unknown[]> = BaseOptions<A> &
+  ([] extends A ? { args?: A } : { args: A });
 
 type HastRoot = {
   type: "root";
@@ -46,44 +56,59 @@ type RillData = { kind: RenderKind; data: unknown };
 type Point = { line: number; column: number; offset?: number };
 type Position = { start: Point; end: Point };
 
+// Streamdown caches processors by plugin name and JSON options, so each set carries an
+// id, unique even across two copies of this package in one bundle.
+const INSTANCE_PREFIX = Math.random().toString(36).slice(2);
 let instances = 0;
 
-/** `remarkPlugins` and `rehypePlugins` for `<Streamdown>`; memoize the result. */
-export function rillPlugins<A extends unknown[]>({
-  rill,
-  args,
-  remarkPlugins = Object.values(defaultRemarkPlugins),
-  rehypePlugins: customRehype,
-  mathTail,
-  after,
-  onRender,
-  onError,
-}: RillPluginsOptions<A>) {
+/**
+ * `remarkPlugins` and `rehypePlugins` for `<Streamdown>`. Pass them as they are (add
+ * rehype plugins of your own with `after`, not by combining props), and memoize.
+ */
+export function rillPlugins<A extends unknown[]>(
+  options: RillPluginsOptions<A>
+) {
+  const {
+    rill,
+    remarkPlugins = Object.values(defaultRemarkPlugins),
+    rehypePlugins: customRehype,
+    mathTail,
+    after = [],
+    maxSourceLength = DEFAULT_MAX_SOURCE_LENGTH,
+    onRender,
+    onError,
+  } = options;
   if (customRehype && !mathTail) {
     throw new Error("rillPlugins: pass `mathTail` with your own `rehypePlugins`");
   }
   const rehypePlugins = customRehype ?? Object.values(defaultRehypePlugins);
-  const rillArgs = (args ?? []) as A;
-  const javascript = unified().use([
-    remarkParse,
-    ...remarkPlugins,
-    [remarkRehype, { allowDangerousHtml: true }],
-    ...rehypePlugins,
-  ]);
-  const tails = {
-    raw: unified().use(rehypePlugins),
-    math: unified().use(mathTail ?? defaultMathTail()),
-  };
+  const args = ("args" in options ? (options.args ?? []) : []) as A;
+
+  // Built on first use: most documents need neither.
+  let javascript: Processor | undefined;
+  const tails: { raw?: Processor; math?: Processor } = {};
+  const tail = (kind: "raw" | "math") =>
+    (tails[kind] ??= unified().use(
+      kind === "raw" ? rehypePlugins : (mathTail ?? defaultMathTail())
+    ) as Processor);
 
   function render(source: string): { kind: RenderKind; tree: HastRoot } {
-    try {
-      const result = rill.render(source, ...rillArgs);
-      if (result) {
-        return { kind: result.kind, tree: asHastRoot(result.tree) };
+    if (source.length <= maxSourceLength) {
+      try {
+        const result = rill.render(source, ...args);
+        if (result) {
+          return { kind: result.kind, tree: asHastRoot(result.tree) };
+        }
+      } catch (error) {
+        onError?.(error);
       }
-    } catch (error) {
-      onError?.(error);
     }
+    javascript ??= unified().use([
+      remarkParse,
+      ...remarkPlugins,
+      [remarkRehype, { allowDangerousHtml: true }],
+      ...rehypePlugins,
+    ]) as Processor;
     return {
       kind: "javascript",
       tree: asHastRoot(javascript.runSync(javascript.parse(source), source)),
@@ -104,7 +129,7 @@ export function rillPlugins<A extends unknown[]>({
         data: { hChildren: tree.children, rill: rillData },
       };
     };
-    // Runs after plugins that replace the tree, so a cached tree carries its kind.
+    // Runs after plugins that replace the tree (a cache), so it carries its kind.
     return (
       tree: { data?: { rill?: RillData } },
       file: { data: Record<string, unknown> }
@@ -119,37 +144,38 @@ export function rillPlugins<A extends unknown[]>({
       file: { value?: unknown; data: Record<string, unknown> }
     ) => {
       const rillData = file.data.rill;
-      if (!isRillData(rillData)) {
-        return;
-      }
-      if (rillData.kind === "raw" || rillData.kind === "math") {
+      // rill did not parse (its remark plugin was replaced): this is remark-rehype's
+      // tree, so run the whole rehype chain on it, as the JavaScript pipeline would.
+      const kind = isRillData(rillData) ? rillData.kind : "raw";
+      if (kind === "raw" || kind === "math") {
         // A cached root shares its children with remark-rehype; KaTeX edits in place.
         tree.children = structuredClone(tree.children);
-        const tail = tails[rillData.kind];
         const finished = asHastRoot(
-          tail.runSync(tree as never, String(file.value ?? ""))
+          tail(kind).runSync(tree as never, String(file.value ?? ""))
         );
         tree.children = finished.children;
         tree.data = finished.data;
-      } else if (rillData.data !== undefined) {
+      } else if (isRillData(rillData) && rillData.data !== undefined) {
         tree.data = rillData.data;
       }
     };
   }
 
-  // Streamdown caches processors by plugin name and JSON options, so each instance
-  // carries its own id.
-  const instance = (instances += 1);
+  const instance = `${INSTANCE_PREFIX}-${(instances += 1)}`;
   return {
-    remarkPlugins: [
-      [remarkRill, { instance }],
-      ...(after?.remark ?? []),
-    ] as PluggableList,
+    remarkPlugins: [[remarkRill, { instance }]] as PluggableList,
     rehypePlugins: [
       [rehypeRill, { instance }],
-      ...(after?.rehype ?? []),
+      ...after,
+      // Off (`false`): Streamdown loads KaTeX's stylesheet only when its rehype-katex
+      // is in the list; rill runs KaTeX itself.
+      [attacherOf(defaultRehypePlugins.katex), false],
     ] as PluggableList,
   };
+}
+
+function attacherOf(plugin: unknown): unknown {
+  return Array.isArray(plugin) ? plugin[0] : plugin;
 }
 
 /** Streamdown's rehype chain from KaTeX on: what a `math` tree still needs. */

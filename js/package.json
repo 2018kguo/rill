@@ -49,12 +49,14 @@
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc -p . --noEmit"
   },
+  "dependencies": {
+    "remark-parse": "^11.0.0",
+    "remark-rehype": "^11.1.2",
+    "unified": "^11.0.5"
+  },
   "peerDependencies": {
     "react": ">=18",
-    "remark-parse": "^11",
-    "remark-rehype": "^11",
-    "streamdown": "^1.6",
-    "unified": "^11"
+    "streamdown": "^1.6"
   },
   "peerDependenciesMeta": {
     "react": {

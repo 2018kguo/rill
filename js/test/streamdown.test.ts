@@ -5,7 +5,13 @@ import { test } from "node:test";
 import { toHtml } from "hast-util-to-html";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
-import { defaultRehypePlugins, defaultRemarkPlugins } from "streamdown";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  defaultRehypePlugins,
+  defaultRemarkPlugins,
+  Streamdown,
+} from "streamdown";
 import { unified, type PluggableList } from "unified";
 
 import { createRill, initRill, type Rill } from "../src/index.ts";
@@ -77,11 +83,69 @@ test("a document rill fails on renders with Streamdown's plugins", () => {
   assert.equal(errors.length, DOCUMENTS.length);
 });
 
-test("your own plugins run after the pipeline", () => {
+test("<Streamdown> renders the same page with rill's plugins", () => {
+  // Counted, so plugins rill never ran in cannot pass as "the same page".
+  let rendered = 0;
+  const plugins = rillPlugins({
+    rill,
+    onRender: (kind) => {
+      if (kind !== "javascript") {
+        rendered += 1;
+      }
+    },
+  });
+  for (const source of DOCUMENTS) {
+    const page = (props: object) =>
+      renderToStaticMarkup(
+        createElement(Streamdown, { mode: "static", ...props }, source)
+      );
+    assert.equal(page(plugins), page({}), source);
+  }
+  assert.ok(rendered >= DOCUMENTS.length - 1, `rill rendered ${rendered}`);
+});
+
+test("Streamdown sees KaTeX in the list (it loads the stylesheet), which never runs", () => {
+  const katex = defaultRehypePlugins.katex;
+  const attacher = Array.isArray(katex) ? katex[0] : katex;
+  const { rehypePlugins } = rillPlugins({ rill });
+  assert.ok(
+    rehypePlugins.some(
+      (plugin) => Array.isArray(plugin) && plugin[0] === attacher && plugin[1] === false
+    )
+  );
+});
+
+test("a replaced remarkPlugins still runs the whole rehype chain", () => {
+  const { rehypePlugins } = rillPlugins({ rill });
+  for (const source of DOCUMENTS) {
+    assert.equal(
+      html(streamdown.remark, rehypePlugins, source),
+      html(streamdown.remark, streamdown.rehype, source),
+      source
+    );
+  }
+});
+
+test("documents over maxSourceLength render in JavaScript", () => {
+  const kinds: string[] = [];
+  const plugins = rillPlugins({
+    rill,
+    maxSourceLength: 4,
+    onRender: (kind) => kinds.push(kind),
+  });
+  const source = "**long** enough";
+  assert.equal(
+    html(plugins.remarkPlugins, plugins.rehypePlugins, source),
+    html(streamdown.remark, streamdown.rehype, source)
+  );
+  assert.deepEqual(kinds, ["javascript"]);
+});
+
+test("your own rehype plugins run after the pipeline", () => {
   const mark = () => (tree: { children: unknown[] }) => {
     tree.children.push({ type: "text", value: "!" });
   };
-  const plugins = rillPlugins({ rill, after: { rehype: [mark] } });
+  const plugins = rillPlugins({ rill, after: [mark] });
   assert.equal(
     html(plugins.remarkPlugins, plugins.rehypePlugins, "*a*"),
     "<p><em>a</em></p>!"

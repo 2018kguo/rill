@@ -1,27 +1,39 @@
 // The drop-in: `<Streamdown {...useRill()}>`. Until the WebAssembly arrives (and
 // during SSR) the hook returns `null` and Streamdown renders with its own plugins; the
 // trees are the same, so the switch is invisible.
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
-import { loadRill, type Rill } from "./index.ts";
+import { loadRill } from "./index.ts";
 import { rillPlugins } from "./streamdown.ts";
 
-let rill: Rill | null = null;
+type Plugins = ReturnType<typeof rillPlugins>;
+
+// One set per page, shared by every message (and Streamdown's processor cache).
+let plugins: Plugins | null = null;
+let attempted = false;
 const listeners = new Set<() => void>();
 
 function load() {
-  if (rill) {
+  // One attempt per page: a failure (no WebAssembly, a missing asset) would repeat.
+  if (attempted) {
     return;
   }
+  attempted = true;
   loadRill()
-    .then((loaded) => {
-      rill = loaded;
+    .then((rill) => {
+      plugins = rillPlugins({ rill });
       for (const listener of listeners) {
         listener();
       }
     })
-    // Offline or deploy skew: Streamdown keeps rendering; the next mount retries.
-    .catch(() => {});
+    .catch((error: unknown) => {
+      // Streamdown keeps rendering, with the same output.
+      console.warn(
+        "rill: the WebAssembly did not load, so Streamdown renders in JavaScript. " +
+          "With Vite, add `optimizeDeps: { exclude: ['@2018kguo/rill'] }`.",
+        error
+      );
+    });
 }
 
 function subscribe(listener: () => void) {
@@ -32,12 +44,12 @@ function subscribe(listener: () => void) {
 }
 
 /** Streamdown's plugins on rill once it loads, else `null` (spread it either way). */
-export function useRill() {
+export function useRill(): Plugins | null {
   const current = useSyncExternalStore(
     subscribe,
-    () => rill,
+    () => plugins,
     () => null
   );
   useEffect(load, []);
-  return useMemo(() => (current ? rillPlugins({ rill: current }) : null), [current]);
+  return current;
 }

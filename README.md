@@ -29,6 +29,14 @@ That's the whole change. Until the WebAssembly arrives (and during server render
 with the same output, so nothing on the page moves. If rill ever can't take a document,
 that one renders with Streamdown's own plugins.
 
+With Vite, keep the package out of dependency pre-bundling, which would move the
+WebAssembly file away from the code that loads it:
+
+```ts
+// vite.config.ts
+export default { optimizeDeps: { exclude: ["@2018kguo/rill"] } };
+```
+
 ## Why
 
 When a chatbot streams an answer, the screen updates many times a second. Each update
@@ -122,9 +130,11 @@ source text instead of copying it.
 
 - `@2018kguo/rill/react`: `useRill()`, the drop-in above.
 - `@2018kguo/rill/streamdown`: `rillPlugins({ rill })` returns the `remarkPlugins` and
-  `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself. It takes
-  `after: { remark, rehype }` for plugins of your own (they run on rill's result, like any
-  plugin after Streamdown's), plus `onRender` and `onError` callbacks.
+  `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
+  it). It takes `after` for rehype plugins of your own (they run on the finished tree,
+  like any plugin after Streamdown's), `maxSourceLength` (longer documents render in
+  JavaScript; 128K UTF-16 units by default, since WebAssembly memory grows to fit the
+  largest document and never shrinks), and `onRender` and `onError` callbacks.
 - `@2018kguo/rill`: `loadRill()` fetches the WebAssembly once; `initRill(bytes)` instantiates
   it from bytes (Node, tests); `rill.render(markdown)` returns `{ kind, tree }` directly.
 
@@ -132,9 +142,18 @@ source text instead of copying it.
 import { loadRill } from "@2018kguo/rill";
 import { rillPlugins } from "@2018kguo/rill/streamdown";
 
-const plugins = rillPlugins({ rill: await loadRill(), after: { rehype: [rehypeSlug] } });
+const plugins = rillPlugins({ rill: await loadRill(), after: [rehypeSlug] });
 // <Streamdown {...plugins}>{markdown}</Streamdown>
 ```
+
+Three things rill can't do for you:
+
+- **Combine its plugins with your own `remarkPlugins` or `rehypePlugins` props.** Pass
+  rill's lists as they are and add rehype plugins through `after`. (A replaced
+  `remarkPlugins` still renders safely, all in JavaScript.)
+- **Remark plugins.** rill parses in Rust, so there is no syntax tree in JavaScript for
+  them to change. Write a Rust plugin (below) or work on the HTML tree with `after`.
+- **`remarkRehypeOptions`.** rill renders Streamdown's setting (`allowDangerousHtml`).
 
 The WebAssembly loads with `new URL("../wasm/rill_bg.wasm", import.meta.url)`, which Vite,
 webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
@@ -185,7 +204,7 @@ impl rill::Plugin for HeadingIds {
 
 `crates/rill/tests/api.rs` has a complete one that adds heading ids. Any JavaScript
 rehype plugin also works unchanged on rill's output (`after` above), so a Rust plugin is
-only worth it for work that has to happen before the end, such as on the syntax tree.
+only worth it for work that has to happen earlier, such as on the syntax tree.
 
 To ship Rust plugins, build your own WebAssembly with one export that calls
 `rill::wasm::render` (the `wasm` feature) and hand it to the same JavaScript package:
@@ -216,7 +235,8 @@ const plugins = rillPlugins({
 ```
 
 Extra arguments on your export pass through: `createRill(renderHast)` gives
-`rill.render(source, ...args)`, and `rillPlugins({ args })` supplies them per instance.
+`rill.render(source, ...args)`, and `rillPlugins({ args })` (required when your export
+takes any) supplies them per instance.
 
 ### Conformance
 
