@@ -2225,41 +2225,43 @@ fn has_closing_fence(source: &str, start: usize, end: usize, in_container: bool)
 
 /// HTML block types 1-5 end only on their terminator; unterminated ones reach the end.
 fn unterminated_raw_html(source: &str, start: usize, end: usize) -> bool {
-    let block = &source[start..end];
-    let lower = block
-        .get(..block.len().min(12))
-        .unwrap_or(block)
-        .to_ascii_lowercase();
-    let terminator = if ["<script", "<pre", "<style", "<textarea"]
+    let block = source[start..end].as_bytes();
+    let starts_with = |at: usize, prefix: &[u8]| {
+        block
+            .get(at..at + prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    let raw = [b"<script".as_slice(), b"<pre", b"<style", b"<textarea"]
         .iter()
         .any(|open| {
-            lower.starts_with(open)
-                && lower[open.len()..]
-                    .bytes()
-                    .next()
+            starts_with(0, open)
+                && block
+                    .get(open.len())
                     .is_none_or(|byte| matches!(byte, b' ' | b'\t' | b'>' | b'\n' | b'\r'))
-        }) {
-        None
-    } else if lower.starts_with("<!--") {
-        Some("-->")
-    } else if lower.starts_with("<?") {
-        Some("?>")
-    } else if lower.starts_with("<![cdata[") {
-        Some("]]>")
-    } else if lower.starts_with("<!")
-        && lower.as_bytes().get(2).is_some_and(u8::is_ascii_alphabetic)
-    {
-        Some(">")
+        });
+    if raw {
+        // Type 1 ends on any of its closing tags, in any case.
+        let closes = [
+            b"</script>".as_slice(),
+            b"</pre>",
+            b"</style>",
+            b"</textarea>",
+        ];
+        return !memchr::memmem::find_iter(block, b"</")
+            .any(|at| closes.iter().any(|close| starts_with(at, close)));
+    }
+    let terminator: &[u8] = if starts_with(0, b"<!--") {
+        b"-->"
+    } else if starts_with(0, b"<?") {
+        b"?>"
+    } else if starts_with(0, b"<![cdata[") {
+        b"]]>"
+    } else if starts_with(0, b"<!") && block.get(2).is_some_and(u8::is_ascii_alphabetic) {
+        b">"
     } else {
         return false;
     };
-    let body = block.to_ascii_lowercase();
-    match terminator {
-        None => !["</script>", "</pre>", "</style>", "</textarea>"]
-            .iter()
-            .any(|close| body.contains(close)),
-        Some(close) => !body[2..].contains(close),
-    }
+    memchr::memmem::find(&block[2..], terminator).is_none()
 }
 
 /// Code and HTML blocks end on their last non-blank line, keeping its trailing spaces.
