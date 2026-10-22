@@ -1,0 +1,44 @@
+{
+  "name": "@2018kguo/rill",
+  "version": "0.1.0",
+  "description": "Render Streamdown's Markdown 10x faster with the exact same output, in Rust compiled to WebAssembly.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2018kguo/rill.git",
+    "directory": "js"
+  },
+  "keywords": ["markdown", "streamdown", "remark", "rehype", "webassembly", "ai", "chat"],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./streamdown": { "types": "./dist/streamdown.d.ts", "default": "./dist/streamdown.js" },
+    "./react": { "types": "./dist/react.d.ts", "default": "./dist/react.js" },
+    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm"
+  },
+  "files": ["dist", "wasm", "src"],
+  "scripts": {
+    "build": "sh ../scripts/build-wasm.sh && tsc -p .",
+    "prepack": "npm run build",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p . --noEmit"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "remark-parse": "^11",
+    "remark-rehype": "^11",
+    "streamdown": "^1.6",
+    "unified": "^11"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "streamdown": "1.6.11",
+    "typescript": "5.9.3"
+  }
+}

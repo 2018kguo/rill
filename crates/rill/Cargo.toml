@@ -18,5 +18,8 @@ url = "2.5"
 wasm-bindgen = { version = "=0.2.129", optional = true }
 
 [features]
-# `parseMdast` / `renderJson` exports for a standalone WebAssembly build.
+# `rill::wasm`: the opcode boundary the JavaScript package reads, for builds with their
+# own plugins.
 wasm = ["dep:wasm-bindgen"]
+# The stock exports (`renderHast`, `parseMdast`, `renderJson`) the prebuilt package ships.
+wasm-exports = ["wasm"]

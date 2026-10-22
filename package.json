@@ -7,7 +7,7 @@
     "tables": "node crates/rill-cmark/gen-unicode-tables.mjs",
     "wasm": "sh scripts/build-wasm.sh",
     "demo": "npm run demo:build && bun demo/serve.js",
-    "demo:build": "sh scripts/build-wasm.sh && bun build demo/main.js --outdir demo/dist --target browser && mkdir -p demo/dist/katex && cp demo/pkg/rill_bg.wasm demo/dist/ && cp -R node_modules/katex/dist/katex.min.css node_modules/katex/dist/fonts demo/dist/katex/"
+    "demo:build": "sh scripts/build-wasm.sh && bun build demo/main.js --outdir demo/dist --target browser && mkdir -p demo/dist/katex && cp js/wasm/rill_bg.wasm demo/dist/ && cp -R node_modules/katex/dist/katex.min.css node_modules/katex/dist/fonts demo/dist/katex/"
   },
   "dependencies": {
     "get-east-asian-width": "1.5.0",
@@ -25,5 +25,8 @@
     "unified": "11.0.5",
     "hast-util-to-html": "9.0.5",
     "katex": "0.16.47"
-  }
+  },
+  "workspaces": [
+    "js"
+  ]
 }

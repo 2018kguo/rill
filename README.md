@@ -9,6 +9,26 @@ character position. You get the same page, just much sooner.
 
 ![rill and Streamdown rendering the same answer side by side as it streams in](docs/demo.gif)
 
+## Use it
+
+```sh
+npm install @2018kguo/rill
+```
+
+```tsx
+import { Streamdown } from "streamdown";
+import { useRill } from "@2018kguo/rill/react";
+
+export function Message({ markdown }: { markdown: string }) {
+  return <Streamdown {...useRill()}>{markdown}</Streamdown>;
+}
+```
+
+That's the whole change. Until the WebAssembly arrives (and during server rendering)
+`useRill()` returns `null` and Streamdown renders as it always has; then rill takes over,
+with the same output, so nothing on the page moves. If rill ever can't take a document,
+that one renders with Streamdown's own plugins.
+
 ## Why
 
 When a chatbot streams an answer, the screen updates many times a second. Each update
@@ -96,20 +116,28 @@ let mdast_json = rill::parse_json("- [x] done")?;
 `rill::mdast::parse_arena` returns the syntax tree itself, an arena that borrows the
 source text instead of copying it.
 
-### JavaScript (WASM)
+### JavaScript
 
-```sh
-npm run wasm
+`@2018kguo/rill` ships the WebAssembly prebuilt, so you don't need Rust to use it.
+
+- `@2018kguo/rill/react`: `useRill()`, the drop-in above.
+- `@2018kguo/rill/streamdown`: `rillPlugins({ rill })` returns the `remarkPlugins` and
+  `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself. It takes
+  `after: { remark, rehype }` for plugins of your own (they run on rill's result, like any
+  plugin after Streamdown's), plus `onRender` and `onError` callbacks.
+- `@2018kguo/rill`: `loadRill()` fetches the WebAssembly once; `initRill(bytes)` instantiates
+  it from bytes (Node, tests); `rill.render(markdown)` returns `{ kind, tree }` directly.
+
+```ts
+import { loadRill } from "@2018kguo/rill";
+import { rillPlugins } from "@2018kguo/rill/streamdown";
+
+const plugins = rillPlugins({ rill: await loadRill(), after: { rehype: [rehypeSlug] } });
+// <Streamdown {...plugins}>{markdown}</Streamdown>
 ```
 
-```js
-import init, { renderJson } from "./demo/pkg/rill.js";
-
-await init();
-const { kind, tree } = JSON.parse(renderJson(markdown));
-// kind "complete": `tree` is Streamdown's final HAST. Render it with
-// hast-util-to-jsx-runtime (as react-markdown does) or hast-util-to-html.
-```
+The WebAssembly loads with `new URL("../wasm/rill_bg.wasm", import.meta.url)`, which Vite,
+webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
 
 ### What runs where
 
@@ -156,7 +184,39 @@ impl rill::Plugin for HeadingIds {
 ```
 
 `crates/rill/tests/api.rs` has a complete one that adds heading ids. Any JavaScript
-rehype plugin also works unchanged on rill's output.
+rehype plugin also works unchanged on rill's output (`after` above), so a Rust plugin is
+only worth it for work that has to happen before the end, such as on the syntax tree.
+
+To ship Rust plugins, build your own WebAssembly with one export that calls
+`rill::wasm::render` (the `wasm` feature) and hand it to the same JavaScript package:
+
+```rust
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen(js_name = renderHast)]
+pub fn render_hast(source: &str) -> Result<rill::wasm::RenderedHast, JsError> {
+    rill::wasm::render(source, &my_options())
+}
+```
+
+```ts
+import init, { renderHast } from "./pkg/my_markdown.js";
+import { createRill } from "@2018kguo/rill";
+import { rillPlugins } from "@2018kguo/rill/streamdown";
+
+await init();
+const plugins = rillPlugins({
+  rill: createRill(renderHast),
+  // The JavaScript pipeline your options mirror: the fallback, and what still runs on
+  // raw HTML (all of `rehypePlugins`) and math (`mathTail`: KaTeX and what follows it).
+  remarkPlugins,
+  rehypePlugins,
+  mathTail,
+});
+```
+
+Extra arguments on your export pass through: `createRill(renderHast)` gives
+`rill.render(source, ...args)`, and `rillPlugins({ args })` supplies them per instance.
 
 ### Conformance
 
@@ -191,7 +251,9 @@ node conformance/bench.mjs                     # the JavaScript pipeline, same d
 - `crates/rill-cmark`: the pulldown-cmark 0.13.4 fork, with every change from upstream
   marked `rill:`.
 - `crates/rill`: `mdast.rs` (the syntax tree), `hast.rs` (HTML tree, sanitize, harden,
-  plugins), `autolink.rs`.
+  plugins), `autolink.rs`, and `wasm` (the boundary the JavaScript package reads).
+- `js/`: the `@2018kguo/rill` npm package (loader, opcode decoder, Streamdown plugins,
+  React hook) and its test against Streamdown's own pipeline.
 - `conformance/`: the differential harness, the probe and the benchmark.
 - `demo/`: the page in the GIF.
 

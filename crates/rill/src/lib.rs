@@ -17,22 +17,76 @@ pub use hast::{
 };
 pub use mdast::{Error, parse_json};
 
+/// The WebAssembly boundary the `@2018kguo/rill` JavaScript package reads: a rendered
+/// document as HAST opcodes. A build with its own [`Plugin`]s exports one function that
+/// returns [`render`](wasm::render)'s result; `--features wasm-exports` adds the stock
+/// exports that the prebuilt package ships.
 #[cfg(feature = "wasm")]
-mod wasm {
+pub mod wasm {
     use wasm_bindgen::prelude::*;
 
-    use crate::{Options, hast, mdast};
+    use crate::{Options, hast};
 
-    /// MDAST JSON for `source`.
-    #[wasm_bindgen(js_name = parseMdast)]
-    pub fn parse_mdast(source: &str) -> Result<String, JsError> {
-        mdast::parse_json(source).map_err(|error| JsError::new(&error.to_string()))
+    /// One rendered document: how far Rust took it ([`crate::Kind`]) and the HAST as
+    /// opcodes, decoded by the JavaScript package.
+    #[wasm_bindgen]
+    pub struct RenderedHast {
+        kind: &'static str,
+        ops: Vec<u32>,
+        strings: String,
     }
 
-    /// `{"kind","tree"}` HAST JSON for `source`.
-    #[wasm_bindgen(js_name = renderJson)]
-    pub fn render_json(source: &str) -> Result<String, JsError> {
-        hast::render_json(source, &Options::default())
-            .map_err(|error| JsError::new(&error.to_string()))
+    #[wasm_bindgen]
+    impl RenderedHast {
+        #[wasm_bindgen(getter)]
+        pub fn kind(&self) -> String {
+            self.kind.to_owned()
+        }
+        /// Copies the opcodes out; call once.
+        pub fn ops(&self) -> Vec<u32> {
+            self.ops.clone()
+        }
+        pub fn strings(&self) -> String {
+            self.strings.clone()
+        }
+    }
+
+    /// Renders `source` for JavaScript. `source` must be NUL-free and well formed; the
+    /// JavaScript package sees to both.
+    pub fn render(source: &str, options: &Options) -> Result<RenderedHast, JsError> {
+        let encoded =
+            hast::render_ops(source, options).map_err(|error| JsError::new(&error.to_string()))?;
+        Ok(RenderedHast {
+            kind: encoded.kind.name(),
+            ops: encoded.ops,
+            strings: encoded.strings,
+        })
+    }
+
+    #[cfg(feature = "wasm-exports")]
+    mod exports {
+        use wasm_bindgen::prelude::*;
+
+        use super::RenderedHast;
+        use crate::{Options, hast, mdast};
+
+        /// Streamdown's pipeline with its default options.
+        #[wasm_bindgen(js_name = renderHast)]
+        pub fn render_hast(source: &str) -> Result<RenderedHast, JsError> {
+            super::render(source, &Options::default())
+        }
+
+        /// MDAST JSON for `source`.
+        #[wasm_bindgen(js_name = parseMdast)]
+        pub fn parse_mdast(source: &str) -> Result<String, JsError> {
+            mdast::parse_json(source).map_err(|error| JsError::new(&error.to_string()))
+        }
+
+        /// `{"kind","tree"}` HAST JSON for `source`.
+        #[wasm_bindgen(js_name = renderJson)]
+        pub fn render_json(source: &str) -> Result<String, JsError> {
+            hast::render_json(source, &Options::default())
+                .map_err(|error| JsError::new(&error.to_string()))
+        }
     }
 }

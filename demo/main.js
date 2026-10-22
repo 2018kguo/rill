@@ -1,7 +1,7 @@
 import { toHtml } from "hast-util-to-html";
 
 import { processor, tails } from "../conformance/pipeline.mjs";
-import init, { renderJson } from "./pkg/rill.js";
+import init, { renderJson } from "../js/wasm/rill.js";
 import emphasis from "../examples/01-emphasis.md" with { type: "text" };
 import containers from "../examples/02-containers.md" with { type: "text" };
 import tables from "../examples/03-tables.md" with { type: "text" };

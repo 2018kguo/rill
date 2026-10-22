@@ -1,5 +1,7 @@
 target/
 node_modules/
 package-lock.json
-demo/pkg/
 demo/dist/
+js/wasm/
+js/dist/
+*.tgz
