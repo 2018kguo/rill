@@ -4,6 +4,8 @@
 # 0.2.129`, and `npm install` (for binaryen's wasm-opt).
 set -eu
 cd "$(dirname "$0")/.."
+# Panic messages embed source paths; keep the build machine's out of the shipped file.
+export RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$PWD=."
 cargo build --release -p rill --lib --features wasm-exports --target wasm32-unknown-unknown \
   --config profile.release.lto=true --config profile.release.codegen-units=1 \
   --config profile.release.debug=false --config profile.release.strip=true
