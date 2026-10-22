@@ -24,7 +24,7 @@ fn main() {
         .join("\n\n");
     let source = one.repeat((100_000 / one.len()).max(1));
     let options = rill::Options::default();
-    let (kind, _) = rill::render(&source, &options).expect("render");
+    let kind = rill::render(&source, &options).expect("render").kind;
     assert_eq!(
         kind,
         rill::Kind::Complete,

@@ -1977,6 +1977,7 @@ pub trait Plugin {
 
 /// How far [`render`] took the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Kind {
     /// Final HAST: Streamdown's whole rehype chain ran.
     Complete,
@@ -1989,8 +1990,9 @@ pub enum Kind {
 }
 
 impl Kind {
+    /// The name the JavaScript package uses: `"complete"`, `"raw"` or `"math"`.
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Kind::Complete => "complete",
             Kind::Raw => "raw",
@@ -1999,8 +2001,22 @@ impl Kind {
     }
 }
 
+impl std::fmt::Display for Kind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// A rendered document: how far rill took it and the HAST as JSON.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rendered {
+    pub kind: Kind,
+    /// The HAST root, as JSON.
+    pub tree: String,
+}
+
 /// Markdown → Streamdown's HAST, as JSON.
-pub fn render(source: &str, options: &Options) -> Result<(Kind, String), Error> {
+pub fn render(source: &str, options: &Options) -> Result<Rendered, Error> {
     let source = mdast::without_nul(source);
     let Built {
         kind,
@@ -2014,13 +2030,16 @@ pub fn render(source: &str, options: &Options) -> Result<(Kind, String), Error> 
         out: String::with_capacity(source.len() * 6 + 64),
     };
     json.node(root);
-    Ok((kind, json.out))
+    Ok(Rendered {
+        kind,
+        tree: json.out,
+    })
 }
 
 /// `{"kind":"complete"|"raw"|"math","tree":HAST}`.
 pub fn render_json(source: &str, options: &Options) -> Result<String, Error> {
-    let (kind, tree) = render(source, options)?;
-    Ok(format!("{{\"kind\":\"{}\",\"tree\":{tree}}}", kind.name()))
+    let Rendered { kind, tree } = render(source, options)?;
+    Ok(format!("{{\"kind\":\"{kind}\",\"tree\":{tree}}}"))
 }
 
 // ---------------------------------------------------------------------------

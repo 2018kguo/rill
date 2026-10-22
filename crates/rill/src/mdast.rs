@@ -51,6 +51,7 @@ fn options() -> Options {
 /// An event stream the builder cannot turn into MDAST. Every UTF-8 string is valid
 /// Markdown, so these mean a bug in the vendored parser, never bad input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// An end event with no open node, or a mismatched end.
     Unbalanced,

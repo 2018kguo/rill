@@ -14,7 +14,8 @@ mod json;
 mod url;
 
 pub use hast::{
-    BlockPolicy, Context, Harden, Kind, Options, Plugin, Sanitize, render, render_json, render_ops,
+    BlockPolicy, Context, Harden, Kind, Options, Plugin, Rendered, Sanitize, render, render_json,
+    render_ops,
 };
 pub use mdast::{Error, parse_json};
 
@@ -59,7 +60,7 @@ pub mod wasm {
         let encoded =
             hast::render_ops(source, options).map_err(|error| JsError::new(&error.to_string()))?;
         Ok(RenderedHast {
-            kind: encoded.kind.name(),
+            kind: encoded.kind.as_str(),
             ops: encoded.ops,
             strings: encoded.strings,
         })

@@ -4,9 +4,9 @@ use rill::{Kind, Options};
 
 #[test]
 fn readme() -> Result<(), rill::Error> {
-    let (kind, hast_json) = rill::render("# Hello *world*", &Options::default())?;
-    assert_eq!(kind, Kind::Complete);
-    assert!(hast_json.contains(r#""tagName":"em""#));
+    let rendered = rill::render("# Hello *world*", &Options::default())?;
+    assert_eq!(rendered.kind, Kind::Complete);
+    assert!(rendered.tree.contains(r#""tagName":"em""#));
     let mdast_json = rill::parse_json("- [x] done")?;
     assert!(mdast_json.contains(r#""checked":true"#));
     Ok(())
@@ -58,10 +58,7 @@ fn plugin() -> Result<(), rill::Error> {
         plugins: vec![Box::new(HeadingIds)],
         ..Options::default()
     };
-    let (_, hast_json) = rill::render("## Getting started", &options)?;
-    assert!(
-        hast_json.contains(r#""id":"getting-started""#),
-        "{hast_json}"
-    );
+    let tree = rill::render("## Getting started", &options)?.tree;
+    assert!(tree.contains(r#""id":"getting-started""#), "{tree}");
     Ok(())
 }
