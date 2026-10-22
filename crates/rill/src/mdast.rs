@@ -943,10 +943,7 @@ impl<'s> Builder<'s> {
             return;
         }
         let bytes = self.tree.source.as_bytes();
-        let mut eol = check_end;
-        while matches!(bytes.get(eol), Some(b' ' | b'\t')) {
-            eol += 1;
-        }
+        let eol = skip_blanks(bytes, check_end);
         if !matches!(bytes.get(eol), Some(b'\n' | b'\r')) {
             return;
         }
@@ -1172,10 +1169,7 @@ impl<'s> Builder<'s> {
                 bytes(start, trim_line_ending(source, start, end)),
             ),
             Event::Definition { label, dest, title } => {
-                let mut end = end;
-                while matches!(source.as_bytes().get(end), Some(b' ' | b'\t')) {
-                    end += 1;
-                }
+                let end = skip_blanks(source.as_bytes(), end);
                 self.leaf(
                     MKind::Definition {
                         url: Cow::from(dest),
@@ -1207,10 +1201,7 @@ impl<'s> Builder<'s> {
                     }
                     None => {
                         // A setext heading swallowed the paragraph: the marker is plain text.
-                        let mut end = end;
-                        while matches!(source.as_bytes().get(end), Some(b' ' | b'\t')) {
-                            end += 1;
-                        }
+                        let end = skip_blanks(source.as_bytes(), end);
                         self.push_text(Cow::Borrowed(&source[start..end]), start, end);
                         if let Some(frame) = self.stack.last_mut() {
                             frame.start = frame.start.min(start);
@@ -1825,6 +1816,15 @@ fn list_item_prefix_end(source: &str, at: usize) -> usize {
     }
 }
 
+/// The first byte at or after `at` that is not a space or tab.
+fn skip_blanks(bytes: &[u8], at: usize) -> usize {
+    at + bytes.get(at..).map_or(0, |rest| {
+        rest.iter()
+            .take_while(|byte| matches!(byte, b' ' | b'\t'))
+            .count()
+    })
+}
+
 /// Line endings in `text`, a CRLF counting once (at its LF).
 fn line_endings(text: &[u8]) -> usize {
     text.iter()
@@ -2043,9 +2043,7 @@ fn fence_info_raw(source: &str, start: usize) -> &str {
     while bytes.get(at) == Some(&fence) {
         at += 1;
     }
-    while matches!(bytes.get(at), Some(b' ' | b'\t')) {
-        at += 1;
-    }
+    let at = skip_blanks(bytes, at);
     let end = source[at..]
         .find(['\n', '\r'])
         .map_or(source.len(), |found| at + found);
