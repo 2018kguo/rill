@@ -332,8 +332,9 @@ impl<'s> MTree<'s> {
         }
     }
 
+    /// `ix`'s byte span; `None` for `NIL` or a node without one.
     fn bytes(&self, ix: Ix) -> Option<(u32, u32)> {
-        match self.nodes[ix as usize].at {
+        match self.nodes.get(ix as usize)?.at {
             At::Bytes(start, end) => Some((start, end)),
             _ => None,
         }
@@ -573,14 +574,8 @@ impl<'s> Builder<'s> {
         let in_blockquote = quote_depth > 0;
         let source = self.tree.source;
         let bytes = source.as_bytes();
-        let first_span = {
-            let first = self.tree.nodes[ix as usize].first;
-            (first != NIL).then(|| self.tree.bytes(first)).flatten()
-        };
-        let last_span = {
-            let last = self.tree.nodes[ix as usize].last;
-            (last != NIL).then(|| self.tree.bytes(last)).flatten()
-        };
+        let first_span = self.tree.bytes(self.tree.nodes[ix as usize].first);
+        let last_span = self.tree.bytes(self.tree.nodes[ix as usize].last);
         let spread = listing && self.spread(ix);
         let pulldown_end = end;
         let pending = !self.exits.is_empty();
@@ -820,8 +815,7 @@ impl<'s> Builder<'s> {
             if let Settle::Item { list } = settle {
                 // Only a sibling's prefix: an outer list's closes this list first.
                 let sibling = self.stack.last().is_some_and(|frame| frame.ix == list);
-                let last = self.tree.nodes[ix as usize].last;
-                if let Some((_, last_end)) = (last != NIL).then(|| self.tree.bytes(last)).flatten()
+                if let Some((_, last_end)) = self.tree.bytes(self.tree.nodes[ix as usize].last)
                     && let At::Bytes(_, item_end) = &mut self.tree.nodes[ix as usize].at
                 {
                     // prepareList: with no line ending before the next item's prefix, the
@@ -909,10 +903,9 @@ impl<'s> Builder<'s> {
                 _ => line_start,
             };
             // The walk back stops at content, which a child's settled end may extend.
-            let last = self.tree.nodes[ix as usize].last;
-            let content_end = (last != NIL)
-                .then(|| self.tree.bytes(last))
-                .flatten()
+            let content_end = self
+                .tree
+                .bytes(self.tree.nodes[ix as usize].last)
                 .map_or(content_end, |(_, last_end)| {
                     content_end.max(last_end as usize)
                 });
@@ -957,10 +950,9 @@ impl<'s> Builder<'s> {
         if item == NIL {
             return;
         }
-        let child = self.tree.nodes[item as usize].last;
-        let content_end = (child != NIL)
-            .then(|| self.tree.bytes(child))
-            .flatten()
+        let content_end = self
+            .tree
+            .bytes(self.tree.nodes[item as usize].last)
             .map(|(_, child_end)| child_end as usize);
         if let (Some(content_end), At::Bytes(_, item_end)) =
             (content_end, &mut self.tree.nodes[item as usize].at)
@@ -1167,9 +1159,7 @@ impl<'s> Builder<'s> {
                 let previous_end = self
                     .stack
                     .last()
-                    .map(|frame| self.tree.nodes[frame.ix as usize].last)
-                    .filter(|last| *last != NIL)
-                    .and_then(|last| self.tree.bytes(last))
+                    .and_then(|frame| self.tree.bytes(self.tree.nodes[frame.ix as usize].last))
                     .map_or(0, |(_, end)| end as usize);
                 let escaped = self.text.is_none()
                     && start > previous_end
