@@ -2263,7 +2263,7 @@ fn has_closing_fence(source: &str, start: usize, end: usize, in_container: bool)
 
 /// HTML block types 1-5 end only on their terminator; unterminated ones reach the end.
 fn unterminated_raw_html(source: &str, start: usize, end: usize) -> bool {
-    let block = source[start..end].as_bytes();
+    let block = &source.as_bytes()[start..end];
     let starts_with = |at: usize, prefix: &[u8]| {
         block
             .get(at..at + prefix.len())
