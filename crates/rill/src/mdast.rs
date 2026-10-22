@@ -1537,7 +1537,8 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
     }
     let mut tree = MTree {
         source,
-        nodes: Vec::with_capacity(source.len() / 8 + 16),
+        // Chat Markdown runs 4 to 19 bytes per node, about 8 typically: room for 6.
+        nodes: Vec::with_capacity(source.len() / 6 + 16),
         points: Points::new(source),
     };
     tree.push(MKind::Root, bytes(0, source.len()));

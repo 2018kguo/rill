@@ -1099,7 +1099,8 @@ pub fn to_hast<'s>(mdast: &MTree<'s>) -> Converted<'s> {
     let mut state = ToHast {
         mdast,
         hast: HTree {
-            nodes: Vec::with_capacity(mdast.nodes.len() * 2),
+            // Prose and chat Markdown make 1.3 to 1.8 HAST nodes per MDAST node.
+            nodes: Vec::with_capacity(mdast.nodes.len() * 7 / 4 + 16),
             quirks: false,
         },
         definitions: HashMap::new(),
@@ -2036,13 +2037,13 @@ pub fn render(source: &str, options: &Options) -> Result<Rendered, Error> {
     let source = mdast::without_nul(source);
     let Built {
         kind,
-        mdast,
+        points,
         tree,
         root,
     } = build(&source, options)?;
     let mut json = Json {
         tree: &tree,
-        points: &mdast.points,
+        points: &points,
         out: String::with_capacity(source.len() * 6 + 64),
     };
     json.node(root);
@@ -2226,10 +2227,10 @@ impl Encoder<'_, '_> {
     }
 }
 
-/// A rendered document before serialization. `mdast` stays for its `points`.
+/// A rendered document before serialization, with the MDAST's `points` for its positions.
 struct Built<'s> {
     kind: Kind,
-    mdast: MTree<'s>,
+    points: Points,
     tree: HTree<'s>,
     root: Ix,
 }
@@ -2245,17 +2246,19 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
         raw_boundary,
         math,
     } = to_hast(&mdast);
+    // HAST owns or borrows the source for every string, so only the positions stay.
+    let MTree { points, .. } = mdast;
     if raw_boundary {
         return Ok(Built {
             kind: Kind::Raw,
-            mdast,
+            points,
             tree,
             root,
         });
     }
     let context = Context {
         source,
-        points: &mdast.points,
+        points: &points,
     };
     for plugin in &options.plugins {
         plugin.hast_unsanitized(&mut tree, root, &context);
@@ -2282,7 +2285,7 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
     }
     Ok(Built {
         kind: if math { Kind::Math } else { Kind::Complete },
-        mdast,
+        points,
         tree,
         root,
     })
@@ -2293,16 +2296,18 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
 pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
     let Built {
         kind,
-        mdast,
+        points,
         tree,
         root,
     } = build(source, options)?;
     let mut encoder = Encoder {
         tree: &tree,
-        points: &mdast.points,
+        points: &points,
         source,
-        ops: Vec::with_capacity(tree.nodes.len() * 8),
-        strings: String::new(),
+        // 7 to 12 opcodes per node, about 10 typically.
+        ops: Vec::with_capacity(tree.nodes.len() * 11),
+        // Generated strings run to about half the source.
+        strings: String::with_capacity(source.len() / 2),
         units: 0,
         interned: HashMap::new(),
     };
