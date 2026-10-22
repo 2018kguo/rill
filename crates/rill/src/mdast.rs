@@ -766,7 +766,7 @@ impl<'s> Builder<'s> {
                         let Some((def_start, def_end)) = self.tree.bytes(candidate) else {
                             break;
                         };
-                        if line_endings(&source[def_end as usize..earliest]) != 1
+                        if line_endings(&bytes[def_end as usize..earliest]) != 1
                             || !source[def_end as usize..earliest].trim().is_empty()
                         {
                             break;
@@ -923,7 +923,7 @@ impl<'s> Builder<'s> {
             if let MKind::List { spread, .. } = &mut self.tree.nodes[ix as usize].kind {
                 // prepareList: line endings between the content and the exit count toward
                 // spread, and the last item reaches the exit unless one follows its content.
-                if line_endings(&source[content_end..end]) >= 2 {
+                if line_endings(&source.as_bytes()[content_end..end]) >= 2 {
                     *spread = true;
                 }
                 self.extend_last_item(ix, end);
@@ -1775,23 +1775,7 @@ fn transform_children(tree: &mut MTree<'_>, parent: Ix, finder: Finder) {
 /// Whether a blank line separates two sibling blocks: only container prefixes and
 /// whitespace occur between them, so two line endings mean a blank line.
 fn blank_between(source: &str, end: usize, start: usize) -> bool {
-    let between = source.as_bytes().get(end..start).unwrap_or_default();
-    let mut endings = 0;
-    let mut index = 0;
-    while index < between.len() {
-        match between[index] {
-            b'\r' => {
-                endings += 1;
-                if between.get(index + 1) == Some(&b'\n') {
-                    index += 1;
-                }
-            }
-            b'\n' => endings += 1,
-            _ => {}
-        }
-        index += 1;
-    }
-    endings >= 2
+    line_endings(source.as_bytes().get(end..start).unwrap_or_default()) >= 2
 }
 
 /// micromark's indented code past pulldown's end: whitespace-only lines continue it (blank
@@ -1884,9 +1868,12 @@ fn list_item_prefix_end(source: &str, at: usize) -> usize {
     }
 }
 
-/// Line endings in `text`, a CRLF counting once.
-fn line_endings(text: &str) -> usize {
-    text.matches('\n').count() + text.matches('\r').count() - text.matches("\r\n").count()
+/// Line endings in `text`, a CRLF counting once (at its LF).
+fn line_endings(text: &[u8]) -> usize {
+    text.iter()
+        .enumerate()
+        .filter(|&(at, &byte)| byte == b'\n' || byte == b'\r' && text.get(at + 1) != Some(&b'\n'))
+        .count()
 }
 
 fn line_ending_len(source: &str, at: usize) -> usize {
