@@ -81,6 +81,17 @@ const EMPTY: Chain = Chain {
     last: NIL,
 };
 
+impl Chain {
+    /// A chain of just `ix`, a fresh node whose `next` is still `NIL`. A node that may
+    /// still be linked needs [`HTree::one_chain`].
+    fn one(ix: Ix) -> Chain {
+        Chain {
+            first: ix,
+            last: ix,
+        }
+    }
+}
+
 fn edges(at: At) -> (Edge, Edge) {
     match at {
         At::None => (Edge::None, Edge::None),
@@ -117,6 +128,25 @@ impl<'s> HTree<'s> {
             },
             at,
         )
+    }
+
+    /// A new node of `kind` with `children`.
+    fn parent(&mut self, kind: HKind<'s>, at: At, children: Chain) -> Ix {
+        let parent = self.push(kind, at);
+        self.set_children(parent, children);
+        parent
+    }
+
+    /// A new element with `children`.
+    fn element_with(&mut self, tag: &'static str, props: Props<'s>, at: At, children: Chain) -> Ix {
+        let element = self.element(tag, props, at);
+        self.set_children(element, children);
+        element
+    }
+
+    /// A new element around one fresh node.
+    fn element_around(&mut self, tag: &'static str, props: Props<'s>, at: At, child: Ix) -> Ix {
+        self.element_with(tag, props, at, Chain::one(child))
     }
 
     fn set_children(&mut self, parent: Ix, chain: Chain) {
@@ -477,29 +507,19 @@ impl<'s> ToHast<'_, 's> {
 
     fn element(&mut self, tag: &'static str, ix: Ix, props: Props<'s>) -> Chain {
         let children = self.all(ix);
-        let element = self.h.element(tag, props, self.m.node(ix).at);
-        self.h.set_children(element, children);
-        self.h.one_chain(element)
+        Chain::one(
+            self.h
+                .element_with(tag, props, self.m.node(ix).at, children),
+        )
     }
 
     fn wrapped(&mut self, tag: &'static str, ix: Ix, props: Props<'s>, loose: bool) -> Chain {
         let children = self.all(ix);
         let children = self.h.wrap(children, loose);
-        let element = self.h.element(tag, props, self.m.node(ix).at);
-        self.h.set_children(element, children);
-        self.h.one_chain(element)
-    }
-
-    fn leaf_in(&mut self, tag: &'static str, props: Props<'s>, at: At, child: Ix) -> Ix {
-        let element = self.h.element(tag, props, at);
-        self.h.set_children(
-            element,
-            Chain {
-                first: child,
-                last: child,
-            },
-        );
-        element
+        Chain::one(
+            self.h
+                .element_with(tag, props, self.m.node(ix).at, children),
+        )
     }
 
     fn one(&mut self, ix: Ix, parent: Ix) -> Chain {
@@ -508,14 +528,12 @@ impl<'s> ToHast<'_, 's> {
             MKind::Root => {
                 let children = self.all(ix);
                 let children = self.h.wrap(children, false);
-                let root = self.h.push(HKind::Root, at);
-                self.h.set_children(root, children);
-                self.h.one_chain(root)
+                Chain::one(self.h.parent(HKind::Root, at, children))
             }
             MKind::Blockquote => self.wrapped("blockquote", ix, Vec::new(), true),
             MKind::Break => {
                 let br = self.h.element("br", Vec::new(), at);
-                let mut chain = self.h.one_chain(br);
+                let mut chain = Chain::one(br);
                 let newline = self.h.text("\n");
                 self.h.append(&mut chain, newline);
                 chain
@@ -538,23 +556,16 @@ impl<'s> ToHast<'_, 's> {
                 }
                 let meta = meta.clone().filter(|meta| !meta.is_empty());
                 let text = self.h.text(value);
-                let code = self.h.push(
+                let code = self.h.parent(
                     HKind::Element {
                         tag: "code",
                         props,
                         meta,
                     },
                     at,
+                    Chain::one(text),
                 );
-                self.h.set_children(
-                    code,
-                    Chain {
-                        first: text,
-                        last: text,
-                    },
-                );
-                let pre = self.leaf_in("pre", Vec::new(), at, code);
-                self.h.one_chain(pre)
+                Chain::one(self.h.element_around("pre", Vec::new(), at, code))
             }
             MKind::Delete => self.element("del", ix, Vec::new()),
             MKind::Emphasis => self.element("em", ix, Vec::new()),
@@ -565,10 +576,7 @@ impl<'s> ToHast<'_, 's> {
                     ["h1", "h2", "h3", "h4", "h5", "h6"][usize::from((*depth).clamp(1, 6) - 1)];
                 self.element(tag, ix, Vec::new())
             }
-            MKind::ThematicBreak => {
-                let hr = self.h.element("hr", Vec::new(), at);
-                self.h.one_chain(hr)
-            }
+            MKind::ThematicBreak => Chain::one(self.h.element("hr", Vec::new(), at)),
             MKind::FootnoteReference { identifier, .. } => {
                 let id = identifier.to_uppercase();
                 let safe_id = normalize_uri(&Cow::Owned(id.to_lowercase())).into_owned();
@@ -602,14 +610,12 @@ impl<'s> ToHast<'_, 's> {
                     self.raw_boundary = true;
                 }
                 let label = self.h.text(Cow::Owned(counter.to_string()));
-                let link = self.leaf_in("a", props, at, label);
-                let sup = self.leaf_in("sup", Vec::new(), at, link);
-                self.h.one_chain(sup)
+                let link = self.h.element_around("a", props, at, label);
+                Chain::one(self.h.element_around("sup", Vec::new(), at, link))
             }
             MKind::Html(value) => {
                 self.raw_boundary = true;
-                let raw = self.h.push(HKind::Raw(value.clone()), at);
-                self.h.one_chain(raw)
+                Chain::one(self.h.push(HKind::Raw(value.clone()), at))
             }
             MKind::Image { url, title, alt } => {
                 let mut props = vec![
@@ -619,8 +625,7 @@ impl<'s> ToHast<'_, 's> {
                 if let Some(title) = title {
                     props.push(("title", Val::Str(title.clone())));
                 }
-                let img = self.h.element("img", props, at);
-                self.h.one_chain(img)
+                Chain::one(self.h.element("img", props, at))
             }
             MKind::ImageReference {
                 kind,
@@ -630,8 +635,7 @@ impl<'s> ToHast<'_, 's> {
             } => match self.definitions.get(&identifier.to_uppercase()).cloned() {
                 None => {
                     let suffix = revert_suffix(*kind, label, identifier);
-                    let text = self.h.text(Cow::Owned(format!("![{alt}{suffix}")));
-                    self.h.one_chain(text)
+                    Chain::one(self.h.text(Cow::Owned(format!("![{alt}{suffix}"))))
                 }
                 Some((url, title)) => {
                     let mut props = vec![
@@ -641,8 +645,7 @@ impl<'s> ToHast<'_, 's> {
                     if let Some(title) = title {
                         props.push(("title", Val::Str(title)));
                     }
-                    let img = self.h.element("img", props, at);
-                    self.h.one_chain(img)
+                    Chain::one(self.h.element("img", props, at))
                 }
             },
             MKind::InlineCode(value) => {
@@ -652,8 +655,7 @@ impl<'s> ToHast<'_, 's> {
                     value.clone()
                 };
                 let text = self.h.push(HKind::Text(value), at);
-                let code = self.leaf_in("code", Vec::new(), at, text);
-                self.h.one_chain(code)
+                Chain::one(self.h.element_around("code", Vec::new(), at, text))
             }
             MKind::Link { url, title } => {
                 let mut props = vec![("href", Val::Str(normalize_uri(url)))];
@@ -717,16 +719,11 @@ impl<'s> ToHast<'_, 's> {
                     cursor = self.h.nodes[cursor as usize].next;
                 }
                 let children = self.h.wrap(results, true);
-                let element = self.h.element(tag, props, at);
-                self.h.set_children(element, children);
-                self.h.one_chain(element)
+                Chain::one(self.h.element_with(tag, props, at, children))
             }
             MKind::ListItem { spread, checked } => self.list_item(ix, parent, *spread, *checked),
             MKind::Table(align) => self.table(ix, &align.clone(), at),
-            MKind::Text(value) => {
-                let text = self.h.push(HKind::Text(trim_lines(value)), at);
-                self.h.one_chain(text)
-            }
+            MKind::Text(value) => Chain::one(self.h.push(HKind::Text(trim_lines(value)), at)),
             MKind::Math { value, .. } => {
                 self.math = true;
                 let text = self.h.text(value.clone());
@@ -734,9 +731,10 @@ impl<'s> ToHast<'_, 's> {
                     Cow::Borrowed("language-math"),
                     Cow::Borrowed("math-display"),
                 ]);
-                let code = self.leaf_in("code", vec![("className", class)], At::None, text);
-                let pre = self.leaf_in("pre", Vec::new(), at, code);
-                self.h.one_chain(pre)
+                let code =
+                    self.h
+                        .element_around("code", vec![("className", class)], At::None, text);
+                Chain::one(self.h.element_around("pre", Vec::new(), at, code))
             }
             MKind::InlineMath(value) => {
                 self.math = true;
@@ -745,8 +743,10 @@ impl<'s> ToHast<'_, 's> {
                     Cow::Borrowed("language-math"),
                     Cow::Borrowed("math-inline"),
                 ]);
-                let code = self.leaf_in("code", vec![("className", class)], at, text);
-                self.h.one_chain(code)
+                Chain::one(
+                    self.h
+                        .element_around("code", vec![("className", class)], at, text),
+                )
             }
             MKind::Definition { .. } | MKind::FootnoteDefinition { .. } => EMPTY,
             // Rows and cells are handled by their table; the unknown handler's `div`.
@@ -828,9 +828,10 @@ impl<'s> ToHast<'_, 's> {
             let newline = self.h.text("\n");
             self.h.append(&mut children, newline);
         }
-        let li = self.h.element("li", props, self.m.node(ix).at);
-        self.h.set_children(li, children);
-        self.h.one_chain(li)
+        Chain::one(
+            self.h
+                .element_with("li", props, self.m.node(ix).at, children),
+        )
     }
 
     fn table(&mut self, ix: Ix, align: &[AlignKind], at: At) -> Chain {
@@ -846,10 +847,9 @@ impl<'s> ToHast<'_, 's> {
             let rest = self.h.nodes[first as usize].next;
             let head_rows = self.h.one_chain(first);
             let children = self.h.wrap(head_rows, true);
-            let head = self
-                .h
-                .element("thead", Vec::new(), self.m.node(first_row).at);
-            self.h.set_children(head, children);
+            let head =
+                self.h
+                    .element_with("thead", Vec::new(), self.m.node(first_row).at, children);
             self.h.append(&mut content, head);
             if rest != NIL {
                 let body_rows = Chain {
@@ -864,15 +864,12 @@ impl<'s> ToHast<'_, 's> {
                     (Some((start, _)), Some((_, end))) => At::Points(start, end),
                     _ => At::None,
                 };
-                let body = self.h.element("tbody", Vec::new(), body_at);
-                self.h.set_children(body, children);
+                let body = self.h.element_with("tbody", Vec::new(), body_at, children);
                 self.h.append(&mut content, body);
             }
         }
         let children = self.h.wrap(content, true);
-        let table = self.h.element("table", Vec::new(), at);
-        self.h.set_children(table, children);
-        self.h.one_chain(table)
+        Chain::one(self.h.element_with("table", Vec::new(), at, children))
     }
 
     fn table_row(&mut self, row: Ix, index: usize, align: &[AlignKind]) -> Ix {
@@ -894,17 +891,17 @@ impl<'s> ToHast<'_, 's> {
                 self.h.element(tag, props, At::None)
             } else {
                 let children = self.all(source);
-                let cell = self.h.element(tag, props, self.m.node(source).at);
-                self.h.set_children(cell, children);
+                let cell = self
+                    .h
+                    .element_with(tag, props, self.m.node(source).at, children);
                 source = self.m.node(source).next;
                 cell
             };
             self.h.append(&mut cells, cell);
         }
         let children = self.h.wrap(cells, true);
-        let tr = self.h.element("tr", Vec::new(), self.m.node(row).at);
-        self.h.set_children(tr, children);
-        tr
+        self.h
+            .element_with("tr", Vec::new(), self.m.node(row).at, children)
     }
 
     fn footer(&mut self) -> Option<Ix> {
@@ -937,13 +934,13 @@ impl<'s> ToHast<'_, 's> {
                     String::new()
                 };
                 let arrow = self.h.text("↩");
-                let mut children = self.h.one_chain(arrow);
+                let mut children = Chain::one(arrow);
                 if rereference > 1 {
                     let number = self.h.text(Cow::Owned(rereference.to_string()));
-                    let sup = self.leaf_in("sup", Vec::new(), At::None, number);
+                    let sup = self.h.element_around("sup", Vec::new(), At::None, number);
                     self.h.append(&mut children, sup);
                 }
-                let link = self.h.element(
+                let link = self.h.element_with(
                     "a",
                     vec![
                         (
@@ -961,8 +958,8 @@ impl<'s> ToHast<'_, 's> {
                         ("className", class("data-footnote-backref")),
                     ],
                     At::None,
+                    children,
                 );
-                self.h.set_children(link, children);
                 self.h.append(&mut back, link);
             }
             if content.last != NIL && self.h.tag(content.last) == Some("p") {
@@ -983,22 +980,22 @@ impl<'s> ToHast<'_, 's> {
                 self.h.extend(&mut content, back);
             }
             let children = self.h.wrap(content, true);
-            let li = self.h.element(
+            let li = self.h.element_with(
                 "li",
                 vec![(
                     "id",
                     Val::Str(Cow::Owned(format!("user-content-fn-{safe_id}"))),
                 )],
                 self.m.node(definition).at,
+                children,
             );
-            self.h.set_children(li, children);
             self.h.append(&mut items, li);
         }
         if items.first == NIL {
             return None;
         }
         let label_text = self.h.text("Footnotes");
-        let label = self.leaf_in(
+        let label = self.h.element_around(
             "h2",
             vec![
                 ("className", class("sr-only")),
@@ -1008,24 +1005,24 @@ impl<'s> ToHast<'_, 's> {
             label_text,
         );
         let list_children = self.h.wrap(items, true);
-        let list = self.h.element("ol", Vec::new(), At::None);
-        self.h.set_children(list, list_children);
-        let mut children = self.h.one_chain(label);
+        let list = self
+            .h
+            .element_with("ol", Vec::new(), At::None, list_children);
+        let mut children = Chain::one(label);
         let newline = self.h.text("\n");
         self.h.append(&mut children, newline);
         self.h.append(&mut children, list);
         let newline = self.h.text("\n");
         self.h.append(&mut children, newline);
-        let section = self.h.element(
+        Some(self.h.element_with(
             "section",
             vec![
                 ("dataFootnotes", Val::Bool(true)),
                 ("className", class("footnotes")),
             ],
             At::None,
-        );
-        self.h.set_children(section, children);
-        Some(section)
+            children,
+        ))
     }
 }
 
