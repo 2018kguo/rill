@@ -27,7 +27,19 @@ pub enum AlignKind {
     None,
 }
 
-pub fn options() -> Options {
+impl From<Alignment> for AlignKind {
+    fn from(alignment: Alignment) -> Self {
+        match alignment {
+            Alignment::None => AlignKind::None,
+            Alignment::Left => AlignKind::Left,
+            Alignment::Center => AlignKind::Center,
+            Alignment::Right => AlignKind::Right,
+        }
+    }
+}
+
+/// The rill-cmark extensions remark-gfm and remark-math enable.
+fn options() -> Options {
     Options::ENABLE_TABLES
         | Options::ENABLE_FOOTNOTES
         | Options::ENABLE_STRIKETHROUGH
@@ -347,6 +359,185 @@ impl<'s> MTree<'s> {
             At::Points(start, end) => Some((start, end)),
         }
     }
+
+    /// The tree as remark's MDAST JSON, positions in UTF-16 units.
+    pub fn to_json(&self) -> String {
+        let mut out = String::with_capacity(self.source.len() * 6 + 64);
+        self.write_json(&mut out, MTree::ROOT);
+        out
+    }
+
+    fn write_json(&self, out: &mut String, ix: Ix) {
+        let node = self.node(ix);
+        let field = |out: &mut String, key: &str| {
+            out.push_str(",\"");
+            out.push_str(key);
+            out.push_str("\":");
+        };
+        let string = |out: &mut String, key: &str, value: &str| {
+            field(out, key);
+            json_string(out, value);
+        };
+        let nullable = |out: &mut String, key: &str, value: Option<&str>| {
+            field(out, key);
+            match value {
+                Some(value) => json_string(out, value),
+                None => out.push_str("null"),
+            }
+        };
+        let reference = |out: &mut String, kind: ReferenceKind| {
+            field(out, "referenceType");
+            out.push_str(match kind {
+                ReferenceKind::Shortcut => "\"shortcut\"",
+                ReferenceKind::Collapsed => "\"collapsed\"",
+                ReferenceKind::Full => "\"full\"",
+            });
+        };
+        let flag = |out: &mut String, key: &str, value: bool| {
+            field(out, key);
+            out.push_str(if value { "true" } else { "false" });
+        };
+        out.push_str("{\"type\":\"");
+        out.push_str(node.kind.type_name());
+        out.push('"');
+        let mut parent = true;
+        match &node.kind {
+            MKind::Heading(depth) => {
+                field(out, "depth");
+                json_u32(out, u32::from(*depth));
+            }
+            MKind::List {
+                ordered,
+                start,
+                spread,
+            } => {
+                flag(out, "ordered", *ordered);
+                field(out, "start");
+                match start {
+                    Some(start) => json_u32(out, *start),
+                    None => out.push_str("null"),
+                }
+                flag(out, "spread", *spread);
+            }
+            MKind::ListItem { spread, checked } => {
+                flag(out, "spread", *spread);
+                field(out, "checked");
+                out.push_str(match checked {
+                    Some(true) => "true",
+                    Some(false) => "false",
+                    None => "null",
+                });
+            }
+            MKind::Html(value)
+            | MKind::Text(value)
+            | MKind::InlineCode(value)
+            | MKind::InlineMath(value) => {
+                parent = false;
+                string(out, "value", value);
+            }
+            MKind::Code {
+                value, lang, meta, ..
+            } => {
+                parent = false;
+                nullable(out, "lang", lang.as_deref());
+                nullable(out, "meta", meta.as_deref());
+                string(out, "value", value);
+            }
+            MKind::Math { value, meta } => {
+                parent = false;
+                nullable(out, "meta", meta.as_deref());
+                string(out, "value", value);
+            }
+            MKind::Definition {
+                url,
+                title,
+                identifier,
+                label,
+            } => {
+                parent = false;
+                string(out, "identifier", identifier);
+                string(out, "label", label);
+                nullable(out, "title", title.as_deref());
+                string(out, "url", url);
+            }
+            MKind::Link { url, title } => {
+                nullable(out, "title", title.as_deref());
+                string(out, "url", url);
+            }
+            MKind::LinkReference {
+                kind,
+                identifier,
+                label,
+            } => {
+                string(out, "identifier", identifier);
+                string(out, "label", label);
+                reference(out, *kind);
+            }
+            MKind::Image { url, title, alt } => {
+                parent = false;
+                string(out, "alt", alt);
+                nullable(out, "title", title.as_deref());
+                string(out, "url", url);
+            }
+            MKind::ImageReference {
+                kind,
+                identifier,
+                label,
+                alt,
+            } => {
+                parent = false;
+                string(out, "alt", alt);
+                string(out, "identifier", identifier);
+                string(out, "label", label);
+                reference(out, *kind);
+            }
+            MKind::FootnoteDefinition { identifier, label } => {
+                string(out, "identifier", identifier);
+                string(out, "label", label);
+            }
+            MKind::FootnoteReference { identifier, label } => {
+                parent = false;
+                string(out, "identifier", identifier);
+                string(out, "label", label);
+            }
+            MKind::Table(align) => {
+                field(out, "align");
+                out.push('[');
+                for (index, align) in align.iter().enumerate() {
+                    if index > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(match align {
+                        AlignKind::Left => "\"left\"",
+                        AlignKind::Right => "\"right\"",
+                        AlignKind::Center => "\"center\"",
+                        AlignKind::None => "null",
+                    });
+                }
+                out.push(']');
+            }
+            MKind::ThematicBreak | MKind::Break => parent = false,
+            _ => {}
+        }
+        if parent {
+            out.push_str(",\"children\":[");
+            for (index, child) in self.children(ix).enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                self.write_json(out, child);
+            }
+            out.push(']');
+        }
+        if let Some((start, end)) = self.pt_range(node.at) {
+            out.push_str(",\"position\":{\"start\":");
+            write_point(out, start);
+            out.push_str(",\"end\":");
+            write_point(out, end);
+            out.push('}');
+        }
+        out.push('}');
+    }
 }
 
 pub struct Children<'t, 's> {
@@ -421,7 +612,6 @@ struct Exit {
     content_end: usize,
 }
 
-#[derive(Clone, PartialEq)]
 enum Settle {
     /// A blockquote or list: micromark's container exit. `eof_prefixed`: the closing line
     /// is the last and only continues the containers still open (`flowStart` at EOF).
@@ -439,7 +629,7 @@ enum Settle {
 
 /// An open container's line prefix: a quote marker, or indentation to an item's content
 /// column.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy)]
 enum Prefix {
     Quote,
     Item(usize),
@@ -1282,17 +1472,7 @@ impl<'s> Builder<'s> {
                 identifier: normalize_identifier(&label),
                 label: label.into_string(),
             },
-            Tag::Table(align) => MKind::Table(
-                align
-                    .iter()
-                    .map(|alignment| match alignment {
-                        Alignment::None => AlignKind::None,
-                        Alignment::Left => AlignKind::Left,
-                        Alignment::Center => AlignKind::Center,
-                        Alignment::Right => AlignKind::Right,
-                    })
-                    .collect(),
-            ),
+            Tag::Table(align) => MKind::Table(align.iter().copied().map(AlignKind::from).collect()),
             Tag::TableHead | Tag::TableRow => MKind::TableRow,
             Tag::TableCell => MKind::TableCell,
             Tag::Emphasis => MKind::Emphasis,
@@ -1484,187 +1664,6 @@ fn failed_code_run(text: &str) -> bool {
 pub fn parse_json(source: &str) -> Result<String, Error> {
     let source = without_nul(source);
     Ok(parse_arena(&source)?.to_json())
-}
-
-impl MTree<'_> {
-    /// The tree as remark's MDAST JSON, positions in UTF-16 units.
-    pub fn to_json(&self) -> String {
-        let mut out = String::with_capacity(self.source.len() * 6 + 64);
-        self.write_json(&mut out, MTree::ROOT);
-        out
-    }
-
-    fn write_json(&self, out: &mut String, ix: Ix) {
-        let node = self.node(ix);
-        let field = |out: &mut String, key: &str| {
-            out.push_str(",\"");
-            out.push_str(key);
-            out.push_str("\":");
-        };
-        let string = |out: &mut String, key: &str, value: &str| {
-            field(out, key);
-            json_string(out, value);
-        };
-        let nullable = |out: &mut String, key: &str, value: Option<&str>| {
-            field(out, key);
-            match value {
-                Some(value) => json_string(out, value),
-                None => out.push_str("null"),
-            }
-        };
-        let reference = |out: &mut String, kind: ReferenceKind| {
-            field(out, "referenceType");
-            out.push_str(match kind {
-                ReferenceKind::Shortcut => "\"shortcut\"",
-                ReferenceKind::Collapsed => "\"collapsed\"",
-                ReferenceKind::Full => "\"full\"",
-            });
-        };
-        let flag = |out: &mut String, key: &str, value: bool| {
-            field(out, key);
-            out.push_str(if value { "true" } else { "false" });
-        };
-        out.push_str("{\"type\":\"");
-        out.push_str(node.kind.type_name());
-        out.push('"');
-        let mut parent = true;
-        match &node.kind {
-            MKind::Heading(depth) => {
-                field(out, "depth");
-                json_u32(out, u32::from(*depth));
-            }
-            MKind::List {
-                ordered,
-                start,
-                spread,
-            } => {
-                flag(out, "ordered", *ordered);
-                field(out, "start");
-                match start {
-                    Some(start) => json_u32(out, *start),
-                    None => out.push_str("null"),
-                }
-                flag(out, "spread", *spread);
-            }
-            MKind::ListItem { spread, checked } => {
-                flag(out, "spread", *spread);
-                field(out, "checked");
-                out.push_str(match checked {
-                    Some(true) => "true",
-                    Some(false) => "false",
-                    None => "null",
-                });
-            }
-            MKind::Html(value)
-            | MKind::Text(value)
-            | MKind::InlineCode(value)
-            | MKind::InlineMath(value) => {
-                parent = false;
-                string(out, "value", value);
-            }
-            MKind::Code {
-                value, lang, meta, ..
-            } => {
-                parent = false;
-                nullable(out, "lang", lang.as_deref());
-                nullable(out, "meta", meta.as_deref());
-                string(out, "value", value);
-            }
-            MKind::Math { value, meta } => {
-                parent = false;
-                nullable(out, "meta", meta.as_deref());
-                string(out, "value", value);
-            }
-            MKind::Definition {
-                url,
-                title,
-                identifier,
-                label,
-            } => {
-                parent = false;
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-                nullable(out, "title", title.as_deref());
-                string(out, "url", url);
-            }
-            MKind::Link { url, title } => {
-                nullable(out, "title", title.as_deref());
-                string(out, "url", url);
-            }
-            MKind::LinkReference {
-                kind,
-                identifier,
-                label,
-            } => {
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-                reference(out, *kind);
-            }
-            MKind::Image { url, title, alt } => {
-                parent = false;
-                string(out, "alt", alt);
-                nullable(out, "title", title.as_deref());
-                string(out, "url", url);
-            }
-            MKind::ImageReference {
-                kind,
-                identifier,
-                label,
-                alt,
-            } => {
-                parent = false;
-                string(out, "alt", alt);
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-                reference(out, *kind);
-            }
-            MKind::FootnoteDefinition { identifier, label } => {
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-            }
-            MKind::FootnoteReference { identifier, label } => {
-                parent = false;
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-            }
-            MKind::Table(align) => {
-                field(out, "align");
-                out.push('[');
-                for (index, align) in align.iter().enumerate() {
-                    if index > 0 {
-                        out.push(',');
-                    }
-                    out.push_str(match align {
-                        AlignKind::Left => "\"left\"",
-                        AlignKind::Right => "\"right\"",
-                        AlignKind::Center => "\"center\"",
-                        AlignKind::None => "null",
-                    });
-                }
-                out.push(']');
-            }
-            MKind::ThematicBreak | MKind::Break => parent = false,
-            _ => {}
-        }
-        if parent {
-            out.push_str(",\"children\":[");
-            for (index, child) in self.children(ix).enumerate() {
-                if index > 0 {
-                    out.push(',');
-                }
-                self.write_json(out, child);
-            }
-            out.push(']');
-        }
-        if let Some((start, end)) = self.pt_range(node.at) {
-            out.push_str(",\"position\":{\"start\":");
-            write_point(out, start);
-            out.push_str(",\"end\":");
-            write_point(out, end);
-            out.push('}');
-        }
-        out.push('}');
-    }
 }
 
 fn write_point(out: &mut String, point: Pt) {
