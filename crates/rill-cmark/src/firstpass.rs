@@ -9,7 +9,6 @@ use crate::parse::{
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
-use crate::Options;
 use crate::{
     linklabel::{scan_link_label_rest, LinkLabel},
     HeadingLevel,
@@ -19,18 +18,17 @@ use unicase::UniCase;
 
 /// Runs the first pass, which resolves the block structure of the document,
 /// and returns the resulting tree.
-pub(crate) fn run_first_pass(text: &str, options: Options) -> (Tree<Item>, Allocations<'_>) {
+pub(crate) fn run_first_pass(text: &str) -> (Tree<Item>, Allocations<'_>) {
     // This is a very naive heuristic for the number of nodes
     // we'll need.
     let start_capacity = max(128, text.len() / 32);
-    let lookup_table = &create_lut(&options);
+    let lookup_table = &create_lut();
     let first_pass = FirstPass {
         text,
         tree: Tree::with_capacity(start_capacity),
         begin_list_item: None,
         last_line_blank: false,
         allocs: Allocations::new(),
-        options,
         lookup_table,
         paragraph_interrupted: false,
         lazy_html: None,
@@ -46,7 +44,6 @@ struct FirstPass<'a, 'b> {
     begin_list_item: Option<usize>,
     last_line_blank: bool,
     allocs: Allocations<'a>,
-    options: Options,
     lookup_table: &'b LookupTable,
     /// rill: the previous line was a paragraph line in the current container, so new
     /// list items on this line follow micromark's interrupt rules.
@@ -75,24 +72,13 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let bytes = self.text.as_bytes();
         let mut line_start = LineStart::new(&bytes[start_ix..]);
 
-        let i = scan_containers(&self.tree, &mut line_start, self.options);
+        let i = scan_containers(&self.tree, &mut line_start);
         if self.lazy_html.take() != Some(start_ix) {
             for _ in i..self.tree.spine_len() {
                 self.pop(start_ix);
             }
         }
         let interrupting = std::mem::take(&mut self.paragraph_interrupted);
-
-        if self.options.contains(Options::ENABLE_OLD_FOOTNOTES) {
-            // finish footnote if it's still open and was preceded by blank line
-            if let Some(node_ix) = self.tree.peek_up() {
-                if let ItemBody::FootnoteDefinition(..) = self.tree[node_ix].item.body {
-                    if self.last_line_blank {
-                        self.pop(start_ix);
-                    }
-                }
-            }
-        }
 
         // Process new containers
         loop {
@@ -102,19 +88,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 line_start = save;
                 break;
             }
-            if self.options.contains(Options::ENABLE_FOOTNOTES) {
-                // Footnote definitions
-                let container_start = start_ix + line_start.bytes_scanned();
-                if let Some(bytecount) = self.parse_footnote(container_start) {
-                    start_ix = container_start + bytecount;
-                    if self.options.contains(Options::ENABLE_OLD_FOOTNOTES) {
-                        // gfm footnotes need indented, but old footnotes don't
-                        // handle this, old footnotes treat the next line as part of the current line
-                        start_ix += scan_blank_line(&bytes[start_ix..]).unwrap_or(0);
-                    }
-                    line_start = LineStart::new(&bytes[start_ix..]);
-                    continue;
-                }
+            // Footnote definitions
+            let container_start = start_ix + line_start.bytes_scanned();
+            if let Some(bytecount) = self.parse_footnote(container_start) {
+                start_ix = container_start + bytecount;
+                line_start = LineStart::new(&bytes[start_ix..]);
+                continue;
             }
             let container_start = start_ix + line_start.bytes_scanned();
             let before_marker = line_start.clone();
@@ -144,39 +123,34 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     self.begin_list_item = Some(after_marker_index + n);
                     return after_marker_index + n;
                 }
-                if self.options.contains(Options::ENABLE_TASKLISTS) {
-                    let before_marker = line_start.clone();
-                    let task_list_marker =
-                        line_start.scan_task_list_marker().map(|is_checked| Item {
-                            start: after_marker_index,
-                            end: start_ix + line_start.bytes_scanned(),
-                            body: ItemBody::TaskListMarker(is_checked),
-                        });
-                    if let Some(task_list_marker) = task_list_marker {
-                        if let Some(n) = scan_blank_line(&bytes[task_list_marker.end..]) {
-                            // rill: micromark needs paragraph content after a task marker; it
-                            // may start on the next line. Otherwise `[ ]` stays text.
-                            let next = task_list_marker.end + n;
-                            let content = self
-                                .scan_next_line_or_lazy_continuation(&bytes[next..])
-                                .map(|line| next + line.bytes_scanned())
-                                .filter(|&ix| {
-                                    ix < bytes.len() && scan_blank_line(&bytes[ix..]).is_none()
-                                });
-                            match content {
-                                Some(ix) => {
-                                    return self.parse_paragraph(ix, Some(task_list_marker))
-                                }
-                                None => line_start = before_marker,
-                            }
-                        } else {
-                            // rill: the marker takes one space or tab; the rest is text.
-                            if !line_start.scan_ch(b' ') {
-                                line_start.scan_ch(b'\t');
-                            }
-                            let ix = start_ix + line_start.bytes_scanned();
-                            return self.parse_paragraph(ix, Some(task_list_marker));
+                let before_marker = line_start.clone();
+                let task_list_marker = line_start.scan_task_list_marker().map(|is_checked| Item {
+                    start: after_marker_index,
+                    end: start_ix + line_start.bytes_scanned(),
+                    body: ItemBody::TaskListMarker(is_checked),
+                });
+                if let Some(task_list_marker) = task_list_marker {
+                    if let Some(n) = scan_blank_line(&bytes[task_list_marker.end..]) {
+                        // rill: micromark needs paragraph content after a task marker; it
+                        // may start on the next line. Otherwise `[ ]` stays text.
+                        let next = task_list_marker.end + n;
+                        let content = self
+                            .scan_next_line_or_lazy_continuation(&bytes[next..])
+                            .map(|line| next + line.bytes_scanned())
+                            .filter(|&ix| {
+                                ix < bytes.len() && scan_blank_line(&bytes[ix..]).is_none()
+                            });
+                        match content {
+                            Some(ix) => return self.parse_paragraph(ix, Some(task_list_marker)),
+                            None => line_start = before_marker,
                         }
+                    } else {
+                        // rill: the marker takes one space or tab; the rest is text.
+                        if !line_start.scan_ch(b' ') {
+                            line_start.scan_ch(b'\t');
+                        }
+                        let ix = start_ix + line_start.bytes_scanned();
+                        return self.parse_paragraph(ix, Some(task_list_marker));
                     }
                 }
             } else if line_start.scan_blockquote_marker() {
@@ -195,8 +169,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     // and break out if we can't re-scan all of them
                     let ix = start_ix + line_start.bytes_scanned();
                     let mut lazy_line_start = LineStart::new(&bytes[ix..]);
-                    let tree_position =
-                        scan_containers(&self.tree, &mut lazy_line_start, self.options);
+                    let tree_position = scan_containers(&self.tree, &mut lazy_line_start);
                     let current_container = tree_position == self.tree.spine_len();
                     if !lazy_line_start.scan_space(4)
                         && self.scan_paragraph_interrupt(
@@ -364,7 +337,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         bytes: &'input [u8],
     ) -> Option<LineStart<'input>> {
         let mut line_start = LineStart::new(bytes);
-        let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+        let tree_position = scan_containers(&self.tree, &mut line_start);
         let current_container = tree_position == self.tree.spine_len();
         // rill: a blank line ends the content however far it is indented.
         let mut rest = line_start.clone();
@@ -506,7 +479,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     ) -> Option<(usize, TreeIndex)> {
         let bytes = self.text.as_bytes();
         let mut line_start = LineStart::new(&bytes[ix..]);
-        let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+        let tree_position = scan_containers(&self.tree, &mut line_start);
         let current_container = tree_position == self.tree.spine_len();
         if !current_container {
             return None;
@@ -517,12 +490,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
         line_start.scan_all_space();
         ix += line_start.bytes_scanned();
-        if scan_paragraph_interrupt_no_table(
-            &bytes[ix..],
-            current_container,
-            self.options.contains(Options::ENABLE_FOOTNOTES),
-            &self.tree,
-        ) {
+        if scan_paragraph_interrupt_no_table(&bytes[ix..], current_container, &self.tree) {
             return None;
         }
         // rill: a table is no paragraph (micromark's `_gfmTableDynamicInterruptHack`), so
@@ -560,12 +528,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let mut line_begin = start_ix;
         loop {
             // rill: micromark's delimiter row takes any paragraph line as its head.
-            let scan_mode = if self.options.contains(Options::ENABLE_TABLES) {
-                TableParseMode::Scan
-            } else {
-                TableParseMode::Disabled
-            };
-            let (next_ix, brk) = self.parse_line(ix, None, scan_mode);
+            let (next_ix, brk) = self.parse_line(ix, None, TableParseMode::Scan);
 
             if let (
                 Some(Item {
@@ -619,7 +582,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
             ix = next_ix;
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+            let tree_position = scan_containers(&self.tree, &mut line_start);
             let current_container = tree_position == self.tree.spine_len();
             let trailing_backslash_pos = match brk {
                 Some(Item {
@@ -694,9 +657,6 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     /// `]` closes the latest one, link or not.
     /// ponytail: brackets in code spans still count; spans are not resolved yet.
     fn in_literal_path(&mut self, from: usize, ix: usize) -> bool {
-        if !self.options.contains(Options::ENABLE_GFM) {
-            return false;
-        }
         if self.literal_cache.0 != from {
             self.literal_cache = (from, from, from);
         }
@@ -813,9 +773,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         // check if we may be parsing a table
                         let next_line_ix = ix + eol_bytes;
                         let mut line_start = LineStart::new(&bytes[next_line_ix..]);
-                        if scan_containers(&self.tree, &mut line_start, self.options)
-                            == self.tree.spine_len()
-                        {
+                        if scan_containers(&self.tree, &mut line_start) == self.tree.spine_len() {
                             let table_head_ix = next_line_ix + line_start.bytes_scanned();
                             // rill: `- x` there is a list item, which micromark opens first.
                             let head = &bytes[table_head_ix..];
@@ -907,10 +865,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         && !self.in_literal_path(start, ix)
                     {
                         self.tree.append_text(begin_text, ix, backslash_escaped);
-                        if bytes[ix + 1] == b'$'
-                            && bytes.get(ix + 2) == Some(&b'$')
-                            && self.options.contains(Options::ENABLE_MATH)
-                        {
+                        if bytes[ix + 1] == b'$' && bytes.get(ix + 2) == Some(&b'$') {
                             let count = 1 + scan_ch_repeat(&bytes[(ix + 2)..], b'$');
                             self.tree.append(Item {
                                 start: ix + 1,
@@ -1127,7 +1082,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             self.append_html_line(remaining_space.max(indent), line_start_ix, ix);
 
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len() {
                 end_ix = ix;
                 break;
@@ -1176,7 +1131,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             self.append_html_line(remaining_space.max(indent), line_start_ix, ix);
 
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len() || line_start.is_at_eol() {
                 end_ix = ix;
                 break;
@@ -1223,7 +1178,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             }
 
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len()
                 || !(line_start.scan_space(4) || line_start.is_at_eol())
             {
@@ -1277,7 +1232,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         self.tree.push();
         loop {
             let mut line_start = LineStart::new(&bytes[ix..]);
-            let n_containers = scan_containers(&self.tree, &mut line_start, self.options);
+            let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len() {
                 // this line will get parsed again as not being part of the code
                 // if it's blank, it should be parsed as a blank line
@@ -1501,15 +1456,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         if !bytes.starts_with(b"[^") {
             return None;
         }
-        let (mut i, label) = if self.options.has_gfm_footnotes() {
-            // GitHub doesn't allow footnote definition labels to contain line breaks.
-            // It actually does allow this for link definitions under certain circumstances,
-            // but for this it's simpler to avoid it.
-            scan_link_label_rest(&self.text[start + 2..], &|_| None, self.tree.is_in_table())?
-        } else {
-            self.parse_refdef_label(start + 2)?
-        };
-        if self.options.has_gfm_footnotes() && label.bytes().any(|b| b == b'\r' || b == b'\n') {
+        // GitHub doesn't allow footnote definition labels to contain line breaks.
+        // It actually does allow this for link definitions under certain circumstances,
+        // but for this it's simpler to avoid it.
+        let (mut i, label) =
+            scan_link_label_rest(&self.text[start + 2..], &|_| None, self.tree.is_in_table())?;
+        if label.bytes().any(|b| b == b'\r' || b == b'\n') {
             // GitHub doesn't allow footnote definition labels to contain line breaks,
             // even if they're escaped.
             return None;
@@ -1526,9 +1478,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 self.pop(start);
             }
         }
-        if self.options.has_gfm_footnotes() {
-            i += scan_whitespace_no_nl(&bytes[i..]);
-        }
+        i += scan_whitespace_no_nl(&bytes[i..]);
         self.allocs
             .footdefs
             .0
@@ -1550,7 +1500,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             &self.text[start..],
             &|bytes| {
                 let mut line_start = LineStart::new(bytes);
-                let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+                let tree_position = scan_containers(&self.tree, &mut line_start);
                 let current_container = tree_position == self.tree.spine_len();
                 if line_start.scan_space(4) {
                     return Some(line_start.bytes_scanned());
@@ -1601,7 +1551,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 break;
             }
             let mut line_start = LineStart::new(&bytes[i..]);
-            let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+            let tree_position = scan_containers(&self.tree, &mut line_start);
             let current_container = tree_position == self.tree.spine_len();
             if !line_start.scan_space(4) {
                 let suffix = &bytes[i + line_start.bytes_scanned()..];
@@ -1660,7 +1610,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         bytecount += 1;
                     }
                     let mut line_start = LineStart::new(&bytes[bytecount..]);
-                    let tree_position = scan_containers(&self.tree, &mut line_start, self.options);
+                    let tree_position = scan_containers(&self.tree, &mut line_start);
                     let current_container = tree_position == self.tree.spine_len();
                     if !line_start.scan_space(4) {
                         let suffix = &bytes[bytecount + line_start.bytes_scanned()..];
@@ -1766,12 +1716,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
     /// Checks whether we should break a paragraph on the given input.
     fn scan_paragraph_interrupt(&self, bytes: &[u8], current_container: bool) -> bool {
-        if scan_paragraph_interrupt_no_table(
-            bytes,
-            current_container,
-            self.options.contains(Options::ENABLE_FOOTNOTES),
-            &self.tree,
-        ) {
+        if scan_paragraph_interrupt_no_table(bytes, current_container, &self.tree) {
             return true;
         }
         // pulldown-cmark allows heavy tables, that have a `|` on the header row,
@@ -1788,7 +1733,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         // ---|---|---
         //  d | e | f
         // ```
-        if !self.options.contains(Options::ENABLE_TABLES) || !bytes.starts_with(b"|") {
+        if !bytes.starts_with(b"|") {
             return false;
         }
 
@@ -1835,7 +1780,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         //     ^
         //     | need to skip over the `>` when checking for the table
         let mut line_start = LineStart::new(&bytes[next_line_ix..]);
-        if scan_containers(&self.tree, &mut line_start, self.options) != self.tree.spine_len() {
+        if scan_containers(&self.tree, &mut line_start) != self.tree.spine_len() {
             return false;
         }
         let table_head_ix = next_line_ix + line_start.bytes_scanned();
@@ -1911,7 +1856,6 @@ fn starts_block(bytes: &[u8]) -> bool {
 fn scan_paragraph_interrupt_no_table(
     bytes: &[u8],
     current_container: bool,
-    has_footnote: bool,
     tree: &Tree<Item>,
 ) -> bool {
     scan_eol(bytes).is_some()
@@ -1932,8 +1876,7 @@ fn scan_paragraph_interrupt_no_table(
                 || starts_html_block_type_6(&bytes[1..])
                 // rill: micromark lets complete HTML interrupt on a lazy line.
                 || !current_container && scan_html_type_7(bytes).is_some())
-        || (has_footnote
-            && bytes.starts_with(b"[^")
+        || (bytes.starts_with(b"[^")
             && scan_link_label_rest(
                 std::str::from_utf8(&bytes[2..]).unwrap(),
                 &|_| None,
@@ -2002,23 +1945,14 @@ fn surgerize_tight_list(tree: &mut Tree<Item>, list_ix: TreeIndex) {
     }
 }
 
-fn create_lut(options: &Options) -> LookupTable {
+fn create_lut() -> LookupTable {
     let mut bytes = [false; 256];
     let standard_bytes = [
-        b'\n', b'\r', b'*', b'_', b'&', b'\\', b'[', b']', b'<', b'!', b'`',
+        b'\n', b'\r', b'*', b'_', b'&', b'\\', b'[', b']', b'<', b'!', b'`', b'|', b'~', b'$',
     ];
 
     for &byte in &standard_bytes {
         bytes[byte as usize] = true;
-    }
-    if options.contains(Options::ENABLE_TABLES) {
-        bytes[b'|' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_STRIKETHROUGH) {
-        bytes[b'~' as usize] = true;
-    }
-    if options.contains(Options::ENABLE_MATH) {
-        bytes[b'$' as usize] = true;
     }
 
     bytes

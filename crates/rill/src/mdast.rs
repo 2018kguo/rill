@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use rill_cmark::{Alignment, Event, LinkType, Options, Parser, Tag, TagEnd};
+use rill_cmark::{Alignment, Event, LinkType, Parser, Tag, TagEnd};
 
 use crate::autolink::{self, Finder, Piece};
 use crate::json::{json_string, json_u32};
@@ -25,15 +25,6 @@ pub enum AlignKind {
     Right,
     Center,
     None,
-}
-
-pub fn options() -> Options {
-    Options::ENABLE_TABLES
-        | Options::ENABLE_FOOTNOTES
-        | Options::ENABLE_STRIKETHROUGH
-        | Options::ENABLE_TASKLISTS
-        | Options::ENABLE_GFM
-        | Options::ENABLE_MATH
 }
 
 /// An event stream the builder cannot turn into MDAST. Every UTF-8 string is valid
@@ -1404,7 +1395,7 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
         starts: Vec::new(),
         exits: Vec::new(),
     };
-    for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
+    for (event, range) in Parser::new(source).into_offset_iter() {
         builder.event(event, range.start, range.end)?;
     }
     builder.flush_text()?;

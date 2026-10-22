@@ -32,9 +32,7 @@ use crate::linklabel::{scan_link_label_rest, FootnoteLabel, LinkLabel, Reference
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
-use crate::{
-    Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Options, Tag, TagEnd,
-};
+use crate::{Alignment, BlockQuoteKind, CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
 
 // Allowing arbitrary depth nested parentheses inside link destinations
 // can create denial of service vulnerabilities if we're not careful.
@@ -173,7 +171,6 @@ pub struct BrokenLink<'a> {
 /// Markdown event iterator.
 pub struct Parser<'input, F = DefaultBrokenLinkCallback> {
     text: &'input str,
-    options: Options,
     tree: Tree<Item>,
     allocs: Allocations<'input>,
     broken_link_callback: Option<F>,
@@ -209,7 +206,6 @@ impl<'input, F> std::fmt::Debug for Parser<'input, F> {
         // Only print the fields that have public types.
         f.debug_struct("Parser")
             .field("text", &self.text)
-            .field("options", &self.options)
             .field(
                 "broken_link_callback",
                 &self.broken_link_callback.as_ref().map(|_| ..),
@@ -232,14 +228,9 @@ impl<'a> BrokenLink<'a> {
 }
 
 impl<'input> Parser<'input, DefaultBrokenLinkCallback> {
-    /// Creates a new event iterator for a markdown string without any options enabled.
+    /// Creates a new event iterator for a markdown string, with rill's grammar.
     pub fn new(text: &'input str) -> Self {
-        Self::new_ext(text, Options::empty())
-    }
-
-    /// Creates a new event iterator for a markdown string with given options.
-    pub fn new_ext(text: &'input str, options: Options) -> Self {
-        Self::new_with_broken_link_callback(text, options, None)
+        Self::new_with_broken_link_callback(text, None)
     }
 }
 
@@ -251,17 +242,15 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
     /// `None`.
     pub fn new_with_broken_link_callback(
         text: &'input str,
-        options: Options,
         broken_link_callback: Option<F>,
     ) -> Self {
-        let (mut tree, allocs) = run_first_pass(text, options);
+        let (mut tree, allocs) = run_first_pass(text);
         tree.reset();
         let inline_stack = Default::default();
         let link_stack = Default::default();
         let html_scan_guard = Default::default();
         Parser {
             text,
-            options,
             tree,
             allocs,
             broken_link_callback,
@@ -378,11 +367,10 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
         // rill: literals are found once, in the block's own pass, where an open `[` blocks
         // them (micromark's `previousUnbalanced`); spans and links built from that pass
         // are not rescanned.
-        let autolinks = self.options.contains(Options::ENABLE_GFM)
-            && !self.tree[self.tree.peek_up().unwrap()]
-                .item
-                .body
-                .is_inline()
+        let autolinks = !self.tree[self.tree.peek_up().unwrap()]
+            .item
+            .body
+            .is_inline()
             && crate::autolink_literal::may_contain(&block_text[block_start.min(block_end)..]);
 
         while let Some(mut cur_ix) = cur {
@@ -646,7 +634,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                             let scan_result = if footnote_call {
                                 RefScan::Failed
                             } else {
-                                scan_reference(&self.tree, block_text, next, self.options)
+                                scan_reference(&self.tree, block_text, next)
                             };
                             let (node_after_link, link_type) = match scan_result {
                                 // [label][reference]
@@ -709,13 +697,9 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                     // No label? maybe it is a shortcut reference
                                     let label_start = self.tree[tos.node].item.end - 1;
                                     let label_end = self.tree[cur_ix].item.end;
-                                    scan_link_label(
-                                        &self.tree,
-                                        &self.text[label_start..label_end],
-                                        self.options,
-                                    )
-                                    .map(|(ix, label)| (label, label_start + ix))
-                                    .filter(|(_, end)| *end == label_end)
+                                    scan_link_label(&self.tree, &self.text[label_start..label_end])
+                                        .map(|(ix, label)| (label, label_start + ix))
+                                        .filter(|(_, end)| *end == label_end)
                                 }
                             };
 
@@ -736,9 +720,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                                 {
                                     def.use_count += 1;
                                 }
-                                if !self.options.has_gfm_footnotes()
-                                    || self.allocs.footdefs.contains(&self.allocs.cows[footref.0])
-                                {
+                                if self.allocs.footdefs.contains(&self.allocs.cows[footref.0]) {
                                     // If this came from a MaybeImage, then the `!` prefix
                                     // isn't part of the footnote reference.
                                     let footnote_ix = if tos.ty == LinkStackTy::Image {
@@ -1115,11 +1097,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             *ix += scan_while(&underlying.as_bytes()[*ix..], is_ascii_whitespace_no_nl);
             if let Some(bl) = scan_eol(&underlying.as_bytes()[*ix..]) {
                 *ix += bl;
-                *ix += skip_container_prefixes(
-                    &self.tree,
-                    &underlying.as_bytes()[*ix..],
-                    self.options,
-                );
+                *ix += skip_container_prefixes(&self.tree, &underlying.as_bytes()[*ix..]);
             }
             *ix += scan_while(&underlying.as_bytes()[*ix..], is_ascii_whitespace_no_nl);
         };
@@ -1254,12 +1232,9 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
                     ix += 1;
                 }
                 // rill: scan the whole line; the span's end is no line end.
-                let skip = skip_container_prefixes(
-                    &self.tree,
-                    &self.text.as_bytes()[span_start + ix..],
-                    self.options,
-                )
-                .min(spanned_bytes.len() - ix);
+                let skip =
+                    skip_container_prefixes(&self.tree, &self.text.as_bytes()[span_start + ix..])
+                        .min(spanned_bytes.len() - ix);
                 if skip > 0 {
                     let buf = buf.get_or_insert_with(|| String::with_capacity(spanned_bytes.len()));
                     buf.push_str(&spanned_text[start_ix..ix]);
@@ -1346,7 +1321,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
             let (span, i) = scan_html_block_inner(
                 // Subtract 1 to include the < character
                 &bytes[(ix - 1)..],
-                Some(&|bytes| skip_container_prefixes(&self.tree, bytes, self.options)),
+                Some(&|bytes| skip_container_prefixes(&self.tree, bytes)),
             )?;
             Some((span, i + ix - 1))
         }
@@ -1361,11 +1336,7 @@ impl<'input, F: BrokenLinkCallback<'input>> Parser<'input, F> {
 }
 
 /// Returns number of containers scanned.
-pub(crate) fn scan_containers(
-    tree: &Tree<Item>,
-    line_start: &mut LineStart<'_>,
-    options: Options,
-) -> usize {
+pub(crate) fn scan_containers(tree: &Tree<Item>, line_start: &mut LineStart<'_>) -> usize {
     let mut i = 0;
     for &node_ix in tree.walk_spine() {
         match tree[node_ix].item.body {
@@ -1384,7 +1355,7 @@ pub(crate) fn scan_containers(
                     break;
                 }
             }
-            ItemBody::FootnoteDefinition(..) if options.has_gfm_footnotes() => {
+            ItemBody::FootnoteDefinition(..) => {
                 let save = line_start.clone();
                 if !line_start.scan_space(4) && !line_start.is_at_eol() {
                     *line_start = save;
@@ -1397,9 +1368,9 @@ pub(crate) fn scan_containers(
     }
     i
 }
-pub(crate) fn skip_container_prefixes(tree: &Tree<Item>, bytes: &[u8], options: Options) -> usize {
+pub(crate) fn skip_container_prefixes(tree: &Tree<Item>, bytes: &[u8]) -> usize {
     let mut line_start = LineStart::new(bytes);
-    let _ = scan_containers(tree, &mut line_start, options);
+    let _ = scan_containers(tree, &mut line_start);
     line_start.bytes_scanned()
 }
 
@@ -1634,24 +1605,15 @@ fn scan_nodes_to_ix(
 fn scan_link_label<'text>(
     tree: &Tree<Item>,
     text: &'text str,
-    options: Options,
 ) -> Option<(usize, ReferenceLabel<'text>)> {
     let bytes = text.as_bytes();
     if bytes.len() < 2 || bytes[0] != b'[' {
         return None;
     }
-    let linebreak_handler = |bytes: &[u8]| Some(skip_container_prefixes(tree, bytes, options));
-    if options.contains(Options::ENABLE_FOOTNOTES)
-        && b'^' == bytes[1]
-        && bytes.get(2) != Some(&b']')
-    {
-        let linebreak_handler: &dyn Fn(&[u8]) -> Option<usize> = if options.has_gfm_footnotes() {
-            &|_| None
-        } else {
-            &linebreak_handler
-        };
+    let linebreak_handler = |bytes: &[u8]| Some(skip_container_prefixes(tree, bytes));
+    if b'^' == bytes[1] && bytes.get(2) != Some(&b']') {
         if let Some((byte_index, cow)) =
-            scan_link_label_rest(&text[2..], linebreak_handler, tree.is_in_table())
+            scan_link_label_rest(&text[2..], &|_| None, tree.is_in_table())
         {
             return Some((byte_index + 2, ReferenceLabel::Footnote(cow)));
         }
@@ -1661,12 +1623,7 @@ fn scan_link_label<'text>(
     Some((byte_index + 1, ReferenceLabel::Link(cow)))
 }
 
-fn scan_reference<'b>(
-    tree: &Tree<Item>,
-    text: &'b str,
-    cur: Option<TreeIndex>,
-    options: Options,
-) -> RefScan<'b> {
+fn scan_reference<'b>(tree: &Tree<Item>, text: &'b str, cur: Option<TreeIndex>) -> RefScan<'b> {
     let cur_ix = match cur {
         None => return RefScan::Failed,
         Some(cur_ix) => cur_ix,
@@ -1679,7 +1636,7 @@ fn scan_reference<'b>(
         let closing_node = tree[cur_ix].next.unwrap();
         RefScan::Collapsed(tree[closing_node].next)
     } else {
-        let label = scan_link_label(tree, &text[start..], options);
+        let label = scan_link_label(tree, &text[start..]);
         match label {
             Some((ix, ReferenceLabel::Link(label))) => RefScan::LinkLabel(label, start + ix),
             Some((_ix, ReferenceLabel::Footnote(_label))) => RefScan::UnexpectedFootnote,
@@ -2047,7 +2004,6 @@ impl<'a, F: BrokenLinkCallback<'a>> Iterator for OffsetIter<'a, F> {
                                     | ItemBody::Heading(..)
                                     | ItemBody::TableCell
                             )
-                            && self.inner.options.contains(Options::ENABLE_GFM)
                             && crate::autolink_literal::may_contain(
                                 &self.inner.text[self.inner.tree[child_ix].item.start..item.end],
                             )
@@ -2235,18 +2191,6 @@ mod test {
 
     // TODO: move these tests to tests/html.rs?
 
-    fn parser_with_extensions(text: &str) -> Parser<'_> {
-        let mut opts = Options::empty();
-        opts.insert(Options::ENABLE_TABLES);
-        opts.insert(Options::ENABLE_FOOTNOTES);
-        opts.insert(Options::ENABLE_STRIKETHROUGH);
-        opts.insert(Options::ENABLE_SUPERSCRIPT);
-        opts.insert(Options::ENABLE_SUBSCRIPT);
-        opts.insert(Options::ENABLE_TASKLISTS);
-
-        Parser::new_ext(text, opts)
-    }
-
     #[test]
     #[cfg(target_pointer_width = "64")]
     fn node_size() {
@@ -2283,72 +2227,72 @@ mod test {
     #[test]
     fn issue_1095() {
         let s = "- [n]:Z\r\n\t\t";
-        let parser = Parser::new_ext(s, Options::all());
+        let parser = Parser::new(s);
         for _ in parser {}
     }
 
     #[test]
     fn issue_320() {
         // dont crash
-        parser_with_extensions(":\r\t> |\r:\r\t> |\r").count();
+        Parser::new(":\r\t> |\r:\r\t> |\r").count();
     }
 
     #[test]
     fn issue_319() {
         // dont crash
-        parser_with_extensions("|\r-]([^|\r-]([^").count();
-        parser_with_extensions("|\r\r=][^|\r\r=][^car").count();
+        Parser::new("|\r-]([^|\r-]([^").count();
+        Parser::new("|\r\r=][^|\r\r=][^car").count();
     }
 
     #[test]
     fn issue_303() {
         // dont crash
-        parser_with_extensions("[^\r\ra]").count();
-        parser_with_extensions("\r\r]Z[^\x00\r\r]Z[^\x00").count();
+        Parser::new("[^\r\ra]").count();
+        Parser::new("\r\r]Z[^\x00\r\r]Z[^\x00").count();
     }
 
     #[test]
     fn issue_313() {
         // dont crash
-        parser_with_extensions("*]0[^\r\r*]0[^").count();
-        parser_with_extensions("[^\r> `][^\r> `][^\r> `][").count();
+        Parser::new("*]0[^\r\r*]0[^").count();
+        Parser::new("[^\r> `][^\r> `][^\r> `][").count();
     }
 
     #[test]
     fn issue_311() {
         // dont crash
-        parser_with_extensions("\\\u{0d}-\u{09}\\\u{0d}-\u{09}").count();
+        Parser::new("\\\u{0d}-\u{09}\\\u{0d}-\u{09}").count();
     }
 
     #[test]
     fn issue_283() {
         let input = std::str::from_utf8(b"\xf0\x9b\xb2\x9f<td:^\xf0\x9b\xb2\x9f").unwrap();
         // dont crash
-        parser_with_extensions(input).count();
+        Parser::new(input).count();
     }
 
     #[test]
     fn issue_289() {
         // dont crash
-        parser_with_extensions("> - \\\n> - ").count();
-        parser_with_extensions("- \n\n").count();
+        Parser::new("> - \\\n> - ").count();
+        Parser::new("- \n\n").count();
     }
 
     #[test]
     fn issue_306() {
         // dont crash
-        parser_with_extensions("*\r_<__*\r_<__*\r_<__*\r_<__").count();
+        Parser::new("*\r_<__*\r_<__*\r_<__*\r_<__").count();
     }
 
     #[test]
     fn issue_305() {
         // dont crash
-        parser_with_extensions("_6**6*_*").count();
+        Parser::new("_6**6*_*").count();
     }
 
     #[test]
     fn another_emphasis_panic() {
-        parser_with_extensions("*__#_#__*").count();
+        Parser::new("*__#_#__*").count();
     }
 
     #[test]
@@ -2383,7 +2327,7 @@ mod test {
 
     #[test]
     fn footnote_offsets() {
-        let range = parser_with_extensions("Testing this[^1] out.\n\n[^1]: Footnote.")
+        let range = Parser::new("Testing this[^1] out.\n\n[^1]: Footnote.")
             .into_offset_iter()
             .filter_map(|(ev, range)| match ev {
                 Event::FootnoteReference(..) => Some(range),
@@ -2397,7 +2341,7 @@ mod test {
     #[test]
     fn footnote_offsets_exclamation() {
         let mut immediately_before_footnote = None;
-        let range = parser_with_extensions("Testing this![^1] out.\n\n[^1]: Footnote.")
+        let range = Parser::new("Testing this![^1] out.\n\n[^1]: Footnote.")
             .into_offset_iter()
             .filter_map(|(ev, range)| match ev {
                 Event::FootnoteReference(..) => Some(range),
@@ -2422,7 +2366,7 @@ mod test {
     #[test]
     fn table_offset() {
         let markdown = "a\n\nTesting|This|Outtt\n--|:--:|--:\nSome Data|Other data|asdf";
-        let event_offset = parser_with_extensions(markdown)
+        let event_offset = Parser::new(markdown)
             .into_offset_iter()
             .map(|(_ev, range)| range)
             .nth(3)
@@ -2434,7 +2378,7 @@ mod test {
     #[test]
     fn table_cell_span() {
         let markdown = "a|b|c\n--|--|--\na|  |c";
-        let event_offset = parser_with_extensions(markdown)
+        let event_offset = Parser::new(markdown)
             .into_offset_iter()
             .filter_map(|(ev, span)| match ev {
                 Event::Start(Tag::TableCell) => Some(span),
@@ -2537,8 +2481,7 @@ mod test {
                 times_called += 1;
                 None
             };
-            let parser =
-                Parser::new_with_broken_link_callback(markdown, Options::empty(), Some(callback));
+            let parser = Parser::new_with_broken_link_callback(markdown, Some(callback));
             for _ in parser {}
             assert_eq!(times_called, expected);
         }
@@ -2554,8 +2497,7 @@ mod test {
             let title = "SWAG".to_owned().into();
             Some((url, title))
         };
-        let parser =
-            Parser::new_with_broken_link_callback(test_str, Options::empty(), Some(&mut callback));
+        let parser = Parser::new_with_broken_link_callback(test_str, Some(&mut callback));
         let mut link_tag_count = 0;
         for (typ, url, title, id) in parser.filter_map(|event| match event {
             Event::Start(tag) => match tag {
@@ -2645,29 +2587,17 @@ text
             Some(("#".into(), link.reference))
         }
 
-        for _ in Parser::new_with_broken_link_callback(
-            "static lifetime",
-            Options::empty(),
-            Some(&mut closure),
-        ) {}
+        for _ in Parser::new_with_broken_link_callback("static lifetime", Some(&mut closure)) {}
         /* This fails to compile. Because the closure can't say `for <'a> fn(BrokenLink<'a>) ->
          * CowStr<'a>` and has to use the enclosing `'b` lifetime parameter, `temporary_str` lives
          * shorter than `'b`. I think this is unlikely to occur in real life, and if it does, the
          * fix is simple: move it out to a function that allows annotating the lifetimes.
          */
-        //for _ in Parser::new_with_broken_link_callback(&temporary_str, Options::empty(), Some(&mut callback)) {
+        //for _ in Parser::new_with_broken_link_callback(&temporary_str, Some(&mut callback)) {
         //}
 
-        for _ in Parser::new_with_broken_link_callback(
-            "static lifetime",
-            Options::empty(),
-            Some(&mut function),
-        ) {}
-        for _ in Parser::new_with_broken_link_callback(
-            &temporary_str,
-            Options::empty(),
-            Some(&mut function),
-        ) {}
+        for _ in Parser::new_with_broken_link_callback("static lifetime", Some(&mut function)) {}
+        for _ in Parser::new_with_broken_link_callback(&temporary_str, Some(&mut function)) {}
     }
 
     #[test]

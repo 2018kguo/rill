@@ -101,8 +101,6 @@ pub enum Tag<'a> {
     /// The identifier is prefixed with `#` and the last one in the attributes
     /// list is chosen, classes are prefixed with `.` and custom attributes
     /// have no prefix and can optionally have a value (`myattr` or `myattr=myvalue`).
-    ///
-    /// `id`, `classes` and `attrs` are only parsed and populated with [`Options::ENABLE_HEADING_ATTRIBUTES`], `None` or empty otherwise.
     Heading {
         level: HeadingLevel,
         id: Option<CowStr<'a>>,
@@ -113,7 +111,6 @@ pub enum Tag<'a> {
 
     /// A block quote.
     ///
-    /// The `BlockQuoteKind` is only parsed & populated with [`Options::ENABLE_GFM`], `None` otherwise.
     ///
     /// ```markdown
     /// > regular quote
@@ -151,27 +148,19 @@ pub enum Tag<'a> {
     /// A footnote definition. The value contained is the footnote's label by which it can
     /// be referred to.
     ///
-    /// Only parsed and emitted with [`Options::ENABLE_FOOTNOTES`] or [`Options::ENABLE_OLD_FOOTNOTES`].
     FootnoteDefinition(CowStr<'a>),
 
-    /// Only parsed and emitted with [`Options::ENABLE_DEFINITION_LIST`].
     DefinitionList,
-    /// Only parsed and emitted with [`Options::ENABLE_DEFINITION_LIST`].
     DefinitionListTitle,
-    /// Only parsed and emitted with [`Options::ENABLE_DEFINITION_LIST`].
     DefinitionListDefinition,
 
     /// A table. Contains a vector describing the text-alignment for each of its columns.
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     Table(Vec<Alignment>),
     /// A table header. Contains only `TableCell`s. Note that the table body starts immediately
     /// after the closure of the `TableHead` tag. There is no `TableBody` tag.
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     TableHead,
     /// A table row. Is used both for header rows as body rows. Contains only `TableCell`s.
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     TableRow,
-    /// Only parsed and emitted with [`Options::ENABLE_TABLES`].
     TableCell,
 
     // span-level tags
@@ -185,19 +174,16 @@ pub enum Tag<'a> {
     /// half**strong** __strong__ __multi __level____
     /// ```
     Strong,
-    /// Only parsed and emitted with [`Options::ENABLE_STRIKETHROUGH`].
     ///
     /// ```markdown
     /// ~strike through~
     /// ```
     Strikethrough,
-    /// Only parsed and emitted with [`Options::ENABLE_SUPERSCRIPT`].
     ///
     /// ```markdown
     /// ^superscript^
     /// ```
     Superscript,
-    /// Only parsed and emitted with [`Options::ENABLE_SUBSCRIPT`], if disabled `~something~` is parsed as [`Strikethrough`](Self::Strikethrough).
     /// ```markdown
     /// ~subscript~ ~~if also enabled this is strikethrough~~
     /// ```
@@ -223,8 +209,6 @@ pub enum Tag<'a> {
     },
 
     /// A metadata block.
-    /// Only parsed and emitted with [`Options::ENABLE_YAML_STYLE_METADATA_BLOCKS`]
-    /// or [`Options::ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS`].
     MetadataBlock(MetadataBlockKind),
 
     /// rill: a `$$` math flow block with its meta string.
@@ -482,14 +466,12 @@ pub enum Event<'a> {
     /// ```
     Code(CowStr<'a>),
     /// An inline math environment node.
-    /// Requires [`Options::ENABLE_MATH`].
     ///
     /// ```markdown
     /// $math$
     /// ```
     InlineMath(CowStr<'a>),
     /// A display math environment node.
-    /// Requires [`Options::ENABLE_MATH`].
     ///
     /// ```markdown
     /// $$math$$
@@ -507,7 +489,7 @@ pub enum Event<'a> {
     InlineHtml(CowStr<'a>),
     /// A reference to a footnote with given label, which may or may not be defined
     /// by an event with a [`Tag::FootnoteDefinition`] tag. Definitions and references to them may
-    /// occur in any order. Only parsed and emitted with [`Options::ENABLE_FOOTNOTES`] or [`Options::ENABLE_OLD_FOOTNOTES`].
+    /// occur in any order.
     ///
     /// ```markdown
     /// [^1]
@@ -538,7 +520,6 @@ pub enum Event<'a> {
     /// *`·` is any whitespace*
     Rule,
     /// A task list marker, rendered as a checkbox in HTML. Contains a true when it is checked.
-    /// Only parsed and emitted with [`Options::ENABLE_TASKLISTS`].
     /// ```markdown
     /// - [ ] unchecked
     /// - [x] checked
@@ -586,103 +567,4 @@ pub enum Alignment {
     Left,
     Center,
     Right,
-}
-
-bitflags::bitflags! {
-    /// Option struct containing flags for enabling extra features
-    /// that are not part of the CommonMark spec.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct Options: u32 {
-        const ENABLE_TABLES = 1 << 1;
-        /// GitHub-compatible footnote syntax.
-        ///
-        /// Footnotes are referenced with the syntax `[^IDENT]`,
-        /// and defined with an identifier followed by a colon at top level.
-        ///
-        /// ---
-        ///
-        /// ```markdown
-        /// Footnote referenced [^1].
-        ///
-        /// [^1]: footnote defined
-        /// ```
-        ///
-        /// Footnote referenced [^1].
-        ///
-        /// [^1]: footnote defined
-        const ENABLE_FOOTNOTES = 1 << 2;
-        const ENABLE_STRIKETHROUGH = 1 << 3;
-        const ENABLE_TASKLISTS = 1 << 4;
-        /// Enables replacement of ASCII punctuation characters with
-        /// Unicode ligatures and smart quotes.
-        ///
-        /// This includes replacing `--` with `—`, `---` with `—`, `...` with `…`,
-        /// `"quote"` with `“quote”`, and `'quote'` with `‘quote’`.
-        ///
-        /// The replacement takes place during the parsing of the document.
-        const ENABLE_SMART_PUNCTUATION = 1 << 5;
-        /// Extension to allow headings to have ID and classes.
-        ///
-        /// `# text { #id .class1 .class2 myattr other_attr=myvalue }`
-        /// is interpreted as a level 1 heading
-        /// with the content `text`, ID `id`, classes `class1` and `class2` and
-        /// custom attributes `myattr` (without value) and
-        /// `other_attr` with value `myvalue`.
-        /// Note that ID, classes, and custom attributes should be space-separated.
-        const ENABLE_HEADING_ATTRIBUTES = 1 << 6;
-        /// Metadata blocks in YAML style, i.e.:
-        /// - starting with a `---` line
-        /// - ending with a `---` or `...` line
-        const ENABLE_YAML_STYLE_METADATA_BLOCKS = 1 << 7;
-        /// Metadata blocks delimited by:
-        /// - `+++` line at start
-        /// - `+++` line at end
-        const ENABLE_PLUSES_DELIMITED_METADATA_BLOCKS = 1 << 8;
-        /// Older footnote syntax. This flag implies `ENABLE_FOOTNOTES`, changing it to use an
-        /// older syntax instead of the new, default, GitHub-compatible syntax.
-        ///
-        /// New syntax is different from the old syntax regarding
-        /// indentation, nesting, and footnote references with no definition:
-        ///
-        /// ```markdown
-        /// [^1]: In new syntax, this is two footnote definitions.
-        /// [^2]: In old syntax, this is a single footnote definition with two lines.
-        ///
-        /// [^3]:
-        ///
-        ///     In new syntax, this is a footnote with two paragraphs.
-        ///
-        ///     In old syntax, this is a footnote followed by a code block.
-        ///
-        /// In new syntax, this undefined footnote definition renders as
-        /// literal text [^4]. In old syntax, it creates a dangling link.
-        /// ```
-        const ENABLE_OLD_FOOTNOTES = (1 << 9) | (1 << 2);
-        /// With this feature enabled, two events `Event::InlineMath` and `Event::DisplayMath`
-        /// are emitted that conventionally contain TeX formulas.
-        const ENABLE_MATH = 1 << 10;
-        /// Misc GitHub Flavored Markdown features not supported in CommonMark.
-        /// The following features are currently behind this tag:
-        /// - Blockquote tags ([!NOTE], [!TIP], [!IMPORTANT], [!WARNING], [!CAUTION]).
-        const ENABLE_GFM = 1 << 11;
-        /// Commonmark-HS-Extensions compatible definition lists.
-        ///
-        /// ```markdown
-        /// title 1
-        ///   : definition 1
-        /// title 2
-        ///   : definition 2
-        /// ```
-        const ENABLE_DEFINITION_LIST = 1 << 12;
-        const ENABLE_SUPERSCRIPT = 1 << 13;
-        const ENABLE_SUBSCRIPT = 1 << 14;
-        /// Obsidian-style Wikilinks.
-        const ENABLE_WIKILINKS = 1 << 15;
-    }
-}
-
-impl Options {
-    pub(crate) fn has_gfm_footnotes(&self) -> bool {
-        self.contains(Options::ENABLE_FOOTNOTES) && !self.contains(Options::ENABLE_OLD_FOOTNOTES)
-    }
 }

@@ -8,6 +8,5 @@ repository = "https://github.com/2018kguo/rill"
 publish = false
 
 [dependencies]
-bitflags = "2.13"
 memchr = "2.8"
 unicase = "2.10"
