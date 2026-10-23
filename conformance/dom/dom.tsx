@@ -27,15 +27,39 @@ const config = params.get("config") ?? "default";
 const variant = params.get("variant") ?? "default";
 const candidateName = params.get("candidate") ?? "rill";
 
+// The stock code plugin, counting the requests it has not answered: settle() waits for
+// them as for rill's worker, since Shiki on a cold grammar can outlast the quiet period
+// (the snapshot would show the unhighlighted block). rill still sees the stock plugin
+// (it goes by name and type) and swaps in rill-highlight. A request that fails is
+// logged and never answered, so one older than 10 s stops counting.
+const codeRequests = new Set<{ at: number }>();
+const codePending = () => {
+  for (const request of codeRequests) if (performance.now() - request.at > 10000) codeRequests.delete(request);
+  return codeRequests.size;
+};
+const countedCode: typeof code = {
+  ...code,
+  highlight(options, callback) {
+    const request = { at: performance.now() };
+    codeRequests.add(request);
+    const result = code.highlight(options, (highlighted) => {
+      codeRequests.delete(request);
+      callback?.(highlighted);
+    });
+    if (result) codeRequests.delete(request);
+    return result;
+  },
+};
+
 const plugins =
   config === "code"
-    ? { code }
+    ? { code: countedCode }
     : config === "math"
       ? { math }
       : config === "cjk"
         ? { cjk }
         : config === "all"
-          ? { code, math, cjk }
+          ? { code: countedCode, math, cjk }
           : undefined;
 
 function OwnCopyIcon(props: Record<string, unknown>) {
@@ -128,7 +152,7 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
     function done() {
       // An image whose (aborted) request has not failed yet still flips to `hidden`.
       const loading = [...element.querySelectorAll("img")].some((image) => !imageDone(image));
-      if ((loading || pendingHighlights() > 0) && performance.now() < started + timeoutMs) {
+      if ((loading || pendingHighlights() > 0 || codePending() > 0) && performance.now() < started + timeoutMs) {
         timer = setTimeout(done, quietMs);
         return;
       }
