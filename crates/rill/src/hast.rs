@@ -1395,6 +1395,7 @@ enum Allowed {
 }
 
 const ARIA: [&str; 3] = ["ariaDescribedBy", "ariaLabel", "ariaLabelledBy"];
+/// Sorted, for binary search.
 const GLOBAL: &[&str] = &[
     "abbr",
     "accept",
@@ -1460,6 +1461,7 @@ const GLOBAL: &[&str] = &[
     "value",
     "width",
 ];
+/// Sorted, for binary search.
 const TAG_NAMES: &[&str] = &[
     "a",
     "b",
@@ -1649,7 +1651,7 @@ fn sanitize_props<'s>(
             };
             let safe = match value {
                 Ok(safe) => safe,
-                Err(value) if GLOBAL.contains(&key) => {
+                Err(value) if GLOBAL.binary_search(&key).is_ok() => {
                     sanitize_value(&Allowed::Any, key, value).ok()?
                 }
                 Err(_) => return None,
@@ -1880,7 +1882,7 @@ impl<'s> Finisher<'_, 's> {
         self.table_depth += table;
         self.children(ix);
         self.table_depth -= table;
-        let mut safe = TAG_NAMES.contains(&tag);
+        let mut safe = TAG_NAMES.binary_search(&tag).is_ok();
         if safe && matches!(tag, "tbody" | "td" | "th" | "thead" | "tfoot" | "tr") {
             safe = self.table_depth > 0;
         }
@@ -2531,4 +2533,15 @@ pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
         ops: encoder.ops,
         strings: encoder.strings,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GLOBAL, TAG_NAMES};
+
+    #[test]
+    fn lookup_tables_are_sorted() {
+        assert!(TAG_NAMES.is_sorted(), "TAG_NAMES is binary searched");
+        assert!(GLOBAL.is_sorted(), "GLOBAL is binary searched");
+    }
 }
