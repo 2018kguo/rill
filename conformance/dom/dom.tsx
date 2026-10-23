@@ -83,8 +83,8 @@ const candidates: Record<string, Component> = {
   rill: RillStreamdown as never,
 };
 
-/** Resolves once `element` has not changed for `quietMs` and no highlighting is in
- * flight in rill's worker (whose answers can take longer than the quiet period). */
+/** Resolves once `element` has not changed for `quietMs`, its images are done, and no
+ * highlighting is in flight in rill's worker (whose answers can outlast the quiet period). */
 function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promise<void> {
   return new Promise((resolve) => {
     let timer = setTimeout(done, quietMs);
@@ -101,7 +101,9 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
       characterData: true,
     });
     function done() {
-      if (pendingHighlights() > 0 && performance.now() < started + timeoutMs) {
+      // An image whose (aborted) request has not failed yet still flips to `hidden`.
+      const loading = [...element.querySelectorAll("img")].some((image) => !image.complete);
+      if ((loading || pendingHighlights() > 0) && performance.now() < started + timeoutMs) {
         timer = setTimeout(done, quietMs);
         return;
       }
