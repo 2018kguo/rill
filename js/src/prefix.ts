@@ -23,3 +23,30 @@ export function commonPrefix(before: string, after: string): number {
   while (length < limit && before.charCodeAt(length) === after.charCodeAt(length)) length += 1;
   return length;
 }
+
+/** A map that keeps its `size` most recently used entries. */
+export class Lru<K, V> {
+  readonly #entries = new Map<K, V>();
+  readonly #size: number;
+
+  constructor(size: number) {
+    this.#size = size;
+  }
+
+  get(key: K): V | undefined {
+    const value = this.#entries.get(key);
+    if (value !== undefined) {
+      this.#entries.delete(key);
+      this.#entries.set(key, value);
+    }
+    return value;
+  }
+
+  set(key: K, value: V): void {
+    this.#entries.delete(key);
+    this.#entries.set(key, value);
+    if (this.#entries.size > this.#size) {
+      this.#entries.delete(this.#entries.keys().next().value as K);
+    }
+  }
+}

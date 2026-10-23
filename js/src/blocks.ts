@@ -9,7 +9,7 @@
 // Streamdown's on streamed prefixes, raw and healed.
 import { Lexer, type Token } from "marked";
 
-import { commonPrefix } from "./prefix.ts";
+import { commonPrefix, Lru } from "./prefix.ts";
 
 const footnoteReferencePattern = /\[\^[\w-]{1,200}\](?!:)/;
 const footnoteDefinitionPattern = /\[\^[\w-]{1,200}\]:/;
@@ -214,6 +214,8 @@ const cut = (previous: ParseCache | null, input: string): ParseCache => {
 };
 
 let lastParse: ParseCache | null = null;
+/** Texts cut before, for messages that do not stream (mounted again, or repeated). */
+const cuts = new Lru<string, ParseCache>(64);
 
 /** Where the first footnote match in `text` from `from` ends (with its lookahead), or
  * -1. */
@@ -258,7 +260,11 @@ let definitionInput: string | null = null;
 export const parseMarkdownIntoBlocks = (markdown: string): string[] => {
   if (hasFootnotes(markdown)) return [markdown];
   const input = markdown.includes("\r") ? markdown.replace(lineEndingPattern, "\n") : markdown;
-  lastParse = cut(lastParse, input);
+  // A text unlike the last one (another message) may have been cut before.
+  const unlike = !lastParse || commonPrefix(lastParse.input, input) < input.length >> 1;
+  const known = unlike ? cuts.get(input) : undefined;
+  lastParse = known ?? cut(lastParse, input);
+  if (unlike && !known) cuts.set(input, lastParse);
   // Each block is its own Markdown document, so a text with link definitions stays one.
   if (lastParse.definitions.some(Boolean)) {
     definitionInput = input;

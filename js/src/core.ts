@@ -2,7 +2,7 @@
 // with your own Rust plugins) and decodes what it returns into HAST. Nothing here loads
 // WebAssembly, so a custom build imports this and `streamdown.ts` only.
 import { decodeHast, HastReader, type HastNode } from "./decode.ts";
-import { noteKept } from "./prefix.ts";
+import { Lru, noteKept } from "./prefix.ts";
 import { encodeLoneSurrogates, restoreLoneSurrogates } from "./surrogates.ts";
 
 export { decodeHast, HastReader, type HastNode } from "./decode.ts";
@@ -116,10 +116,16 @@ export function createRill<A extends unknown[]>(
   // healed text that changed).
   let last: string | null = null;
   let lastHealed = "";
+  // Texts healed whole (a message that does not stream, mounted again or repeated).
+  const healedWhole = new Lru<string, string>(64);
   const heal = remend
     ? (text: string) => {
         const appended =
           last !== null && text.startsWith(last) ? text.slice(last.length) : null;
+        if (appended === null) {
+          const known = healedWhole.get(text);
+          if (known !== undefined) return known;
+        }
         // Unknown until this call returns (it may throw).
         last = null;
         const keep = remend.stream(appended ?? text, appended === null);
@@ -127,31 +133,48 @@ export function createRill<A extends unknown[]>(
         noteKept(lastHealed, healed, keep);
         last = text;
         lastHealed = healed;
+        if (appended === null) healedWhole.set(text, healed);
         return healed;
       }
     : undefined;
+  // Blocks rendered when not streaming (a message mounted again, or repeated).
+  const rendered = new Lru<string, Map<string, [Uint32Array, string] | null>>(512);
   const markup = renderMarkup
     ? (source: string, syntax: Syntax, options: MarkupOptions) => {
         // Lone surrogates and NUL take the exact path (Streamdown's own Block).
         if (!source.isWellFormed() || source.includes("\0")) {
           return null;
         }
-        const result = renderMarkup(
-          source,
-          syntax.math === true,
-          syntax.cjk === true,
-          options.prefix,
-          (options.linkSafety ? 1 : 0) | (options.ssr ? 2 : 0) | (options.spine ? 4 : 0),
-          options.overrides
-        );
-        try {
-          if (result.kind !== "markup") {
-            return null;
+        const flags =
+          (options.linkSafety ? 1 : 0) |
+          (options.ssr ? 2 : 0) |
+          (options.spine ? 4 : 0) |
+          (syntax.math === true ? 8 : 0) |
+          (syntax.cjk === true ? 16 : 0);
+        const key = `${flags} ${options.prefix} ${options.overrides}`;
+        const known = options.spine ? undefined : rendered.get(source);
+        let output = known?.get(key);
+        if (output === undefined) {
+          const result = renderMarkup(
+            source,
+            syntax.math === true,
+            syntax.cjk === true,
+            options.prefix,
+            flags & 7,
+            options.overrides
+          );
+          try {
+            output = result.kind === "markup" ? [result.ops(), result.strings()] : null;
+          } finally {
+            result.free();
           }
-          return new HastReader(result.ops(), result.strings(), source);
-        } finally {
-          result.free();
+          if (!options.spine) {
+            const byKey = known ?? new Map();
+            byKey.set(key, output);
+            if (!known) rendered.set(source, byKey);
+          }
         }
+        return output && new HastReader(output[0], output[1], source);
       }
     : undefined;
   return {

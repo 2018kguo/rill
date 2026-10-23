@@ -81,6 +81,9 @@ type Settings = {
   prefix: string;
   /** `fallbackComponent` is set: every element renders through Streamdown. */
   fallback: boolean;
+  /** Streamdown hands the whole text to one Block, which renders its blocks itself (a
+   * message that has not streamed: one component instead of one per block). */
+  whole: boolean;
   highlight: Highlighter | undefined;
 };
 
@@ -140,6 +143,18 @@ function sameRootAttributes(previous: object, next: object): boolean {
 /** Streamdown 2.7.1's `<Streamdown>`, rendering its blocks with rill. */
 export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
   const { plugins, prefix, fallbackComponent } = props;
+  // A message that has streamed keeps a Block per block (their state, as Streamdown
+  // keeps it); one that has not renders its blocks from one Block. Per-block props
+  // (`dir`, animation, a page's own splitter or Block) keep Streamdown's blocks.
+  const streamed = useRef(false);
+  if (props.isAnimating) streamed.current = true;
+  const whole =
+    !streamed.current &&
+    props.mode !== "static" &&
+    props.dir === undefined &&
+    !props.animated &&
+    !props.BlockComponent &&
+    !props.parseMarkdownIntoBlocksFn;
   const settings = useMemo<Settings>(
     () => ({
       plugins,
@@ -147,8 +162,9 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
       prefix: prefix ?? "",
       fallback: fallbackComponent !== undefined,
       highlight: highlighterFor(plugins?.code),
+      whole,
     }),
-    [plugins, prefix, fallbackComponent]
+    [plugins, prefix, fallbackComponent, whole]
   );
   useEffect(load, []);
   // Streamdown repairs streaming Markdown with remend before splitting it into blocks;
@@ -172,7 +188,8 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
       ...(plugins ? { plugins: streamdownPlugins(plugins, settings.highlight) } : {}),
       ...(healed === null ? {} : { children: healed, parseIncompleteMarkdown: false }),
       // The same blocks, without Streamdown's whole-text tests on every update.
-      parseMarkdownIntoBlocksFn: props.parseMarkdownIntoBlocksFn ?? parseMarkdownIntoBlocks,
+      parseMarkdownIntoBlocksFn:
+        props.parseMarkdownIntoBlocksFn ?? (whole ? wholeText : parseMarkdownIntoBlocks),
       BlockComponent: props.BlockComponent
         ? healed === null
           ? props.BlockComponent
@@ -182,6 +199,12 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
   );
 }, sameStreamdownProps as never);
 (Streamdown as { displayName?: string }).displayName = "Streamdown";
+
+/** The text as one block when Streamdown would split it (Block splits it again). */
+const wholeText = (text: string): string[] => {
+  const blocks = parseMarkdownIntoBlocks(text);
+  return blocks.length > 1 ? [text] : blocks;
+};
 
 const codePlugins = new WeakMap<object, PluginConfig>();
 
@@ -427,6 +450,48 @@ export const Block = memo(function Block(props: BlockProps) {
   const tables = useRef<TableCache | null>(null);
   const pieces = useRef<Pieces | null>(null);
   const nodes = useMemo(() => {
+    // The whole text (see `Settings.whole`): Streamdown's blocks, each rendered as a
+    // Block of its own would render it.
+    const blocks =
+      settings?.whole && props.index === 0 ? parseMarkdownIntoBlocks(props.content) : null;
+    if (settings && blocks && blocks.length > 1) {
+      tables.current = null;
+      pieces.current = null;
+      return blocks.map((block, index) => {
+        const piece = props.shouldNormalizeHtmlIndentation ? normalizeHtmlIndentation(block) : block;
+        let reader: HastReader | null = null;
+        if (plan && rill?.markup && piece.length <= DEFAULT_MAX_SOURCE_LENGTH) {
+          try {
+            reader = rill.markup(piece, plan, {
+              prefix: settings.prefix,
+              linkSafety: safe,
+              ssr,
+              overrides: plan.overrides,
+              spine: false,
+            });
+          } catch {
+            reader = null;
+          }
+        }
+        if (!reader) {
+          blockRenders.streamdown += 1;
+          return createElement(
+            Fragment,
+            { key: index },
+            fallback({ ...props, content: block, index }, settings, rill)
+          );
+        }
+        blockRenders.rill += 1;
+        const env: Env = {
+          settings,
+          components: props.components as Record<string, unknown>,
+          isIncomplete: false,
+          ssr,
+          openLink,
+        };
+        return createElement(Fragment, { key: index }, ...segments(reader, env));
+      });
+    }
     if (!(plan && settings && rill?.markup) || content.length > DEFAULT_MAX_SOURCE_LENGTH) {
       tables.current = null;
       return null;

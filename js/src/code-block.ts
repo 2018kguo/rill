@@ -11,6 +11,7 @@ import {
   memo,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -232,7 +233,7 @@ const CodeBody = memo(function CodeBody({
 }: CodeBodyProps) {
   const { isAnimating, shikiTheme, codeBlockMaxHeight } =
     useContext(StreamdownContext);
-  const raw = useMemo(() => rawResult(code), [code]);
+  const raw = useMemo(() => rawResultFor(code), [code]);
   const [result, setResult] = useState<HighlightResult>(raw);
   useEffect(() => {
     if (!highlight) {
@@ -274,11 +275,18 @@ const CodeBody = memo(function CodeBody({
     lineNumbers && startLine && startLine > 1
       ? { counterReset: `line ${startLine - 1}` }
       : undefined;
-  const rows = useMemo(() => linesHtml(result, names, lines.current), [result, names]);
   // A block that arrives complete renders its <pre> as one string; one that streams
   // keeps a React element per line, so each update touches only the lines that changed.
   const [whole] = useState(!isIncomplete);
-  const styles = useRef<{ pre?: StyleSlot; code?: StyleSlot }>({});
+  const rows = useMemo(
+    () => (whole ? [] : linesHtml(result, names, lines.current)),
+    [result, names, whole]
+  );
+  const wholeState = useRef<WholeState>({
+    memo: null,
+    body: { lines: [], pre: undefined, code: undefined },
+    shared: false,
+  });
   const body = {
     className: cn(
       className,
@@ -292,19 +300,21 @@ const CodeBody = memo(function CodeBody({
     ...rest,
   };
   if (whole) {
-    // The <pre> and <code> styles as React would have updated them.
-    const pre = (styles.current.pre = updateStyle(styles.current.pre, preStyle));
-    const code = (styles.current.code = updateStyle(styles.current.code, codeStyle));
-    let html = `<pre class="${escapeHtml(names.pre)}"`;
-    if (pre.attribute !== null) html += ` style="${pre.attribute}"`;
-    html += "><code";
-    if (lineNumbers) html += ` class="${escapeHtml(names.code)}"`;
-    if (code.attribute !== null) html += ` style="${code.attribute}"`;
-    html += ">";
-    const line = `<span class="${escapeHtml(lineClass)}">`;
-    for (const row of rows) html += `${line}${row}</span>`;
-    html += "</code></pre>";
-    return createElement("div", { ...body, dangerouslySetInnerHTML: { __html: html } });
+    const html = wholeHtml(wholeState.current, result, `${lineClass}\0${startLine}`, (state) => {
+      // The <pre> and <code> styles as React would have updated them.
+      const pre = (state.pre = updateStyle(state.pre, preStyle));
+      const code = (state.code = updateStyle(state.code, codeStyle));
+      let html = `<pre class="${escapeHtml(names.pre)}"`;
+      if (pre.attribute !== null) html += ` style="${pre.attribute}"`;
+      html += "><code";
+      if (lineNumbers) html += ` class="${escapeHtml(names.code)}"`;
+      if (code.attribute !== null) html += ` style="${code.attribute}"`;
+      html += ">";
+      const line = `<span class="${escapeHtml(lineClass)}">`;
+      for (const row of linesHtml(result, names, state.lines)) html += `${line}${row}</span>`;
+      return `${html}</code></pre>`;
+    });
+    return createElement(WholeBody, { body, html });
   }
   return createElement(
     "div",
@@ -326,6 +336,127 @@ const CodeBody = memo(function CodeBody({
     )
   );
 });
+
+/** What a whole body's markup depends on besides its result: its rows' token styles
+ * and its <pre> and <code> styles, as React would have updated them. */
+type BodyState = { lines: Line[]; pre: StyleSlot | undefined; code: StyleSlot | undefined };
+
+/** A body's markup after a sequence of results, and the state it leaves. */
+type Memo = {
+  html: string;
+  body: BodyState;
+  next: WeakMap<HighlightResult, Map<string, Memo>>;
+};
+
+type WholeState = { memo: Memo | null; body: BodyState; shared: boolean };
+
+/** Bodies' markup by the results they rendered, in order (the raw lines, then the
+ * highlighted ones): every message holding the same code renders it once. */
+const firstMemo = new WeakMap<HighlightResult, Map<string, Memo>>();
+
+function wholeHtml(
+  state: WholeState,
+  result: HighlightResult,
+  key: string,
+  render: (body: BodyState) => string
+): string {
+  const table = state.memo ? state.memo.next : firstMemo;
+  let byKey = table.get(result);
+  let memo = byKey?.get(key);
+  if (!memo) {
+    // A state another body shares stays as it is.
+    const body = state.shared ? cloneBody(state.body) : state.body;
+    memo = { html: render(body), body, next: new WeakMap() };
+    if (!byKey) table.set(result, (byKey = new Map()));
+    byKey.set(key, memo);
+  }
+  state.memo = memo;
+  state.body = memo.body;
+  state.shared = true;
+  return memo.html;
+}
+
+function cloneBody(body: BodyState): BodyState {
+  return {
+    lines: body.lines.map((line) => ({ ...line, slots: line.slots.slice() })),
+    pre: body.pre,
+    code: body.code,
+  };
+}
+
+/** Raw results by code, so bodies with the same code share them (and their markup). */
+const rawResults = new Map<string, HighlightResult>();
+
+function rawResultFor(code: string): HighlightResult {
+  let result = rawResults.get(code);
+  if (!result) {
+    result = rawResult(code);
+    if (rawResults.size >= 256) rawResults.delete(rawResults.keys().next().value as string);
+    rawResults.set(code, result);
+  }
+  return result;
+}
+
+/**
+ * A body that arrives complete, its markup set outside React as dangerouslySetInnerHTML
+ * would, in the same commit; markup set before (the same code in another message, a
+ * message mounted again) is cloned from the first parse instead of parsed again.
+ */
+function WholeBody({ body, html }: { body: Record<string, unknown>; html: string }) {
+  const element = useRef<HTMLDivElement | null>(null);
+  const shown = useRef<string | null>(null);
+  const scrollRef = body.ref as RefObject<HTMLDivElement | null>;
+  useLayoutEffect(() => {
+    const host = element.current;
+    if (!host || shown.current === html) return;
+    shown.current = html;
+    setMarkup(host, html);
+  }, [html]);
+  return createElement("div", {
+    ...body,
+    ref: (node: HTMLDivElement | null) => {
+      element.current = node;
+      scrollRef.current = node;
+    },
+  });
+}
+
+/** Where markup set as a code body was parsed: the body that holds it, while it does. */
+type Parsed = { host: WeakRef<HTMLElement>; bytes: number };
+
+/** Markup set as code bodies, least recently used first, up to `PARSED_BYTES`. */
+const parsed = new Map<string, Parsed>();
+let parsedBytes = 0;
+const PARSED_BYTES = 8 << 20;
+/** The markup each body shows. */
+const shownIn = new WeakMap<HTMLElement, string>();
+
+function setMarkup(host: HTMLElement, html: string) {
+  const known = parsed.get(html);
+  const source = known?.host.deref();
+  if (source && source !== host && source.isConnected && shownIn.get(source) === html) {
+    // A copy of the DOM parsed from it (the same nodes, without parsing).
+    parsed.delete(html);
+    parsed.set(html, known!);
+    const copy = document.createDocumentFragment();
+    for (let node = source.firstChild; node; node = node.nextSibling) {
+      copy.append(node.cloneNode(true));
+    }
+    host.replaceChildren(copy);
+  } else {
+    host.innerHTML = html;
+    if (known) parsedBytes -= known.bytes;
+    parsed.delete(html);
+    parsed.set(html, { host: new WeakRef(host), bytes: html.length });
+    parsedBytes += html.length;
+  }
+  shownIn.set(host, html);
+  while (parsedBytes > PARSED_BYTES) {
+    const [oldest, entry] = parsed.entries().next().value as [string, Parsed];
+    parsed.delete(oldest);
+    parsedBytes -= entry.bytes;
+  }
+}
 
 type Row = HighlightResult["tokens"][number];
 
