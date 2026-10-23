@@ -83,6 +83,9 @@ export type RenderMarkup = (
 
 const KINDS = new Set<string>(["complete", "raw", "math"]);
 
+/** What `remend.stream` returns for a whole text it leaves as it is (`u32::MAX`). */
+const UNCHANGED = 0xffff_ffff;
+
 function isRillKind(kind: string): kind is RillKind {
   return KINDS.has(kind);
 }
@@ -106,7 +109,8 @@ export function createRill<A extends unknown[]>(
   },
   remend?: {
     /** Heals the text so far plus `appended` (or just `appended`, with `reset`):
-     * how many units of the last healed text the new one keeps, then `middle()`. */
+     * how many units of the last healed text the new one keeps, then `middle()`; or
+     * `u32::MAX` when, with `reset`, the healed text is `appended` itself. */
     stream(appended: string, reset: boolean): number;
     middle(): string;
   }
@@ -138,11 +142,16 @@ export function createRill<A extends unknown[]>(
         // Unknown until this call returns (it may throw).
         last = null;
         const keep = remend.stream(appended ?? text, appended === null);
+        // A whole text with nothing to heal (the usual finished answer) is itself.
+        const unchanged = keep === UNCHANGED;
         // Appending keeps the last healed text whole (no copy of it).
-        const middle = remend.middle();
-        const healed =
-          keep === lastHealed.length ? lastHealed + middle : lastHealed.slice(0, keep) + middle;
-        noteKept(lastHealed, healed, keep);
+        const middle = unchanged ? "" : remend.middle();
+        const healed = unchanged
+          ? text
+          : keep === lastHealed.length
+            ? lastHealed + middle
+            : lastHealed.slice(0, keep) + middle;
+        noteKept(lastHealed, healed, unchanged ? 0 : keep);
         last = text;
         lastHealed = healed;
         if (appended === null) healedWhole.set(text, healed);

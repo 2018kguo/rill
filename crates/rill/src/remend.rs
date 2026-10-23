@@ -97,6 +97,20 @@ pub struct Stream {
 impl Stream {
     /// Heals the text so far plus `appended` (or, with `reset`, just `appended`).
     pub fn heal(&mut self, appended: &str, reset: bool) -> Healing {
+        let (keep, middle) = self.heal_with(appended, reset, |middle, _| {
+            String::from_utf16_lossy(middle)
+        });
+        Healing { keep, middle }
+    }
+
+    /// [`Stream::heal`], handing the middle (and the whole input text) to `take` as
+    /// UTF-16 instead of building a `String` of it.
+    pub fn heal_with<M>(
+        &mut self,
+        appended: &str,
+        reset: bool,
+        take: impl FnOnce(&[u16], &[u16]) -> M,
+    ) -> (usize, M) {
         if reset {
             *self = Stream::default();
         }
@@ -128,15 +142,15 @@ impl Stream {
         };
         if self.heal_tail().is_some() {
             let keep = keep_of(&self.work, &self.work);
-            let middle = String::from_utf16_lossy(&self.work[keep..]);
-            return Healing { keep, middle };
+            let middle = take(&self.work[keep..], &self.input);
+            return (keep, middle);
         }
         let whole = self.heal_earlier();
         self.work.truncate(self.prefix.len);
         let keep = keep_of(&self.work, &whole);
-        let middle = String::from_utf16_lossy(&whole[keep..]);
+        let middle = take(&whole[keep..], &self.input);
         self.whole = Some(whole);
-        Healing { keep, middle }
+        (keep, middle)
     }
 
     /// The text after the settled prefix after the line-local escapes.

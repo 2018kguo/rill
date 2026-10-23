@@ -118,12 +118,18 @@ pub mod wasm {
         /// was added since the last call (or the whole text, with `reset`). Returns how
         /// many units of the last healed text the new one keeps; the rest is
         /// [`remend_middle`].
+        /// Returns `u32::MAX` instead when the healed text is the whole text as given
+        /// (`reset`, nothing to heal: the usual case for a finished answer), with no
+        /// middle to read.
         #[wasm_bindgen(js_name = remendStream)]
         pub fn remend_stream(appended: &str, reset: bool) -> u32 {
             STREAM.with_borrow_mut(|stream| {
-                let healing = stream.heal(appended, reset);
-                MIDDLE.set(healing.middle);
-                healing.keep as u32
+                let (keep, middle) = stream.heal_with(appended, reset, |middle, input| {
+                    (!(reset && middle == input)).then(|| String::from_utf16_lossy(middle))
+                });
+                let same = middle.is_none();
+                MIDDLE.set(middle.unwrap_or_default());
+                if same { u32::MAX } else { keep as u32 }
             })
         }
 
