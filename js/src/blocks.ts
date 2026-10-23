@@ -7,7 +7,7 @@
 // but remend's closing markers make a streamed text end differently each time), so an
 // update costs what lexing the tail costs. `conformance/blocks.mjs` checks it against
 // Streamdown's on streamed prefixes, raw and healed.
-import { Lexer, type Token } from "marked";
+import { Lexer, Tokenizer, type Token, type TokensList } from "marked";
 
 import { commonPrefix, Lru } from "./prefix.ts";
 
@@ -84,13 +84,6 @@ const countDoubleDollars = (str: string): number => {
 
 const lineEndingPattern = /\r\n|\r/g;
 
-/** Whether marked found a link definition in `token` (it keeps the first of each label
- * as a `def` token, wherever it is). */
-const hasDefinition = (token: Token): boolean =>
-  token.type === "def" ||
-  Boolean((token as { tokens?: Token[] }).tokens?.some(hasDefinition)) ||
-  Boolean((token as { items?: { tokens?: Token[] }[] }).items?.some((item) => item.tokens?.some(hasDefinition)));
-
 interface ParseCache {
   /** The input cut into blocks as if it had no link definitions. */
   blocks: string[];
@@ -99,13 +92,75 @@ interface ParseCache {
   input: string;
   verifiedCount: number;
   verifiedLength: number;
+  /** Whether `input[..verifiedLength]` ends inside what could be a link definition's
+   * label (see `openLabel`). */
+  label: boolean;
 }
 
 type Lexed = { blocks: string[]; definitions: boolean[] };
 
+/** How deep `blockTokens` calls are nested, and the depth each running list tokenizer
+ * was called at (lists nest through blockquotes and items). */
+let lexDepth = 0;
+const lists: number[] = [];
+
+/** marked's tokenizer, noting where each list is lexed. */
+class ListTokenizer extends Tokenizer {
+  override list(src: string) {
+    lists.push(lexDepth);
+    try {
+      return super.list(src);
+    } finally {
+      lists.pop();
+    }
+  }
+}
+
+/**
+ * marked's lexer, without the tokens of list items that cannot hold a link definition.
+ * A list's `raw` is cut from its lines before its items are lexed, and the items'
+ * tokens only decide its looseness and task boxes, so the blocks are the same; only a
+ * definition (which needs `]:`) inside an item matters here. Only a list's own calls
+ * for its items are skipped: inside an item that is lexed, a blockquote's tokens decide
+ * where it ends. Ending as `blockTokens` does, it leaves `state.top` set, which the
+ * next paragraph reads.
+ */
+class BlockLexer extends Lexer {
+  override blockTokens(src: string, tokens?: Token[], lastParagraphClipped?: boolean): Token[];
+  override blockTokens(src: string, tokens?: TokensList, lastParagraphClipped?: boolean): TokensList;
+  override blockTokens(src: string, tokens: Token[] = [], lastParagraphClipped = false) {
+    if (lists.length > 0 && lists[lists.length - 1] === lexDepth && !src.includes("]:")) {
+      this.state.top = true;
+      return tokens;
+    }
+    lexDepth += 1;
+    try {
+      return super.blockTokens(src, tokens, lastParagraphClipped);
+    } finally {
+      lexDepth -= 1;
+    }
+  }
+}
+
 const lexBlocks = (markdown: string): Lexed => {
-  const tokens = new Lexer({ gfm: true }).blockTokens(markdown);
-  const { blocks, definitions } = mergeTokensIntoBlocks(tokens);
+  lexDepth = 0;
+  lists.length = 0;
+  const lexer = new BlockLexer({ gfm: true, tokenizer: new ListTokenizer() });
+  // Streamdown keeps the text in one block when marked registered a link definition
+  // anywhere (its lexer's \`links\`): note which top-level token was being lexed at each
+  // registration. (A definition can be registered and then dropped from the tokens: a
+  // blockquote's list continuation lexes the list again, and the label is known.)
+  const tokens: Token[] = [];
+  const defined = new Set<number>();
+  const links = lexer.tokens.links;
+  lexer.tokens.links = new Proxy(links, {
+    set(target, label, value) {
+      defined.add(tokens.length);
+      return Reflect.set(target, label, value);
+    },
+  });
+  lexer.blockTokens(markdown, tokens);
+  const { blocks, definitions } = mergeTokensIntoBlocks(tokens, defined);
   return { blocks: copyBlocks(blocks), definitions };
 };
 
@@ -121,15 +176,15 @@ const countStableBlocks = (blocks: string[]): number => {
 const copyString = (value: string): string => ` ${value}`.slice(1);
 const copyBlocks = (blocks: string[]): string[] => blocks.map(copyString);
 
-const mergeTokensIntoBlocks = (tokens: Token[]): Lexed => {
+const mergeTokensIntoBlocks = (tokens: Token[], defined: Set<number>): Lexed => {
   const mergedBlocks: string[] = [];
   const definitions: boolean[] = [];
   const htmlStack: string[] = [];
   let previousTokenWasCode = false;
-  for (const token of tokens) {
+  for (const [index, token] of tokens.entries()) {
     const currentBlock = token.raw;
     const mergedBlocksLen = mergedBlocks.length;
-    const definition = hasDefinition(token);
+    const definition = defined.has(index);
     if (htmlStack.length > 0) {
       mergedBlocks[mergedBlocksLen - 1] += currentBlock;
       definitions[mergedBlocksLen - 1] ||= definition;
@@ -181,18 +236,25 @@ const reuseParsedBlocks = (
   if (stableCount === 0) return null;
   let verifiedCount = previous.verifiedCount;
   let verifiedLength = previous.verifiedLength;
+  let label = previous.label;
   if (verifiedCount > stableCount || verifiedLength > kept) {
     verifiedCount = 0;
     verifiedLength = 0;
+    label = false;
   }
   while (
     verifiedCount < stableCount &&
     input.startsWith(previous.blocks[verifiedCount] as string, verifiedLength)
   ) {
+    label = openLabel(label, previous.blocks[verifiedCount] as string);
     verifiedLength += (previous.blocks[verifiedCount] as string).length;
     verifiedCount += 1;
   }
   if (verifiedCount !== stableCount) return null;
+  // A definition's label may run over blank lines and so start in the kept blocks and
+  // end in the tail (the whole text then holds a definition): lex it all when the
+  // tail's first bracket closes such a label with `]:`.
+  if (label && closesLabel(input, verifiedLength)) return null;
   // A block's end (its trailing blank lines) depends on the text up to the next one: the
   // text must keep some of that.
   if (!/\S/.test(input.slice(verifiedLength, kept))) return null;
@@ -203,14 +265,46 @@ const reuseParsedBlocks = (
     definitions: previous.definitions.slice(0, stableCount).concat(tail.definitions),
     verifiedCount,
     verifiedLength,
+    label,
   };
 };
+
+const BRACKET_OR_ESCAPE = /[[\]\\]/g;
+
+/**
+ * Whether a text that ended inside a possible label (`open`) still does after `text`:
+ * marked's definition label (`(?!\s*\])(?:\\[\s\S]|[^\[\]\\])+`) holds no bracket
+ * that is not escaped and has no length limit, so an unescaped `[` with no bracket after
+ * it may still become one. Conservative: any `[` counts, wherever it is.
+ */
+/** Whether the first bracket in `text` from `from` (escapes skipped) is a `]` with `:`
+ * right after it. */
+function closesLabel(text: string, from: number): boolean {
+  BRACKET_OR_ESCAPE.lastIndex = from;
+  for (let found = BRACKET_OR_ESCAPE.exec(text); found; found = BRACKET_OR_ESCAPE.exec(text)) {
+    if (found[0] === "\\") {
+      BRACKET_OR_ESCAPE.lastIndex += 1;
+      continue;
+    }
+    return found[0] === "]" && text[found.index + 1] === ":";
+  }
+  return false;
+}
+
+function openLabel(open: boolean, text: string): boolean {
+  BRACKET_OR_ESCAPE.lastIndex = 0;
+  for (let found = BRACKET_OR_ESCAPE.exec(text); found; found = BRACKET_OR_ESCAPE.exec(text)) {
+    if (found[0] === "\\") BRACKET_OR_ESCAPE.lastIndex += 1;
+    else open = found[0] === "[";
+  }
+  return open;
+}
 
 /** `input` cut into blocks, from the last cut of a text when it can. */
 const cut = (previous: ParseCache | null, input: string): ParseCache => {
   if (previous?.input === input) return previous;
   const reused = previous ? reuseParsedBlocks(previous, input, commonPrefix(previous.input, input)) : null;
-  return reused ?? { input, ...lexBlocks(input), verifiedCount: 0, verifiedLength: 0 };
+  return reused ?? { input, ...lexBlocks(input), verifiedCount: 0, verifiedLength: 0, label: false };
 };
 
 let lastParse: ParseCache | null = null;

@@ -54,6 +54,12 @@ const families: Record<string, (n: number) => string> = {
   prose: (n) => PROSE.repeat(Math.ceil(n / PROSE.length)),
   code: (n) => CODE.repeat(Math.ceil(n / CODE.length)),
   // Definitions make the answer one block in Streamdown; rill renders its pieces.
+  // A `[` with no bracket after it may be a definition's label that a later `]:` ends:
+  // the splitter only lexes it all again if the new text's first bracket does that.
+  "an open bracket": (n) => {
+    const plain = "A paragraph with no brackets at all, *emphasis* and `code`.\n\n";
+    return `[an aside that never closes\n\n${plain.repeat(Math.ceil(n / plain.length))}`;
+  },
   "reference links": (n) =>
     `[spec]: https://example.com/spec\n[1]: https://www.rfc-editor.org/rfc/rfc9114\n\n${REFERENCES.repeat(Math.ceil(n / REFERENCES.length))}`,
 };

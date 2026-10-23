@@ -37,6 +37,9 @@ const PIECES = [
   "$$", "<div>", "</div>", "<details>", "</details>", "[^1]", "[^1]: note", "[a]: /u", "[a]",
   "---", "***", "===", "text", "**bold**", "\n", "\n\n", "\r\n", " ", "`", "<br>", "<!-- c -->",
   "[x](y)", "]", "[", ":", "中文", "😀",
+  // Nested and task lists, which the splitter lexes without their items' tokens unless
+  // an item may hold a definition.
+  "\n  - ", "\n    - ", "\n   1) ", "2. ", "[ ] ", "[x] ", "\t", "\n  [b]: /v", "]: ", "\n  > ",
 ];
 
 function* fuzz(count, seed) {
