@@ -203,6 +203,9 @@ type CodeBodyProps = {
   highlight: Highlighter | undefined;
 };
 
+/** The callback of a request made while rendering (its result is cached for the body). */
+const prefetched = () => {};
+
 /** CodeBlock's raw result: each line one uncolored token. */
 function rawResult(code: string): HighlightResult {
   return {
@@ -235,6 +238,16 @@ const CodeBody = memo(function CodeBody({
     useContext(StreamdownContext);
   const raw = useMemo(() => rawResultFor(code), [code]);
   const [result, setResult] = useState<HighlightResult>(raw);
+  // A finished block asks for its tokens as it renders, so the worker tokenizes while the
+  // page commits and lays out; the effect below then finds them, or joins the request.
+  useMemo(() => {
+    if (highlight && !isIncomplete) {
+      highlight.highlight(
+        { code, isIncomplete, language: language as never, themes: shikiTheme },
+        prefetched
+      );
+    }
+  }, [code, isIncomplete, language, shikiTheme, highlight]);
   useEffect(() => {
     if (!highlight) {
       setResult(raw);

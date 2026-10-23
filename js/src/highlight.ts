@@ -32,10 +32,12 @@ export function setRillHighlight(value: boolean) {
 }
 
 /** Where rill-highlight's WebAssembly is served from (default: the package's
- * `wasm/rill_highlight.wasm`, next to this module). Call before the first code block. */
+ * `wasm/rill_highlight.wasm`, next to this module). Call before the first code block:
+ * the highlighting worker starts then, and loads it and the default themes. */
 export function setHighlightWasm(url: URL) {
   wasmUrl = url;
   setRillHighlightWasm(url);
+  preloadHighlighting();
 }
 
 const workerCounts = { rill: 0, shiki: 0 };
@@ -56,6 +58,15 @@ type Pending = { key: string; options: Options; callbacks: Callback[] };
 
 let worker: Worker | null | undefined;
 const pending = new Map<number, Pending>();
+/** The pending request for each key (a request already sent is joined, not resent). */
+const pendingByKey = new Map<string, number>();
+/** The request each callback waits on. */
+const waiting = new WeakMap<Callback, number>();
+
+function forget(id: number, request: Pending) {
+  pending.delete(id);
+  if (pendingByKey.get(request.key) === id) pendingByKey.delete(request.key);
+}
 const cache = new Map<string, Result>();
 let nextId = 0;
 /** Languages the worker sent back to Shiki. */
@@ -75,7 +86,10 @@ function mainThread(plugin: CodePlugin): Highlighter {
   return highlighter;
 }
 
-function startWorker(plugin: CodePlugin): Worker | null {
+/** The worker, started now if it has not been (its WebAssembly and default themes load
+ * at once, before any request). Its replies go to the stock plugin `highlighterFor`
+ * was given, which every request comes with. */
+function startWorker(): Worker | null {
   if (worker !== undefined) return worker;
   try {
     worker = new Worker(new URL("./highlight-worker.js", import.meta.url), {
@@ -86,18 +100,17 @@ function startWorker(plugin: CodePlugin): Worker | null {
     return null;
   }
   worker.postMessage({ type: "init", wasm: wasmUrl.href });
-  worker.onmessage = ({
-    data,
-  }: MessageEvent<
+  type Reply =
     | { id: number; channel: string; result: Result; counts: typeof workerCounts }
-    | { id: number; fallback: true }
-  >) => {
+    | { id: number; fallback: true };
+  const handle = (data: Reply) => {
     if ("fallback" in data) {
       // A grammar rill-highlight cannot compile: the page's own code plugin (Shiki).
       const request = pending.get(data.id);
-      pending.delete(data.id);
       if (!request) return;
+      forget(data.id, request);
       shikiLanguages.add(request.options.language);
+      const plugin = stockPlugin!;
       for (const callback of request.callbacks) {
         const result = plugin.highlight(request.options, (late) => {
           workerCounts.shiki += 1;
@@ -118,7 +131,7 @@ function startWorker(plugin: CodePlugin): Worker | null {
     data.result.tokens = tokens;
     const request = pending.get(data.id);
     if (!request) return;
-    pending.delete(data.id);
+    forget(data.id, request);
     if (!request.options.isIncomplete) {
       cache.delete(request.key);
       cache.set(request.key, data.result);
@@ -126,11 +139,17 @@ function startWorker(plugin: CodePlugin): Worker | null {
     }
     for (const callback of request.callbacks) callback(data.result);
   };
+  // One message holds every reply the worker produced in a task: their callbacks run in
+  // this one task, so React renders them together.
+  worker.onmessage = ({ data }: MessageEvent<{ batch: Reply[] }>) => {
+    for (const reply of data.batch) handle(reply);
+  };
   worker.onerror = () => {
     // Highlight what was waiting on the main thread, and everything after it.
     worker?.terminate();
     worker = null;
-    const highlighter = mainThread(plugin);
+    if (!stockPlugin) return;
+    const highlighter = mainThread(stockPlugin);
     for (const request of pending.values()) {
       for (const callback of request.callbacks) {
         const result = highlighter.highlight(request.options, callback);
@@ -138,6 +157,7 @@ function startWorker(plugin: CodePlugin): Worker | null {
       }
     }
     pending.clear();
+    pendingByKey.clear();
   };
   return worker;
 }
@@ -159,27 +179,30 @@ const inWorker: Highlighter = {
       cache.set(key, cached);
       return cached;
     }
-    for (const request of pending.values()) {
-      if (request.key === key) {
-        request.callbacks.push(callback);
-        return null;
-      }
+    const joined = pendingByKey.get(key);
+    if (joined !== undefined) {
+      pending.get(joined)!.callbacks.push(callback);
+      waiting.set(callback, joined);
+      return null;
     }
     const id = (nextId += 1);
     pending.set(id, { key, options, callbacks: [callback] });
+    pendingByKey.set(key, id);
+    waiting.set(callback, id);
     worker?.postMessage({ type: "highlight", id, options });
     return null;
   },
   cancel(callback) {
-    for (const [id, request] of pending) {
-      const index = request.callbacks.indexOf(callback);
-      if (index < 0) continue;
-      request.callbacks.splice(index, 1);
-      if (request.callbacks.length === 0) {
-        pending.delete(id);
-        worker?.postMessage({ type: "cancel", id });
-      }
-      return;
+    const id = waiting.get(callback);
+    const request = id === undefined ? undefined : pending.get(id);
+    if (id === undefined || !request) return;
+    waiting.delete(callback);
+    const index = request.callbacks.indexOf(callback);
+    if (index < 0) return;
+    request.callbacks.splice(index, 1);
+    if (request.callbacks.length === 0) {
+      forget(id, request);
+      worker?.postMessage({ type: "cancel", id });
     }
   },
 };
@@ -207,5 +230,11 @@ export function highlighterFor(plugin: CodePlugin | undefined): Highlighter | un
     return mainThread(plugin);
   }
   stockPlugin = plugin;
-  return startWorker(plugin) ? inWorker : mainThread(plugin);
+  return startWorker() ? inWorker : mainThread(plugin);
+}
+
+/** Starts the highlighting worker (with its WebAssembly and themes) ahead of the first
+ * code block. `setHighlightWasm` calls it; without that, the first code block does. */
+export function preloadHighlighting() {
+  if (enabled && typeof Worker !== "undefined" && typeof window !== "undefined") startWorker();
 }

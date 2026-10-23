@@ -65,6 +65,14 @@ function rillPlugin(): Promise<RillPlugin | null> {
 }
 
 
+/** Loads rill-highlight and a theme pair now, ahead of the first request. */
+export function preloadRill(themes: [string, string]) {
+  rillPlugin().then(
+    (plugin) => plugin?.load({ language: "text", themes } as never).catch(() => {}),
+    () => {}
+  );
+}
+
 /** Whether Shiki's options name only bundled themes rill-highlight has. */
 function rillThemes(options: Options): boolean {
   const pair = options.themes as unknown[];
