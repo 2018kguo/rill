@@ -2,6 +2,14 @@
   "name": "rill-highlight-harness",
   "private": true,
   "type": "module",
+  "scripts": {
+    "corpus": "node corpus/fetch.mjs",
+    "build": "node scripts/build-grammars.mjs && sh scripts/build-wasm.sh && cargo build --release -p rill-highlight --examples",
+    "test": "node test/compare.mjs && node test/streaming.mjs",
+    "test:all-languages": "node test/all-languages.mjs",
+    "bench": "node bench/native.mjs && node bench/wasm.mjs",
+    "bench:browser": "node browser/build.mjs && node browser/run.mjs"
+  },
   "devDependencies": {
     "@streamdown/code": "2.0.0",
     "shiki": "4.5.0",
