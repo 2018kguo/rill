@@ -91,6 +91,22 @@ const candidates: Record<string, Component> = {
   rill: RillStreamdown as never,
 };
 
+// The src each image has fired load or error for. An image is `complete` as soon as its
+// (aborted) request fails, but the error event, in which Streamdown's image hides itself,
+// runs as a later task: a snapshot between the two would miss the `hidden` class.
+const firedImages = new WeakMap<HTMLImageElement, string>();
+for (const type of ["load", "error"]) {
+  document.addEventListener(
+    type,
+    (event) => {
+      if (event.target instanceof HTMLImageElement) firedImages.set(event.target, event.target.src);
+    },
+    true
+  );
+}
+const imageDone = (image: HTMLImageElement) =>
+  image.complete && (!image.getAttribute("src") || firedImages.get(image) === image.src);
+
 /** Resolves once `element` has not changed for `quietMs`, its images are done, and no
  * highlighting is in flight in rill's worker (whose answers can outlast the quiet period). */
 function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promise<void> {
@@ -110,7 +126,7 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
     });
     function done() {
       // An image whose (aborted) request has not failed yet still flips to `hidden`.
-      const loading = [...element.querySelectorAll("img")].some((image) => !image.complete);
+      const loading = [...element.querySelectorAll("img")].some((image) => !imageDone(image));
       if ((loading || pendingHighlights() > 0) && performance.now() < started + timeoutMs) {
         timer = setTimeout(done, quietMs);
         return;
