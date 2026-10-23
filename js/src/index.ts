@@ -74,7 +74,8 @@ const x = 1;
 function warmUp(rill: Rill) {
   if (typeof setTimeout !== "function") return;
   let rounds = 16;
-  const options = { prefix: "", linkSafety: true, ssr: false, overrides: "" };
+  // `spine` renders are not cached, so each round runs.
+  const options = { prefix: "", linkSafety: true, ssr: false, overrides: "", spine: true };
   const round = () => {
     try {
       rill.markup?.(SAMPLE.repeat(8), {}, options);

@@ -253,13 +253,25 @@ const footnoteTest = (): ((text: string) => boolean) => {
 
 const hasFootnotes = footnoteTest();
 
+let lastText: { text: string; carriageReturn: boolean } | null = null;
+
+/** Whether `text` holds a `\r`, looking past what it keeps of the last text only. */
+const hasCarriageReturn = (text: string): boolean => {
+  const kept = lastText && !lastText.carriageReturn ? commonPrefix(lastText.text, text) : 0;
+  const carriageReturn = (kept === 0 ? text : text.slice(kept)).includes("\r");
+  lastText = { text, carriageReturn };
+  return carriageReturn;
+};
+
 /** The input `parseMarkdownIntoBlocks` last kept in one block for its link definitions. */
 let definitionInput: string | null = null;
 
 /** Streamdown's `parseMarkdownIntoBlocks`. */
 export const parseMarkdownIntoBlocks = (markdown: string): string[] => {
   if (hasFootnotes(markdown)) return [markdown];
-  const input = markdown.includes("\r") ? markdown.replace(lineEndingPattern, "\n") : markdown;
+  const input = hasCarriageReturn(markdown)
+    ? markdown.replace(lineEndingPattern, "\n")
+    : markdown;
   // A text unlike the last one (another message) may have been cut before.
   const unlike = !lastParse || commonPrefix(lastParse.input, input) < input.length >> 1;
   const known = unlike ? cuts.get(input) : undefined;

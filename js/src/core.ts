@@ -119,17 +119,29 @@ export function createRill<A extends unknown[]>(
   // Texts healed whole (a message that does not stream, mounted again or repeated).
   const healedWhole = new Lru<string, string>(64);
   const heal = remend
-    ? (text: string) => {
+    ? (text: string): string | null => {
+        // A slice compared with === is V8's bulk comparison; startsWith goes unit by unit.
         const appended =
-          last !== null && text.startsWith(last) ? text.slice(last.length) : null;
+          last !== null && text.length >= last.length && text.slice(0, last.length) === last
+            ? text.slice(last.length)
+            : null;
         if (appended === null) {
           const known = healedWhole.get(text);
           if (known !== undefined) return known;
         }
+        // The text so far was well formed (it ends on no lone half of a pair), so the
+        // text is well formed when what it appends is.
+        if (!(appended ?? text).isWellFormed()) {
+          last = null;
+          return null;
+        }
         // Unknown until this call returns (it may throw).
         last = null;
         const keep = remend.stream(appended ?? text, appended === null);
-        const healed = lastHealed.slice(0, keep) + remend.middle();
+        // Appending keeps the last healed text whole (no copy of it).
+        const middle = remend.middle();
+        const healed =
+          keep === lastHealed.length ? lastHealed + middle : lastHealed.slice(0, keep) + middle;
         noteKept(lastHealed, healed, keep);
         last = text;
         lastHealed = healed;
@@ -200,10 +212,6 @@ export function createRill<A extends unknown[]>(
     ...(heal
       ? {
           remend: (text: string) => {
-            if (!text.isWellFormed()) {
-              last = null;
-              return null;
-            }
             try {
               return heal(text);
             } catch {

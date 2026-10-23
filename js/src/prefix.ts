@@ -16,7 +16,10 @@ export function commonPrefix(before: string, after: string): number {
   let length = 0;
   // Native comparisons of shrinking chunks instead of a loop over every unit.
   for (let chunk = 4096; chunk >= 1; chunk >>= 3) {
-    while (length + chunk <= limit && after.startsWith(before.slice(length, length + chunk), length)) {
+    while (
+      length + chunk <= limit &&
+      after.slice(length, length + chunk) === before.slice(length, length + chunk)
+    ) {
       length += chunk;
     }
   }

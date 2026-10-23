@@ -114,7 +114,13 @@ impl Stream {
             if let Some(previous) = &previous_whole {
                 return common_prefix(previous, new);
             }
-            let head = common_prefix(&work[..known], &new[..known.min(new.len())]);
+            // The settled text only grows, so the new text keeps `work[..known]` when it
+            // starts with the settled prefix (the fast path); a whole-text heal may not.
+            let head = if std::ptr::eq(work, new) {
+                known
+            } else {
+                common_prefix(&work[..known], &new[..known.min(new.len())])
+            };
             if head < known {
                 return head;
             }
@@ -1343,10 +1349,77 @@ fn first_tag_start(view: &View<'_>, from: usize) -> Option<usize> {
 /// The `[`s from `from` with no `]` to close them (`findMatchingClosingBracket`, which
 /// counts every bracket), pushed onto `open`; and for each `](`, the `[` it closes
 /// (`findMatchingOpeningBracket`), the last one into `last_link`.
+/// A stack of open `[`s: the settled prefix's, less those closed since, then the ones
+/// opened after it.
+struct Brackets<'p> {
+    settled: &'p [usize],
+    /// How many of `settled` (from its end) are closed.
+    closed: usize,
+    after: Vec<usize>,
+}
+
+impl<'p> Brackets<'p> {
+    fn new(settled: &'p [usize]) -> Self {
+        Brackets {
+            settled,
+            closed: 0,
+            after: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, index: usize) {
+        self.after.push(index);
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        self.after.pop().or_else(|| {
+            let open = self.settled.len() - self.closed;
+            (open > 0).then(|| {
+                self.closed += 1;
+                self.settled[open - 1]
+            })
+        })
+    }
+
+    /// The open ones, last first.
+    fn rev(&self) -> impl Iterator<Item = usize> + '_ {
+        let open = self.settled.len() - self.closed;
+        self.after
+            .iter()
+            .rev()
+            .chain(self.settled[..open].iter().rev())
+            .copied()
+    }
+}
+
+/// A `Vec` of open `[`s is a [`Brackets`] with nothing settled.
+trait OpenBrackets {
+    fn push(&mut self, index: usize);
+    fn pop(&mut self) -> Option<usize>;
+}
+
+impl OpenBrackets for Vec<usize> {
+    fn push(&mut self, index: usize) {
+        Vec::push(self, index);
+    }
+    fn pop(&mut self) -> Option<usize> {
+        Vec::pop(self)
+    }
+}
+
+impl OpenBrackets for Brackets<'_> {
+    fn push(&mut self, index: usize) {
+        Brackets::push(self, index);
+    }
+    fn pop(&mut self) -> Option<usize> {
+        Brackets::pop(self)
+    }
+}
+
 fn pair_brackets(
     text: &[u16],
     from: usize,
-    open: &mut Vec<usize>,
+    open: &mut impl OpenBrackets,
     last_link: &mut Option<(usize, Option<usize>)>,
 ) {
     for_each_unit2(&text[from..], OPEN_BRACKET, CLOSE_BRACKET, |offset| {
@@ -1892,7 +1965,7 @@ fn heal_trailing_link_or_image(ctx: &mut Ctx<'_>) -> Option<bool> {
         ctx.prefix.last_link.map(|(paren, _)| paren),
     );
     // The brackets after the settled prefix, from the prefix's open ones.
-    let mut open = ctx.prefix.open_brackets.clone();
+    let mut open = Brackets::new(&ctx.prefix.open_brackets);
     let mut last_link = ctx.prefix.last_link;
     pair_brackets(&ctx.text, split, &mut open, &mut last_link);
     if let Some(paren) = paren {
@@ -1928,7 +2001,7 @@ fn heal_trailing_link_or_image(ctx: &mut Ctx<'_>) -> Option<bool> {
     }
     // The last `[` outside code with no matching `]`.
     let view = ctx.view();
-    let Some(&i) = open.iter().rev().find(|&&i| !view.code_at(i as isize)) else {
+    let Some(i) = open.rev().find(|&i| !view.code_at(i as isize)) else {
         return Some(false);
     };
     let image = i > 0 && ctx.text[i - 1] == BANG;
@@ -2194,35 +2267,61 @@ mod whole_timing {
 }
 
 #[cfg(test)]
-mod probe {
-    #[test]
-    #[ignore = "probe"]
-    fn stream_probe() {
-        let text = std::fs::read_to_string(std::env::var("REMEND_DOC").unwrap()).unwrap();
+mod stream_cost {
+    use std::time::{Duration, Instant};
+
+    /// The time of the last 64 updates of `text` streamed 24 units at a time, best of 3.
+    fn last_updates(text: &str) -> Duration {
         let chars: Vec<char> = text.chars().collect();
-        let mut stream = super::Stream::default();
-        let mut whole = 0;
-        let start = std::time::Instant::now();
-        let mut updates = 0;
-        for chunk in chars.chunks(24) {
-            let appended: String = chunk.iter().collect();
-            stream.heal(&appended, updates == 0);
-            if stream.whole.is_some() {
-                whole += 1;
+        let chunks: Vec<String> = chars
+            .chunks(24)
+            .map(|chunk| chunk.iter().collect())
+            .collect();
+        let timed = chunks.len() - 64;
+        (0..3)
+            .map(|_| {
+                let mut stream = super::Stream::default();
+                let mut start = Instant::now();
+                for (index, chunk) in chunks.iter().enumerate() {
+                    if index == timed {
+                        start = Instant::now();
+                    }
+                    stream.heal(chunk, index == 0);
+                }
+                start.elapsed()
+            })
+            .min()
+            .expect("three rounds")
+    }
+
+    /// Per-update cost follows the text after the settled prefix, not the whole text:
+    /// doubling the text does not double it.
+    #[test]
+    fn per_update_cost_does_not_grow_with_the_text() {
+        let units = [
+            "Text with **bold**, *em*, _under_, ~~gone~~, `code`, [a](https://x.y/a_b) and 3 > 2.\n",
+            "- item *one* with $5 and a_b\n- [link](url) **two**\n\n",
+            "```js\nconst a = [1, 2] > 0 ? '*' : '_';\n```\n\n",
+            // A lone `*` and `[` early stay unmatched for the whole text.
+            "Lone * star and [ bracket, then more text.\n\n",
+        ];
+        for unit in units {
+            let sizes = [8192, 16384, 32768, 65536];
+            let times: Vec<Duration> = sizes
+                .iter()
+                .map(|&size| last_updates(&unit.repeat(size / unit.len() + 1)))
+                .collect();
+            let report = format!("{unit:?}: {times:?}");
+            for pair in times.windows(2) {
+                assert!(
+                    pair[1] <= pair[0].mul_f64(2.2) + Duration::from_micros(200),
+                    "{report}"
+                );
             }
-            updates += 1;
+            assert!(
+                times[3] <= times[0].mul_f64(4.0) + Duration::from_micros(200),
+                "{report}"
+            );
         }
-        let elapsed = start.elapsed();
-        let start = std::time::Instant::now();
-        let units: Vec<u16> = text.encode_utf16().collect();
-        for end in (24..units.len()).step_by(24) {
-            super::remend_units(&units[..end]);
-        }
-        println!(
-            "updates {updates} whole {whole} settled {} of {}: stream {elapsed:?}, whole texts {:?}",
-            stream.settled,
-            stream.input.len(),
-            start.elapsed()
-        );
     }
 }

@@ -341,7 +341,11 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                     .map(|child| self.need(child))
                     .max()
                     .unwrap_or(Need::Html)
-                    .max(if adjacent_text { Need::React } else { Need::Html });
+                    .max(if adjacent_text {
+                        Need::React
+                    } else {
+                        Need::Html
+                    });
                 if tag == "table" {
                     inner.max(Need::React)
                 } else {
