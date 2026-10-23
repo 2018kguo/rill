@@ -1,0 +1,16 @@
+/* A chat app's stylesheet: Tailwind v4 over Streamdown's classes, as Streamdown's
+   README sets it up, with shadcn-style color tokens. */
+@import "tailwindcss";
+@import "../../node_modules/streamdown/styles.css";
+@source "../../node_modules/streamdown/dist/*.js";
+
+@theme {
+  --color-border: #e5e7eb;
+  --color-muted: #f4f4f5;
+  --color-muted-foreground: #71717a;
+  --color-primary: #18181b;
+  --color-primary-foreground: #fafafa;
+  --color-background: #ffffff;
+  --color-foreground: #09090b;
+  --color-sidebar: #fafafa;
+}

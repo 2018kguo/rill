@@ -72,10 +72,12 @@ function watch(ready: () => boolean, done: () => void) {
     const now = performance.now();
     if (!stats.content && ready()) {
       stats.content = now - stats.start!;
+      console.timeStamp("perf-content");
       if (params.has("marker")) contentMarker();
     }
     if (stats.content && now - lastMutation > 600) {
       stats.settled = lastMutation - stats.start!;
+      console.timeStamp("perf-done");
       done();
       return;
     }
@@ -120,6 +122,7 @@ const finish = () => {
 // The driver starts the scene once it has throttled the CPU.
 perf.start = () => {
   stats.start = performance.now();
+  console.timeStamp("perf-start");
   if (scene === "history") {
     createRoot(root).render(createElement(History));
     const tables = 20 * 2;

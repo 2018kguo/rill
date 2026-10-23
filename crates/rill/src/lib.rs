@@ -10,6 +10,7 @@
 pub mod hast;
 pub mod markup;
 pub mod mdast;
+pub mod remend;
 
 mod autolink;
 mod json;
@@ -101,6 +102,12 @@ pub mod wasm {
 
         use super::RenderedHast;
         use crate::{MarkupOptions, Options};
+
+        /// remend 1.4.0 with its default options (see [`crate::remend`]).
+        #[wasm_bindgen(js_name = remend)]
+        pub fn remend(text: &str) -> String {
+            crate::remend::remend(text)
+        }
 
         /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
         /// `linkSafety.enabled`, bit 1 server rendering; `overrides`: the tag names

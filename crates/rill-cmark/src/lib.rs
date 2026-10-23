@@ -40,6 +40,12 @@ mod tree;
 mod unicode_tables;
 
 pub use crate::parse::{OffsetIter, Parser};
+
+/// Whether `c` is a letter or number (`/[\p{L}\p{N}]/u`), as remend reads word
+/// characters.
+pub fn letter_or_number(c: char) -> bool {
+    unicode_tables::in_table(unicode_tables::LETTER_OR_NUMBER, c)
+}
 pub use crate::scanners::decode_string;
 pub use crate::strings::{CowStr, InlineStr};
 

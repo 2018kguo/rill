@@ -64,7 +64,7 @@ export {
   type RillPluginsOptions,
 } from "./plugins.ts";
 export { useRill } from "./react.ts";
-export { setHighlightWorker } from "./highlight.ts";
+export { pendingHighlights, setHighlightWorker } from "./highlight.ts";
 
 /** What `Block` needs from `<Streamdown>`'s props that its own props lack. */
 type Settings = {
@@ -143,16 +143,47 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
     [plugins, prefix, fallbackComponent]
   );
   useEffect(load, []);
+  // Streamdown repairs streaming Markdown with remend before splitting it into blocks;
+  // rill's port gives the same text, so Streamdown is told not to.
+  const rill = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const { children } = props;
+  const heals =
+    typeof children === "string" &&
+    props.mode !== "static" &&
+    props.parseIncompleteMarkdown !== false &&
+    props.remend === undefined;
+  const healed = useMemo(
+    () => (heals && rill?.remend ? rill.remend(children as string) : null),
+    [heals, rill, children]
+  );
   return createElement(
     RillContext.Provider,
     { value: settings },
     createElement(StreamdownComponent, {
       ...props,
-      BlockComponent: props.BlockComponent ?? Block,
+      ...(healed === null ? {} : { children: healed, parseIncompleteMarkdown: false }),
+      BlockComponent: props.BlockComponent
+        ? healed === null
+          ? props.BlockComponent
+          : healingBlock(props.BlockComponent)
+        : Block,
     })
   );
 }, sameStreamdownProps as never);
 (Streamdown as { displayName?: string }).displayName = "Streamdown";
+
+const healingBlocks = new WeakMap<object, ComponentType<BlockProps>>();
+
+/** The page's own BlockComponent, told (as Streamdown would) that remend ran. */
+function healingBlock(component: ComponentType<BlockProps>): ComponentType<BlockProps> {
+  let wrapped = healingBlocks.get(component);
+  if (!wrapped) {
+    wrapped = (props: BlockProps) =>
+      createElement(component, { ...props, shouldParseIncompleteMarkdown: true });
+    healingBlocks.set(component, wrapped);
+  }
+  return wrapped;
+}
 
 // ---------------------------------------------------------------------------------
 // Which blocks rill renders

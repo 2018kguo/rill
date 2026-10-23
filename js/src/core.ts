@@ -46,6 +46,9 @@ export type Rill<A extends unknown[] = []> = {
     syntax: Syntax,
     options: MarkupOptions
   ) => HastReader | null;
+  /** remend 1.4.0 with its default options (Streamdown's streaming repair), or `null`
+   * for text it cannot take (lone surrogates). Builds with the export only. */
+  remend?: (text: string) => string | null;
 };
 
 /** The `<Streamdown>` props the markup depends on (`rill::MarkupOptions`). */
@@ -86,7 +89,8 @@ export function createRill<A extends unknown[]>(
     cjk: boolean,
     ...args: A
   ) => RenderedHast,
-  renderMarkup?: RenderMarkup
+  renderMarkup?: RenderMarkup,
+  remend?: (text: string) => string
 ): Rill<A> {
   const markup = renderMarkup
     ? (source: string, syntax: Syntax, options: MarkupOptions) => {
@@ -114,6 +118,9 @@ export function createRill<A extends unknown[]>(
     : undefined;
   return {
     ...(markup ? { markup } : {}),
+    ...(remend
+      ? { remend: (text: string) => (text.isWellFormed() ? remend(text) : null) }
+      : {}),
     render(raw, syntax = {}, ...args) {
       const encoded = encodeLoneSurrogates(raw);
       if (encoded === null) {

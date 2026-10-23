@@ -14,11 +14,25 @@ const scope = globalThis as unknown as {
   onmessage: ((event: { data: Message }) => void) | null;
 };
 
+type Result = NonNullable<ReturnType<typeof code.highlight>>;
+
+/** The rows last sent per highlighter (language and themes). Shiki keeps the rows of
+ * finished lines as they were, so a reply sends only rows that are not the ones sent at
+ * the same index last time (`null` for those), and the page rebuilds the rest. */
+const sent = new Map<string, Result["tokens"]>();
+
 function run() {
   scheduled = false;
   const request = queue.shift();
   if (!request) return;
-  const reply = (result: unknown) => scope.postMessage({ id: request.id, result });
+  const { options } = request;
+  const channel = `${options.language}\0${JSON.stringify(options.themes)}`;
+  const reply = (result: Result) => {
+    const previous = sent.get(channel) ?? [];
+    const rows = result.tokens.map((row, index) => (previous[index] === row ? null : row));
+    sent.set(channel, result.tokens);
+    scope.postMessage({ id: request.id, channel, result: { ...result, tokens: rows } });
+  };
   const cached = code.highlight(request.options, reply);
   if (cached) reply(cached);
   schedule();

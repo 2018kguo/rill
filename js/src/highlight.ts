@@ -46,6 +46,8 @@ let worker: Worker | null | undefined;
 const pending = new Map<number, Pending>();
 const cache = new Map<string, Result>();
 let nextId = 0;
+/** The rows last received per highlighter channel (see highlight-worker.ts). */
+const received = new Map<string, Result["tokens"]>();
 let failedPlugin: CodePlugin | undefined;
 
 function startWorker(plugin: CodePlugin): Worker | null {
@@ -58,7 +60,14 @@ function startWorker(plugin: CodePlugin): Worker | null {
     worker = null;
     return null;
   }
-  worker.onmessage = ({ data }: MessageEvent<{ id: number; result: Result }>) => {
+  worker.onmessage = ({
+    data,
+  }: MessageEvent<{ id: number; channel: string; result: Result }>) => {
+    // Rows the worker left out are the ones it sent at that index last time.
+    const previous = received.get(data.channel) ?? [];
+    const tokens = data.result.tokens.map((row, index) => row ?? previous[index] ?? []);
+    received.set(data.channel, tokens);
+    data.result.tokens = tokens;
     const request = pending.get(data.id);
     if (!request) return;
     pending.delete(data.id);
@@ -123,6 +132,11 @@ const inWorker: Highlighter = {
     }
   },
 };
+
+/** How many highlight requests the worker has not answered (for tests). */
+export function pendingHighlights(): number {
+  return pending.size;
+}
 
 /** The highlighter for `plugins.code`, or `undefined` without one. */
 export function highlighterFor(plugin: CodePlugin | undefined): Highlighter | undefined {

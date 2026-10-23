@@ -13,6 +13,7 @@ import { math } from "@streamdown/math";
 import {
   Block as RillBlock,
   blockRenders,
+  pendingHighlights,
   Streamdown as RillStreamdown,
 } from "../../js/src/streamdown.ts";
 import { initRill } from "../../js/src/index.ts";
@@ -76,6 +77,8 @@ const candidates: Record<string, Component> = {
   rill: RillStreamdown as never,
 };
 
+/** Resolves once `element` has not changed for `quietMs` and no highlighting is in
+ * flight in rill's worker (whose answers can take longer than the quiet period). */
 function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promise<void> {
   return new Promise((resolve) => {
     let timer = setTimeout(done, quietMs);
@@ -83,6 +86,8 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
       clearTimeout(timer);
       timer = setTimeout(done, quietMs);
     });
+    const finish = done;
+    const started = performance.now();
     const deadline = setTimeout(done, timeoutMs);
     observer.observe(element, {
       subtree: true,
@@ -91,6 +96,10 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
       characterData: true,
     });
     function done() {
+      if (pendingHighlights() > 0 && performance.now() < started + timeoutMs) {
+        timer = setTimeout(finish, quietMs);
+        return;
+      }
       observer.disconnect();
       clearTimeout(timer);
       clearTimeout(deadline);

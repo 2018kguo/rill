@@ -25,11 +25,18 @@ const scenes = option("--scenes", "history,table,code").split(",");
 const engines = option("--engines", "streamdown,rill").split(",");
 const step = option("--step", "24");
 const profile = args.includes("--profile");
+const breakdown = args.includes("--breakdown");
 
 if (args.includes("--build") || !existsSync(join(dist, "perf.js"))) {
   // The page, and the highlighting worker beside it (js/src/highlight.ts loads it
   // from next to the bundle).
   for (const entry of [join(here, "perf.tsx"), join(here, "../../js/src/highlight-worker.ts")]) build(entry);
+  // The app's stylesheet: real layout, as in a Tailwind app.
+  const css = spawnSync("npx", ["@tailwindcss/cli", "-i", join(here, "app.css"), "-o", join(dist, "app.css")], { encoding: "utf8" });
+  if (css.status !== 0) {
+    console.error(css.stderr);
+    process.exit(1);
+  }
 }
 
 function build(entry) {
@@ -47,7 +54,7 @@ function build(entry) {
   copyFileSync(join(here, "../../js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
 }
 
-const types = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
+const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm" };
 const server = createServer(async (request, response) => {
   const path = join(dist, decodeURIComponent(new URL(request.url, "http://x").pathname));
   try {
@@ -100,7 +107,73 @@ function report(engine, profile) {
   console.log("  self:");
   for (const [key, count] of [...self].sort((a, b) => b[1] - a[1]).slice(0, 18)) console.log(`  ${ms(count)} ${key}`);
   console.log("  inclusive:");
-  for (const [key, count] of [...inclusive].sort((a, b) => b[1] - a[1]).slice(0, 30)) console.log(`  ${ms(count)} ${key}`);
+  for (const [key, count] of [...inclusive].sort((a, b) => b[1] - a[1]).slice(0, Number(option("--top", "30")))) console.log(`  ${ms(count)} ${key}`);
+}
+
+/** Splits the renderer main thread's time, from the start of the scene to the content
+ * appearing and to the DOM settling, into script, style, layout, paint, HTML parsing,
+ * GC, other work and idle. */
+async function traceBreakdown(engine, cdp) {
+  const complete = new Promise((resolve) => cdp.once("Tracing.tracingComplete", resolve));
+  await cdp.send("Tracing.end");
+  const { stream } = await complete;
+  let text = "";
+  for (;;) {
+    const chunk = await cdp.send("IO.read", { handle: stream, size: 1 << 20 });
+    text += chunk.base64Encoded ? Buffer.from(chunk.data, "base64").toString() : chunk.data;
+    if (chunk.eof) break;
+  }
+  await cdp.send("IO.close", { handle: stream });
+  const parsed = JSON.parse(text);
+  const events = Array.isArray(parsed) ? parsed : parsed.traceEvents;
+  const main = events.find((event) => event.name === "thread_name" && event.args?.name === "CrRendererMain");
+  const onMain = events.filter((event) => event.pid === main.pid && event.tid === main.tid);
+  const stamp = (name) => onMain.find((event) => event.name === "TimeStamp" && event.args?.data?.message === name)?.ts;
+  const start = stamp("perf-start");
+  const marks = { content: stamp("perf-content"), settled: stamp("perf-done") };
+  const category = (name) =>
+    /^(FunctionCall|EvaluateScript|v8\.|TimerFire|FireAnimationFrame|EventDispatch|RunMicrotasks|v8|V8|ParseOnBackground|Compile|CompileCode|FireIdleCallback|XHR|WebAssembly)/.test(name) ? "script"
+    : /^(MessagePort|SerializedScriptValue|PostMessage)/.test(name) ? "script"
+    : /UpdateLayoutTree|RecalculateStyles|updateStyle|recalcStyle|rebuildLayoutTree|StyleEngine/.test(name) ? "style"
+    : /^Layout$|performLayout|ShapeText|LayoutNG|InlineNode/.test(name) ? "layout"
+    : /^(Paint|PrePaint|Layerize|UpdateLayer|CompositeLayers|Commit|RasterTask|PaintImage)|Paint|Compositing|UpdateLifecycle|Layerize/.test(name) ? "paint"
+    : name === "ParseHTML" || name === "ParseAuthorStyleSheet" ? "parse HTML/CSS"
+    : /GC|Scavenge|MarkCompact|Sweep/.test(name) ? "GC"
+    : "other";
+  // Self time of nested complete events on the main thread.
+  const spans = onMain.filter((event) => event.ph === "X" && event.dur > 0).sort((a, b) => a.ts - b.ts || b.dur - a.dur);
+  for (const [label, end] of Object.entries(marks)) {
+    if (!end) continue;
+    const totals = {};
+    const others = {};
+    const stack = [];
+    let busy = 0;
+    const clip = (span) => Math.max(0, Math.min(span.ts + span.dur, end) - Math.max(span.ts, start));
+    for (const span of spans) {
+      while (stack.length && stack.at(-1).ts + stack.at(-1).dur <= span.ts) stack.pop();
+      const own = clip(span);
+      const parent = stack.at(-1);
+      if (parent) {
+        // The parent's self time excludes this child.
+        const name = category(parent.name);
+        totals[name] = (totals[name] ?? 0) - own;
+      } else {
+        busy += own;
+      }
+      const name = category(span.name);
+      totals[name] = (totals[name] ?? 0) + own;
+      if (name === "other") others[span.name] = (others[span.name] ?? 0) + own;
+      if (parent && category(parent.name) === "other") others[parent.name] = (others[parent.name] ?? 0) - own;
+      stack.push(span);
+    }
+    if (process.env.PERF_OTHERS) console.log(Object.entries(others).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([n, v]) => `${n} ${(v / 1000).toFixed(0)}`).join(", "));
+    const wall = end - start;
+    const parts = Object.entries(totals)
+      .filter(([, value]) => value > 500)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name, value]) => `${name} ${(value / 1000).toFixed(0)}`);
+    console.log(`  ${engine} until ${label} (${(wall / 1e6).toFixed(2)} s): idle ${((wall - busy) / 1000).toFixed(0)} ms, busy ${(busy / 1000).toFixed(0)} ms = ${parts.join(", ")} (ms)`);
+  }
 }
 
 const browser = await chromium.launch();
@@ -126,6 +199,12 @@ for (const scene of scenes) {
       const taskTime = async () =>
         (await cdp.send("Performance.getMetrics")).metrics.find((metric) => metric.name === "TaskDuration").value;
       const before = await taskTime();
+      if (breakdown) {
+        await cdp.send("Tracing.start", {
+          categories: "devtools.timeline,disabled-by-default-devtools.timeline,v8,blink",
+          transferMode: "ReturnAsStream",
+        });
+      }
       await page.evaluate(() => window.perf.start());
       // Polled rarely: Playwright's own polling would run on the measured main thread.
       await page.waitForFunction(() => document.body.dataset.done === "true", undefined, {
@@ -135,6 +214,7 @@ for (const scene of scenes) {
       // Main-thread time (throttled), less the 600 ms quiet wait's idle frames.
       const busy = (await taskTime()) - before;
       if (profile) report(engine, (await cdp.send("Profiler.stop")).profile);
+      if (breakdown) await traceBreakdown(engine, cdp);
       const stats = { ...(await page.evaluate(() => window.perf.stats)), busy: busy * 1000 };
       (results[engine] ??= []).push(stats);
       await page.close();

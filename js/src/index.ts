@@ -15,6 +15,7 @@ type Glue = {
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
   renderHast(source: string, math: boolean, cjk: boolean): RenderedHast;
   renderMarkup: RenderMarkup;
+  remend(text: string): string;
 };
 
 const glue = (): Promise<Glue> => import("../wasm/rill.js");
@@ -28,8 +29,58 @@ export function loadedRill(): Rill | null {
 }
 
 function ready(bindings: Glue): Rill {
-  loaded ??= createRill(bindings.renderHast, bindings.renderMarkup);
+  if (!loaded) {
+    loaded = createRill(bindings.renderHast, bindings.renderMarkup, bindings.remend);
+    warmUp(loaded);
+  }
   return loaded;
+}
+
+// A little of everything Streamdown renders.
+const SAMPLE = `# Heading **bold** *em* ~~del~~ \`code\`
+
+Text with a [link](https://example.com), www.example.com and a footnote[^1].
+
+- item one
+- [x] done
+  1. nested
+
+> quote
+
+| a | b |
+|:--|--:|
+| 1 | **2** |
+
+\`\`\`ts
+const x = 1;
+\`\`\`
+
+[^1]: note
+`;
+
+/**
+ * Renders a sample a few times in idle moments after loading: the engine compiles
+ * WebAssembly in tiers and tiers a function up once it has run a while, and memory
+ * grows to its working size, so the first real render runs at full speed.
+ */
+function warmUp(rill: Rill) {
+  if (typeof setTimeout !== "function") return;
+  let rounds = 16;
+  const options = { prefix: "", linkSafety: true, ssr: false, overrides: "" };
+  const round = () => {
+    try {
+      rill.markup?.(SAMPLE.repeat(8), {}, options);
+      rill.render(SAMPLE, {});
+    } catch {
+      return;
+    }
+    rounds -= 1;
+    if (rounds > 0) schedule();
+  };
+  const idle = (globalThis as { requestIdleCallback?: (run: () => void) => unknown })
+    .requestIdleCallback;
+  const schedule = () => (idle ? idle(round) : setTimeout(round, 0));
+  schedule();
 }
 
 /** Fetches the prebuilt WebAssembly (Streamdown's pipeline) once and returns rill. */
