@@ -53,16 +53,84 @@ pub enum Inst {
 pub const NO_FOLLOW: u32 = u32::MAX;
 
 #[derive(Debug, Clone)]
-pub struct AltEntry {
-    pub pc: u32,
+struct AltEntry {
+    pc: u32,
     /// The code unit at the position must be in this set for the alternative to match.
-    pub guard: Option<FirstUnits>,
+    guard: Option<FirstUnits>,
+}
+
+/// Alternatives in priority order with, per code unit class, a bitmask of the
+/// alternatives that can match there.
+#[derive(Debug, Clone)]
+pub struct AltTable {
+    pub pcs: Vec<u32>,
+    words: usize,
+    /// Rows: ASCII units 0-127, then any non-ASCII unit, then end of input.
+    masks: Vec<u64>,
+}
+
+impl AltTable {
+    fn new(entries: &[AltEntry]) -> Self {
+        let words = entries.len().div_ceil(64);
+        let mut masks = vec![0u64; 130 * words];
+        for (i, entry) in entries.iter().enumerate() {
+            for row in 0..130usize {
+                let viable = match (&entry.guard, row) {
+                    (None, _) => true,
+                    (Some(_), 129) => false,
+                    (Some(guard), 128) => guard.non_ascii,
+                    (Some(guard), unit) => guard.may_start(unit as u16),
+                };
+                if viable {
+                    masks[row * words + i / 64] |= 1 << (i % 64);
+                }
+            }
+        }
+        Self { pcs: entries.iter().map(|e| e.pc).collect(), words, masks }
+    }
+
+    /// The first alternative at or after `from` viable before `unit` (None: end of
+    /// input), and whether another one follows it.
+    #[inline]
+    pub fn next(&self, unit: Option<u16>, from: usize) -> Option<(usize, bool)> {
+        let row = match unit {
+            Some(u) if u < 128 => u as usize,
+            Some(_) => 128,
+            None => 129,
+        };
+        let masks = &self.masks[row * self.words..(row + 1) * self.words];
+        let mut word = from / 64;
+        let mut found = None;
+        while word < self.words {
+            let mut bits = masks[word];
+            if word == from / 64 {
+                bits &= u64::MAX.checked_shl((from % 64) as u32).unwrap_or(0);
+            }
+            if bits != 0 {
+                let index = word * 64 + bits.trailing_zeros() as usize;
+                match found {
+                    None => {
+                        found = Some(index);
+                        // Look for a second viable alternative after this one.
+                        let rest = bits & !(1u64 << (index % 64));
+                        let rest = rest & u64::MAX.checked_shl((index % 64) as u32 + 1).unwrap_or(0);
+                        if rest != 0 {
+                            return Some((index, true));
+                        }
+                    }
+                    Some(index) => return Some((index, true)),
+                }
+            }
+            word += 1;
+        }
+        found.map(|index| (index, false))
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Program {
     pub insts: Vec<Inst>,
-    pub alt_tables: Vec<Vec<AltEntry>>,
+    pub alt_tables: Vec<AltTable>,
     pub follows: Vec<FirstUnits>,
     pub sets: Vec<RuntimeSet>,
     /// Backreference group lists, indexed by `Inst::Backref::groups`.
@@ -167,7 +235,7 @@ pub fn compile(node: Node, group_count: u32) -> Program {
 
 struct Compiler {
     insts: Vec<Inst>,
-    alt_tables: Vec<Vec<AltEntry>>,
+    alt_tables: Vec<AltTable>,
     follows: Vec<FirstUnits>,
     sets: Vec<RuntimeSet>,
     backref_groups: Vec<Vec<u32>>,
@@ -224,7 +292,7 @@ impl Compiler {
                 // Alternatives in order; each is skipped when the code unit at the
                 // position cannot start it.
                 let table = self.alt_tables.len() as u32;
-                self.alt_tables.push(Vec::new());
+                self.alt_tables.push(AltTable::new(&[]));
                 self.insts.push(Inst::AltTable { table });
                 let mut entries = Vec::with_capacity(alternatives.len());
                 let mut jumps = Vec::new();
@@ -239,7 +307,7 @@ impl Compiler {
                 for jump in jumps {
                     self.insts[jump as usize] = Inst::Jump { to: end };
                 }
-                self.alt_tables[table as usize] = entries;
+                self.alt_tables[table as usize] = AltTable::new(&entries);
             }
             Node::Alt(alternatives) => {
                 let mut jumps = Vec::new();

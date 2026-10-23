@@ -10,7 +10,8 @@ const highlighter = await createHighlighter({ themes: ['github-light', 'github-d
 const options = { lang, themes: { light: 'github-light', dark: 'github-dark' } };
 highlighter.codeToTokens(code, options);
 const coldMs = performance.now() - t0;
-let runs = 0;
-const t1 = performance.now();
-while (performance.now() - t1 < 1000 || runs < 3) { highlighter.codeToTokens(code, options); runs++; }
-console.log(JSON.stringify({ lang, coldMs, warmMs: (performance.now() - t1) / runs }));
+// The minimum of several runs after warming up: the machine may be shared.
+for (let i = 0; i < 3; i++) { highlighter.codeToTokens(code, options); }
+let warmMs = Infinity;
+for (let i = 0; i < 9; i++) { const t = performance.now(); highlighter.codeToTokens(code, options); warmMs = Math.min(warmMs, performance.now() - t); }
+console.log(JSON.stringify({ lang, coldMs, warmMs }));

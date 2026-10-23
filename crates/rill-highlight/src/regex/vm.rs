@@ -500,17 +500,12 @@ impl Matcher {
     /// The first viable alternative of `table` from index `from` on; pushes a frame
     /// for the ones after it.
     fn next_alternative(&mut self, program: &Program, input: &[u16], table: u32, from: usize, pos: usize) -> Option<usize> {
-        let entries = &program.alt_tables[table as usize];
-        let unit = input.get(pos).copied();
-        let viable = |entry: &super::compile::AltEntry| match &entry.guard {
-            None => true,
-            Some(guard) => unit.is_some_and(|unit| guard.may_start(unit)),
-        };
-        let index = (from..entries.len()).find(|&i| viable(&entries[i]))?;
-        if (index + 1..entries.len()).any(|i| viable(&entries[i])) {
+        let table_data = &program.alt_tables[table as usize];
+        let (index, more) = table_data.next(input.get(pos).copied(), from)?;
+        if more {
             self.stack.push(Frame::AltTable { table, next: index as u32 + 1, pos: pos as u32 });
         }
-        Some(entries[index].pc as usize)
+        Some(table_data.pcs[index] as usize)
     }
 
     fn keep_undo_records(&mut self, base: usize) {

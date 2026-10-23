@@ -120,27 +120,26 @@ impl CharSet {
     /// Adds every code point that is case-equivalent to a member (simple case
     /// folding, as V8 applies it under the `i` flag with `u` or `v`).
     pub fn case_closure(&self) -> CharSet {
-        let mut representatives: Vec<u32> = Vec::new();
-        for &(c, rep) in CASE_FOLDS {
-            if self.contains(c) || self.contains(rep) {
-                representatives.push(rep);
+        let folding = folding();
+        let mut extra: Vec<(u32, u32)> = Vec::new();
+        // Walk the members that have case variants (sorted) against the ranges.
+        let mut range = 0;
+        for &(c, class) in &folding.members {
+            while range < self.ranges.len() && self.ranges[range].1 < c {
+                range += 1;
+            }
+            if range == self.ranges.len() {
+                break;
+            }
+            if self.ranges[range].0 <= c {
+                extra.extend(folding.classes[class as usize].iter().map(|&m| (m, m)));
             }
         }
-        if representatives.is_empty() {
+        if extra.is_empty() {
             return self.clone();
         }
-        representatives.sort_unstable();
-        representatives.dedup();
-        let mut ranges = self.ranges.clone();
-        for &rep in &representatives {
-            ranges.push((rep, rep));
-        }
-        for &(c, rep) in CASE_FOLDS {
-            if representatives.binary_search(&rep).is_ok() {
-                ranges.push((c, c));
-            }
-        }
-        let mut set = CharSet { ranges };
+        let mut set = CharSet { ranges: self.ranges.clone() };
+        set.ranges.extend(extra);
         set.normalize();
         set
     }
@@ -159,6 +158,28 @@ impl CharSet {
         }
         self.ranges = merged;
     }
+}
+
+/// Case folding classes with more than one member.
+struct Folding {
+    /// Every code point in a non-trivial class, sorted, with its class index.
+    members: Vec<(u32, u32)>,
+    classes: Vec<Vec<u32>>,
+}
+
+fn folding() -> &'static Folding {
+    static FOLDING: std::sync::OnceLock<Folding> = std::sync::OnceLock::new();
+    FOLDING.get_or_init(|| {
+        let mut by_representative: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
+        for &(c, rep) in CASE_FOLDS {
+            let class = by_representative.entry(rep).or_insert_with(|| vec![rep]);
+            class.push(c);
+        }
+        let classes: Vec<Vec<u32>> = by_representative.into_values().collect();
+        let mut members: Vec<(u32, u32)> = classes.iter().enumerate().flat_map(|(i, class)| class.iter().map(move |&c| (c, i as u32))).collect();
+        members.sort_unstable();
+        Folding { members, classes }
+    })
 }
 
 /// The representative of `c`'s simple case folding class (its smallest member).

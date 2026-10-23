@@ -359,6 +359,9 @@ pub struct Grammar {
     regex_ids: HashMap<Rc<str>, u32>,
     dynamic_regex_ids: HashMap<(Rc<str>, Rc<[Vec<u16>]>), u32>,
     compiled: HashMap<(RuleId, u8, Option<Rc<[Vec<u16>]>>), Rc<CompiledRule>>,
+    /// Scanners of rules without back-referencing end patterns, by rule and
+    /// (allowA, allowG, while) slot.
+    static_scanners: Vec<[Option<Rc<CompiledRule>>; 8]>,
     collected: HashMap<(RuleId, bool), Rc<Vec<RegexSource>>>,
     search_cache: Vec<SearchCacheEntry>,
     matcher: RegexMatcher,
@@ -386,6 +389,7 @@ impl Grammar {
             regex_ids: HashMap::new(),
             dynamic_regex_ids: HashMap::new(),
             compiled: HashMap::new(),
+            static_scanners: Vec::new(),
             collected: HashMap::new(),
             search_cache: Vec::new(),
             matcher: RegexMatcher::default(),
@@ -715,6 +719,17 @@ impl Grammar {
     /// `compileAG` (or `compileWhileAG`): the scanner for `rule_id` with the end or
     /// while pattern resolved from `end_rule`.
     pub fn compile_ag(&mut self, rule_id: RuleId, end_rule: Option<&EndRule>, allow_a: bool, allow_g: bool, while_list: bool) -> Result<Rc<CompiledRule>, String> {
+        let slot = usize::from(allow_a) * 4 + usize::from(allow_g) * 2 + usize::from(while_list);
+        let index = rule_id as usize - 1;
+        if let Some(Some(compiled)) = self.static_scanners.get(index).map(|s| &s[slot]) {
+            return Ok(compiled.clone());
+        }
+        let compiled = self.compile_ag_uncached(rule_id, end_rule, allow_a, allow_g, while_list)?;
+        Ok(compiled)
+    }
+
+    fn compile_ag_uncached(&mut self, rule_id: RuleId, end_rule: Option<&EndRule>, allow_a: bool, allow_g: bool, while_list: bool) -> Result<Rc<CompiledRule>, String> {
+        let slot = usize::from(allow_a) * 4 + usize::from(allow_g) * 2 + usize::from(while_list);
         let sources = self.collected_sources(rule_id, while_list)?;
         let has_anchors = sources.iter().any(|s| s.has_anchor);
         let variant = if has_anchors { 1 + u8::from(allow_a) * 2 + u8::from(allow_g) } else { 0 } + if while_list { 8 } else { 0 };
@@ -750,6 +765,13 @@ impl Grammar {
         }
         let compiled = Rc::new(CompiledRule { regexes, rules });
         self.compiled.insert(key, compiled.clone());
+        if !dynamic {
+            let index = rule_id as usize - 1;
+            if self.static_scanners.len() <= index {
+                self.static_scanners.resize_with(index + 1, Default::default);
+            }
+            self.static_scanners[index][slot] = Some(compiled.clone());
+        }
         Ok(compiled)
     }
 
