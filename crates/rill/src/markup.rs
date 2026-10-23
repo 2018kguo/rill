@@ -330,11 +330,18 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             Some("img") => Need::React,
             Some(tag) => {
                 let children: Vec<NodeId> = self.tree.children(ix).collect();
+                // Adjacent text (harden's ` [blocked]` after a link's text) is one text
+                // node in parsed HTML, but React makes one per string.
+                let adjacent_text = !self.options.ssr
+                    && children
+                        .windows(2)
+                        .any(|pair| self.text(pair[0]).is_some() && self.text(pair[1]).is_some());
                 let inner = children
                     .into_iter()
                     .map(|child| self.need(child))
                     .max()
-                    .unwrap_or(Need::Html);
+                    .unwrap_or(Need::Html)
+                    .max(if adjacent_text { Need::React } else { Need::Html });
                 if tag == "table" {
                     inner.max(Need::React)
                 } else {

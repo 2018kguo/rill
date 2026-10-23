@@ -121,6 +121,15 @@ function mount(): { host: HTMLElement; root: Root } {
   return { host, root: createRoot(host) };
 }
 
+/** The host's HTML, and its text nodes' lengths: HTML parsing joins adjacent text that
+ * React keeps as separate nodes, which innerHTML does not show. */
+function snapshot(host: HTMLElement): string {
+  const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+  const lengths: number[] = [];
+  while (walker.nextNode()) lengths.push((walker.currentNode as Text).length);
+  return `${host.innerHTML}\n<!-- text nodes: ${lengths.join(" ")} -->`;
+}
+
 async function renderOne(component: Component, markdown: string, props: Record<string, unknown>) {
   const { host, root } = mount();
   root.render(
@@ -131,7 +140,7 @@ async function renderOne(component: Component, markdown: string, props: Record<s
     )
   );
   await settle(host, 250);
-  const html = host.innerHTML;
+  const html = snapshot(host);
   root.unmount();
   host.remove();
   return html;
@@ -151,7 +160,7 @@ async function renderSteps(component: Component, steps: [string, boolean][]) {
       )
     );
     await settle(host, 120);
-    out.push(host.innerHTML);
+    out.push(snapshot(host));
   }
   root.unmount();
   host.remove();

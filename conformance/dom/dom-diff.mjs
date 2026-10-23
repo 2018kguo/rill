@@ -11,7 +11,7 @@
 // streamed answer arrives: every Nth character of each document (`every`), and every
 // prefix of the shortest ones (`short` of them).
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
@@ -56,7 +56,7 @@ function build(entry) {
 }
 
 function corpus(name) {
-  if (name === "examples" || name === "chat" || existsSync(join(name, "."))) {
+  if (name === "examples" || name === "chat" || (existsSync(name) && statSync(name).isDirectory())) {
     const directory = name === "chat" ? join(here, "chat") : name === "examples" ? join(repo, "examples") : name;
     return readdirSync(directory)
       .filter((file) => file.endsWith(".md"))
