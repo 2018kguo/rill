@@ -214,12 +214,13 @@ impl FirstUnits {
 }
 
 pub fn compile(node: Node, group_count: u32) -> Program {
+    clear_memo();
     let node = &recognize_atomic(node, false);
     let mut compiler = Compiler { insts: Vec::new(), alt_tables: Vec::new(), sets: Vec::new(), follows: Vec::new(), backref_groups: Vec::new(), loop_count: 0 };
     compiler.emit_node(node, false, None);
     compiler.insts.push(Inst::Match);
     let first_units = first_units(node);
-    Program {
+    let program = Program {
         insts: compiler.insts,
         follows: compiler.follows,
         alt_tables: compiler.alt_tables,
@@ -230,7 +231,9 @@ pub fn compile(node: Node, group_count: u32) -> Program {
         first_units,
         required_literal: required_literals(node).into_iter().max_by_key(Vec::len),
         anchored_start: anchored_start(node),
-    }
+    };
+    clear_memo();
+    program
 }
 
 struct Compiler {
@@ -282,8 +285,12 @@ impl Compiler {
                         self.emit_node(item, back, None);
                     }
                 } else {
-                    for (i, item) in items.iter().enumerate() {
-                        let item_follow = continuation(&items[i + 1..], follow.cloned());
+                    // What may follow each item: the continuation of the items after it.
+                    let mut follows = vec![follow.cloned(); items.len()];
+                    for i in (0..items.len().saturating_sub(1)).rev() {
+                        follows[i] = continuation_step(&items[i + 1], follows[i + 1].clone());
+                    }
+                    for (item, item_follow) in items.iter().zip(&follows) {
                         self.emit_node(item, back, item_follow.as_ref());
                     }
                 }
@@ -500,7 +507,32 @@ fn recognize_atomic(node: Node, back: bool) -> Node {
     }
 }
 
+thread_local! {
+    /// Per-compile memo of `can_match_empty` and `first_set`, keyed by node address.
+    static NULLABLE: std::cell::RefCell<crate::fxhash::FxHashMap<usize, bool>> = Default::default();
+    static FIRST: std::cell::RefCell<crate::fxhash::FxHashMap<usize, FirstUnits>> = Default::default();
+}
+
+fn clear_memo() {
+    NULLABLE.with_borrow_mut(|m| m.clear());
+    FIRST.with_borrow_mut(|m| m.clear());
+}
+
 pub fn can_match_empty(node: &Node) -> bool {
+    // Leaves are cheap; memoize only composite nodes.
+    if !matches!(node, Node::Seq(_) | Node::Alt(_) | Node::Capture { .. } | Node::Atomic(_) | Node::Repeat { .. }) {
+        return can_match_empty_uncached(node);
+    }
+    let key = node as *const Node as usize;
+    if let Some(value) = NULLABLE.with_borrow(|m| m.get(&key).copied()) {
+        return value;
+    }
+    let value = can_match_empty_uncached(node);
+    NULLABLE.with_borrow_mut(|m| m.insert(key, value));
+    value
+}
+
+fn can_match_empty_uncached(node: &Node) -> bool {
     match node {
         Node::Empty | Node::Look { .. } | Node::Assert(_) | Node::Backref { .. } => true,
         Node::Set(_) => false,
@@ -521,6 +553,19 @@ fn intersect(a: &FirstUnits, b: &FirstUnits) -> FirstUnits {
 
 /// The code units a non-empty match of `node` can start with (forward direction).
 fn first_set(node: &Node) -> FirstUnits {
+    if !matches!(node, Node::Seq(_) | Node::Alt(_) | Node::Capture { .. } | Node::Atomic(_) | Node::Repeat { .. }) {
+        return first_set_uncached(node);
+    }
+    let key = node as *const Node as usize;
+    if let Some(value) = FIRST.with_borrow(|m| m.get(&key).cloned()) {
+        return value;
+    }
+    let value = first_set_uncached(node);
+    FIRST.with_borrow_mut(|m| m.insert(key, value.clone()));
+    value
+}
+
+fn first_set_uncached(node: &Node) -> FirstUnits {
     match node {
         Node::Set(set) => FirstUnits::from_set(set),
         Node::Empty | Node::Assert(_) | Node::Look { .. } => FirstUnits::none(),
@@ -562,10 +607,13 @@ fn sequence_first_units(items: &[Node]) -> Option<FirstUnits> {
 /// A set the code unit at the start of a match of `items` followed by something
 /// constrained by `outer` must be in (`None`: no constraint).
 fn continuation(items: &[Node], outer: Option<FirstUnits>) -> Option<FirstUnits> {
-    let Some((item, rest)) = items.split_first() else { return outer };
+    items.iter().rev().fold(outer, |rest, item| continuation_step(item, rest))
+}
+
+/// `continuation` of `item` followed by something constrained by `rest`.
+fn continuation_step(item: &Node, rest: Option<FirstUnits>) -> Option<FirstUnits> {
     match item {
         Node::Look { behind: false, negate: false, body } => {
-            let rest = continuation(rest, outer);
             if can_match_empty(body) {
                 return rest;
             }
@@ -575,11 +623,11 @@ fn continuation(items: &[Node], outer: Option<FirstUnits>) -> Option<FirstUnits>
                 None => own,
             })
         }
-        Node::Look { .. } | Node::Assert(_) => continuation(rest, outer),
+        Node::Look { .. } | Node::Assert(_) => rest,
         _ if !can_match_empty(item) => Some(first_set(item)),
         _ => {
             let mut first = first_set(item);
-            first.union(&continuation(rest, outer)?);
+            first.union(&rest?);
             Some(first)
         }
     }

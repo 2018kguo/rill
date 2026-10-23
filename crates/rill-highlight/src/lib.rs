@@ -2,6 +2,7 @@
 //! `@shikijs/vscode-textmate` runs them on Shiki's JavaScript regex engine, with
 //! the patterns oniguruma-to-es translates, so the tokens are identical.
 
+mod fxhash;
 pub mod regex;
 pub mod shiki;
 pub mod textmate;

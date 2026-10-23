@@ -4,7 +4,7 @@
 use super::matcher::{Matcher, create_matchers};
 use super::raw::{RawGrammar, RawRule, ROOT_NODE, SELF_NODE};
 use crate::regex::{EmulationOptions, JsRegExp, Matcher as RegexMatcher};
-use std::collections::HashMap;
+use crate::fxhash::FxHashMap as HashMap;
 use std::rc::Rc;
 
 pub type RuleId = u32;
@@ -355,7 +355,7 @@ pub struct Grammar {
     pub root_id: RuleId,
     pub injections: Vec<Injection>,
     /// Compiled regexes by id (`None`: skipped, as the forgiving JS engine does).
-    regexes: Vec<Option<Rc<JsRegExp>>>,
+    regexes: Vec<RegexSlot>,
     regex_ids: HashMap<Rc<str>, u32>,
     dynamic_regex_ids: HashMap<(Rc<str>, Rc<[Vec<u16>]>), u32>,
     compiled: HashMap<(RuleId, u8, Option<Rc<[Vec<u16>]>>), Rc<CompiledRule>>,
@@ -381,22 +381,22 @@ impl Grammar {
             root_scope_name: raw.scope_name.clone(),
             registry,
             instances: Vec::new(),
-            included: HashMap::new(),
+            included: HashMap::default(),
             rules: Vec::new(),
             root_id: 0,
             injections: Vec::new(),
             regexes: Vec::new(),
-            regex_ids: HashMap::new(),
-            dynamic_regex_ids: HashMap::new(),
-            compiled: HashMap::new(),
+            regex_ids: HashMap::default(),
+            dynamic_regex_ids: HashMap::default(),
+            compiled: HashMap::default(),
             static_scanners: Vec::new(),
-            collected: HashMap::new(),
+            collected: HashMap::default(),
             search_cache: Vec::new(),
             matcher: RegexMatcher::default(),
             raw_captures: Vec::new(),
             exec_result: Vec::new(),
             next_string_id: 0,
-            token_types: HashMap::new(),
+            token_types: HashMap::default(),
             execs: 0,
         };
         let root = grammar.init_instance(raw, None);
@@ -410,7 +410,7 @@ impl Grammar {
     /// `initGrammar(grammar, base)`.
     fn init_instance(&mut self, raw: Rc<RawGrammar>, base: Option<Desc>) -> u32 {
         let index = self.instances.len() as u32;
-        let mut repository: Repository = HashMap::new();
+        let mut repository: Repository = HashMap::default();
         if let Some(entries) = &raw.nodes[ROOT_NODE as usize].repository {
             for (name, node) in entries {
                 repository.insert(name.clone(), Desc { instance: index, node: *node });
@@ -783,12 +783,11 @@ impl Grammar {
             Some(translation) => translation.clone(),
             None => return Err(format!("no translation for {source:?}")),
         };
-        let regex = match translation {
-            Some(t) => Some(Rc::new(JsRegExp::new(&t.pattern, &t.flags, &t.options).map_err(|e| format!("{e} in {}", t.pattern))?)),
-            None => None,
-        };
         let id = self.regexes.len() as u32;
-        self.regexes.push(regex);
+        self.regexes.push(match translation {
+            Some(t) => RegexSlot::Pending(t, None),
+            None => RegexSlot::Skipped,
+        });
         self.search_cache.push(SearchCacheEntry::default());
         self.regex_ids.insert(Rc::from(source), id);
         Ok(Some(id))
@@ -807,14 +806,11 @@ impl Grammar {
             Some(translation) => translation.clone(),
             None => return Err(format!("no translation for template {template:?}")),
         };
-        let regex = match translation {
-            Some(t) => Some(Rc::new(
-                JsRegExp::with_placeholders(&t.pattern, &t.flags, &t.options, values).map_err(|e| format!("{e} in {}", t.pattern))?,
-            )),
-            None => None,
-        };
         let id = self.regexes.len() as u32;
-        self.regexes.push(regex);
+        self.regexes.push(match translation {
+            Some(t) => RegexSlot::Pending(t, Some(values.clone())),
+            None => RegexSlot::Skipped,
+        });
         self.search_cache.push(SearchCacheEntry::default());
         self.dynamic_regex_ids.insert((template, values.clone()), id);
         Ok(Some(id))
@@ -827,12 +823,30 @@ impl Grammar {
 
     /// `JavaScriptScanner.findNextMatchSync`, with the search cache kept per regex
     /// instead of per scanner, so scanners sharing a pattern share its searches.
-    pub fn find_next_match(&mut self, compiled: &CompiledRule, string: &OnigString, start: usize) -> Option<ScanMatch> {
+    /// The compiled regex of a slot, compiling it on first use (`None`: skipped).
+    fn regex(&mut self, id: usize) -> Result<Option<Rc<JsRegExp>>, String> {
+        match &self.regexes[id] {
+            RegexSlot::Ready(regex) => return Ok(Some(regex.clone())),
+            RegexSlot::Skipped => return Ok(None),
+            RegexSlot::Pending(..) => {}
+        }
+        let RegexSlot::Pending(t, values) = std::mem::replace(&mut self.regexes[id], RegexSlot::Skipped) else { unreachable!() };
+        let regex = match values {
+            None => JsRegExp::new(&t.pattern, &t.flags, &t.options),
+            Some(values) => JsRegExp::with_placeholders(&t.pattern, &t.flags, &t.options, &values),
+        }
+        .map_err(|e| format!("{e} in {}", t.pattern))?;
+        let regex = Rc::new(regex);
+        self.regexes[id] = RegexSlot::Ready(regex.clone());
+        Ok(Some(regex))
+    }
+
+    pub fn find_next_match(&mut self, compiled: &CompiledRule, string: &OnigString, start: usize) -> Result<Option<ScanMatch>, String> {
         let mut best: Option<(usize, i64)> = None;
         for (index, regex_id) in compiled.regexes.iter().enumerate() {
             let Some(regex_id) = *regex_id else { continue };
             let regex_index = regex_id as usize;
-            let Some(regex) = self.regexes[regex_index].clone() else { continue };
+            let Some(regex) = self.regex(regex_index)? else { continue };
             let cacheable = regex.is_search_cacheable();
             let entry = &self.search_cache[regex_index];
             let reuse = cacheable
@@ -864,7 +878,7 @@ impl Grammar {
                 continue;
             }
             if match_index == start as i64 {
-                return Some(self.scan_match(compiled.rules[index], regex_index));
+                return Ok(Some(self.scan_match(compiled.rules[index], regex_index)));
             }
             if best.is_none_or(|(_, at)| match_index < at) {
                 best = Some((index, match_index));
@@ -872,9 +886,9 @@ impl Grammar {
         }
         // The winner's captures are still in its cache entry: every regex is executed
         // at most once per call, and only the winner can be the best.
-        let (index, _) = best?;
+        let Some((index, _)) = best else { return Ok(None) };
         let regex_index = compiled.regexes[index].unwrap() as usize;
-        Some(self.scan_match(compiled.rules[index], regex_index))
+        Ok(Some(self.scan_match(compiled.rules[index], regex_index)))
     }
 
     fn scan_match(&self, rule_id: i32, regex_index: usize) -> ScanMatch {
@@ -885,6 +899,15 @@ impl Grammar {
             .collect();
         ScanMatch { rule_id, captures }
     }
+}
+
+#[derive(Debug)]
+enum RegexSlot {
+    /// Not compiled yet: the translation and, for back-reference templates, the
+    /// captured values.
+    Pending(Translation, Option<Rc<[Vec<u16>]>>),
+    Ready(Rc<JsRegExp>),
+    Skipped,
 }
 
 enum PatternRef {

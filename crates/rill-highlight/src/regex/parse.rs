@@ -3,6 +3,12 @@
 //! character set is closed under simple case folding, so matching never folds.
 
 use super::charset::{self, CharSet};
+use std::cell::RefCell;
+use crate::fxhash::FxHashMap as HashMap;
+
+thread_local! {
+    static CLASS_CACHE: RefCell<HashMap<(String, bool, bool), CharSet>> = RefCell::new(HashMap::default());
+}
 
 #[derive(Debug, Clone)]
 pub enum Node {
@@ -321,8 +327,26 @@ impl Parser<'_> {
             }
             '(' => self.parse_group(),
             '[' => {
+                // Grammars repeat the same classes (`[\p{L}\p{M}\p{N}\p{Pc}]`) thousands
+                // of times; their sets are memoized by source text and mode.
+                let end = self.class_end();
+                let key: Option<(String, bool, bool)> = end.map(|end| (self.chars[self.pos..end].iter().collect(), self.modes.ignore_case, self.unicode_sets));
+                if let Some(key) = &key {
+                    if let Some(set) = CLASS_CACHE.with_borrow(|cache| cache.get(key).cloned()) {
+                        self.pos = end.unwrap();
+                        return Ok(Node::Set(set));
+                    }
+                }
                 self.pos += 1;
                 let set = if self.unicode_sets { self.parse_class_v()? } else { self.parse_class_u()? };
+                if let Some(key) = key {
+                    CLASS_CACHE.with_borrow_mut(|cache| {
+                        if cache.len() > 4096 {
+                            cache.clear();
+                        }
+                        cache.insert(key, set.clone());
+                    });
+                }
                 Ok(Node::Set(set))
             }
             '\\' => {
@@ -337,6 +361,28 @@ impl Parser<'_> {
                 Ok(Node::Set(self.char_set(c as u32)))
             }
         }
+    }
+
+    /// The position after the class starting at `self.pos` (`[`), found by
+    /// skipping escapes and nested classes (`v` mode).
+    fn class_end(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut i = self.pos;
+        while i < self.chars.len() {
+            match self.chars[i] {
+                '\\' => i += 1,
+                '[' if depth == 0 || self.unicode_sets => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        None
     }
 
     fn parse_group(&mut self) -> Result<Node, String> {

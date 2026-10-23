@@ -65,17 +65,39 @@ impl CharSet {
     }
 
     pub fn add_range(&mut self, lo: u32, hi: u32) {
-        self.ranges.push((lo, hi));
-        self.normalize();
+        self.union(&CharSet { ranges: vec![(lo, hi)] });
     }
 
     pub fn add(&mut self, c: u32) {
         self.add_range(c, c);
     }
 
+    /// Merges `other` in (both are normalized, so a linear merge suffices).
     pub fn union(&mut self, other: &CharSet) {
-        self.ranges.extend_from_slice(&other.ranges);
-        self.normalize();
+        if other.ranges.is_empty() {
+            return;
+        }
+        if self.ranges.is_empty() {
+            self.ranges = other.ranges.clone();
+            return;
+        }
+        let (a, b) = (&self.ranges, &other.ranges);
+        let mut merged: Vec<(u32, u32)> = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0, 0);
+        while i < a.len() || j < b.len() {
+            let next = if j == b.len() || (i < a.len() && a[i].0 <= b[j].0) {
+                i += 1;
+                a[i - 1]
+            } else {
+                j += 1;
+                b[j - 1]
+            };
+            match merged.last_mut() {
+                Some(last) if next.0 <= last.1.saturating_add(1) => last.1 = last.1.max(next.1),
+                _ => merged.push(next),
+            }
+        }
+        self.ranges = merged;
     }
 
     pub fn complement(&self) -> CharSet {
@@ -138,9 +160,8 @@ impl CharSet {
         if extra.is_empty() {
             return self.clone();
         }
-        let mut set = CharSet { ranges: self.ranges.clone() };
-        set.ranges.extend(extra);
-        set.normalize();
+        let mut set = self.clone();
+        set.union(&CharSet::from_ranges(&extra));
         set
     }
 
@@ -198,10 +219,29 @@ pub fn fold(c: u32) -> u32 {
 /// properties the tables do not carry.
 pub fn property(name: &str) -> Option<CharSet> {
     let canonical = canonical_property_name(name)?;
-    PROPERTIES
-        .iter()
-        .find(|(key, _)| *key == canonical)
-        .map(|(_, ranges)| CharSet { ranges: ranges.to_vec() })
+    let (_, encoded) = PROPERTIES.iter().find(|(key, _)| *key == canonical)?;
+    let mut ranges = Vec::new();
+    let mut bytes = encoded.iter();
+    let mut read = || -> Option<u32> {
+        let mut value = 0u32;
+        let mut shift = 0;
+        loop {
+            let byte = *bytes.next()?;
+            value |= u32::from(byte & 0x7F) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+            shift += 7;
+        }
+    };
+    let mut next = 0u32;
+    while let Some(gap) = read() {
+        let lo = next + gap;
+        let hi = lo + read()?;
+        ranges.push((lo, hi));
+        next = hi + 1;
+    }
+    Some(CharSet { ranges })
 }
 
 fn canonical_property_name(name: &str) -> Option<String> {

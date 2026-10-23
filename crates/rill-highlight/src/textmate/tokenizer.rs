@@ -393,7 +393,7 @@ impl Tokenizer<'_> {
         }
         while let Some(while_state) = while_rules.pop() {
             let compiled = self.grammar.compile_ag(while_state.rule_id, while_state.end_rule.as_deref(), is_first_line, line_pos as i64 == anchor_position, true)?;
-            match self.grammar.find_next_match(&compiled, line, line_pos) {
+            match self.grammar.find_next_match(&compiled, line, line_pos)? {
                 Some(found) => {
                     if found.rule_id != WHILE_RULE_ID {
                         stack = while_state.parent.clone().unwrap();
@@ -426,7 +426,7 @@ impl Tokenizer<'_> {
 
     fn match_rule_or_injections(&mut self, line: &OnigString, is_first_line: bool, line_pos: usize, stack: &State, anchor_position: i64) -> Result<Option<ScanMatch>> {
         let compiled = self.grammar.compile_ag(stack.rule_id, stack.end_rule.as_deref(), is_first_line, line_pos as i64 == anchor_position, false)?;
-        let match_result = self.grammar.find_next_match(&compiled, line, line_pos);
+        let match_result = self.grammar.find_next_match(&compiled, line, line_pos)?;
         if self.grammar.injections.is_empty() {
             return Ok(match_result);
         }
@@ -455,7 +455,7 @@ impl Tokenizer<'_> {
             }
             let (rule_id, priority) = (injection.rule_id, injection.priority);
             let compiled = self.grammar.compile_ag(rule_id, None, is_first_line, line_pos as i64 == anchor_position, false)?;
-            let Some(found) = self.grammar.find_next_match(&compiled, line, line_pos) else { continue };
+            let Some(found) = self.grammar.find_next_match(&compiled, line, line_pos)? else { continue };
             let rating = found.captures[0].0;
             if rating >= best_rating {
                 continue;

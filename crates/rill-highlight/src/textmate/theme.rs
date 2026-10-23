@@ -2,7 +2,7 @@
 
 use serde_json::{Map, Value, json};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use crate::fxhash::FxHashMap as HashMap;
 use std::rc::Rc;
 
 pub const FONT_STYLE_NOT_SET: i32 = -1;
@@ -81,7 +81,7 @@ pub fn normalize_theme(raw: &Value) -> Result<NormalizedTheme, String> {
     }
     // Colors that are not hex get placeholder hex colors, replaced back on output.
     let mut replacement_count = 0u32;
-    let mut replacement_map: HashMap<String, String> = HashMap::new();
+    let mut replacement_map: HashMap<String, String> = HashMap::default();
     let mut replacement_for = |value: &str, replacements: &Map<String, Value>| -> String {
         if let Some(hex) = replacement_map.get(value) {
             return hex.clone();
@@ -244,7 +244,7 @@ impl TrieElement {
             let child = TrieElement {
                 main_rule: self.main_rule.clone(),
                 rules_with_parent_scopes: self.rules_with_parent_scopes.clone(),
-                children: HashMap::new(),
+                children: HashMap::default(),
             };
             self.children.insert(head.to_string(), child);
         }
@@ -351,14 +351,14 @@ impl Theme {
         let mut root = TrieElement {
             main_rule: TrieRule { scope_depth: 0, parent_scopes: Rc::from(Vec::new()), font_style: FONT_STYLE_NOT_SET, foreground: 0, background: 0 },
             rules_with_parent_scopes: Vec::new(),
-            children: HashMap::new(),
+            children: HashMap::default(),
         };
         for rule in rest {
             let foreground = color_map.id(rule.foreground.as_deref());
             let background = color_map.id(rule.background.as_deref());
             root.insert(0, &rule.scope, rule.parent_scopes.clone().map(Rc::from), rule.font_style, foreground, background);
         }
-        Theme { color_map: color_map.colors, defaults, root, cache: RefCell::new(HashMap::new()) }
+        Theme { color_map: color_map.colors, defaults, root, cache: RefCell::new(HashMap::default()) }
     }
 
     /// `Theme.match`.
