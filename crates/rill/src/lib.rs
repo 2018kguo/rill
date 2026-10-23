@@ -115,15 +115,15 @@ pub mod wasm {
         }
 
         /// remend on a streaming text (see [`crate::remend::Stream`]): `appended` is what
-        /// was added since the last call (or the whole text, with `reset`). Returns
-        /// `[prefix, suffix, middle length]` and keeps the middle for [`remend_middle`].
+        /// was added since the last call (or the whole text, with `reset`). Returns how
+        /// many units of the last healed text the new one keeps; the rest is
+        /// [`remend_middle`].
         #[wasm_bindgen(js_name = remendStream)]
-        pub fn remend_stream(appended: &str, reset: bool) -> Vec<u32> {
+        pub fn remend_stream(appended: &str, reset: bool) -> u32 {
             STREAM.with_borrow_mut(|stream| {
                 let healing = stream.heal(appended, reset);
-                let middle = healing.middle.len() as u32;
                 MIDDLE.set(healing.middle);
-                vec![healing.prefix as u32, healing.suffix as u32, middle]
+                healing.keep as u32
             })
         }
 
@@ -165,6 +165,28 @@ pub mod wasm {
                 spine: flags & 4 != 0,
             };
             super::render_markup(source, &options, &markup)
+        }
+
+        /// The root-level link definitions of `source` as UTF-16 `[start, end)` pairs,
+        /// or `[u32::MAX]` when a definition sits elsewhere or `source` has a footnote
+        /// definition (see [`crate::mdast::root_definitions`]).
+        #[wasm_bindgen(js_name = definitions)]
+        pub fn definitions(source: &str, math: bool, cjk: bool) -> Vec<u32> {
+            let syntax = crate::Syntax { math, cjk };
+            match crate::mdast::root_definitions(source, syntax) {
+                Some(ranges) => ranges
+                    .into_iter()
+                    .flat_map(|(start, end)| [start, end])
+                    .collect(),
+                None => vec![u32::MAX],
+            }
+        }
+
+        /// Whether no root child of `source` spans UTF-16 offset `at` (see
+        /// [`crate::mdast::splits_at`]).
+        #[wasm_bindgen(js_name = splitsAt)]
+        pub fn splits_at(source: &str, math: bool, cjk: bool, at: u32) -> bool {
+            crate::mdast::splits_at(source, crate::Syntax { math, cjk }, at)
         }
 
         /// Streamdown's pipeline, with `plugins.math` and `plugins.cjk` as given.

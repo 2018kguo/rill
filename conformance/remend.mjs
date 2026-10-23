@@ -3,6 +3,9 @@
 //
 //   node conformance/remend.mjs                  corpora, and prefixes of each document
 //   node conformance/remend.mjs --fuzz 200000    plus seeded random marker soups
+//   node conformance/remend.mjs --streams 300    plus random documents, every prefix
+//                                                in order (rill settles a prefix of a
+//                                                stream and heals only the rest)
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -80,6 +83,13 @@ for (const document of documents) {
 }
 const count = Number(option("--fuzz") ?? 0);
 for (const text of fuzz(count, Number(option("--seed") ?? 7))) check(text);
+// Paragraphs of marker soup between blank lines, streamed unit by unit.
+const streams = Number(option("--streams") ?? 0);
+const paragraphs = [...fuzz(streams * 8, Number(option("--seed") ?? 7) + 1)];
+for (let index = 0; index < streams; index += 1) {
+  const text = paragraphs.slice(index * 8, index * 8 + 8).join("\n\n");
+  for (let end = 1; end <= text.length; end += 1) check(text.slice(0, end));
+}
 
 console.log(`${checked - failures.length}/${checked} identical (remend 1.4.0)`);
 for (const { text, expected, actual } of failures.sort((a, b) => a.text.length - b.text.length).slice(0, 8)) {

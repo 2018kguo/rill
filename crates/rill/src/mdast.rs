@@ -2552,3 +2552,44 @@ fn trim_blank_lines(source: &str, start: usize, mut end: usize) -> usize {
         }
     }
 }
+
+/// Where `source`'s link definitions are, as UTF-16 `[start, end)` ranges, when each
+/// is a child of the root; `None` when one sits in a container or the text has a
+/// footnote definition.
+#[must_use]
+pub fn root_definitions(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32)>> {
+    let tree = parse_arena(source, syntax).ok()?;
+    let mut ranges = Vec::new();
+    for child in tree.children(Tree::ROOT) {
+        if let (NodeKind::Definition(_), At::Bytes(start, end)) =
+            (&tree.node(child).kind, tree.node(child).at)
+        {
+            ranges.push((tree.points.units(start), tree.points.units(end)));
+        }
+    }
+    let all = tree
+        .nodes
+        .iter()
+        .filter(|node| matches!(node.kind, NodeKind::Definition(_)))
+        .count();
+    let footnotes = tree
+        .nodes
+        .iter()
+        .any(|node| matches!(node.kind, NodeKind::FootnoteDefinition(_)));
+    (all == ranges.len() && !footnotes).then_some(ranges)
+}
+
+/// Whether `source` parses into root children none of which spans UTF-16 offset `at`:
+/// the text before it and the text after it then parse into the same blocks on their
+/// own.
+#[must_use]
+pub fn splits_at(source: &str, syntax: Syntax, at: u32) -> bool {
+    let Ok(tree) = parse_arena(source, syntax) else {
+        return false;
+    };
+    tree.children(Tree::ROOT)
+        .all(|child| match tree.node(child).at {
+            At::Bytes(start, end) => tree.points.units(end) <= at || tree.points.units(start) >= at,
+            _ => false,
+        })
+}

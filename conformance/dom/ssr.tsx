@@ -3,6 +3,11 @@
 // rendering touches (code blocks render through Streamdown's own CodeBlock there).
 //
 //   bun conformance/dom/ssr.tsx [--config default|code] [--variant default|prefix|...]
+//        [--corpus examples,real,chat,<file.md>] [--definitions] [--every N]
+//
+// `--definitions` gives each document link definitions (and references to them), which
+// make Streamdown render it as one block; `--every N` also renders every Nth prefix of
+// each document, in order, as a stream does.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -49,6 +54,27 @@ const corpora: Record<string, string[]> = {
     .map((line) => JSON.parse(line) as string),
   chat: markdown(join(here, "chat")),
 };
+// A definition first, references and a late definition after the middle paragraph.
+const withDefinitions = (source: string) => {
+  const middle = source.indexOf("\n\n", source.length >> 1);
+  const at = middle < 0 ? source.length : middle;
+  return `[early]: https://example.com/early "Early"\n\n${source.slice(0, at)}\n\nSee [late], [the early one][early] and [early].\n\n[late]: https://example.com/late\n${source.slice(at)}`;
+};
+const every = Number(option("--every", "0"));
+const chosen = option("--corpus", "examples,real,chat").split(",");
+for (const name of Object.keys(corpora)) if (!chosen.includes(name)) delete corpora[name];
+for (const name of chosen) if (name.endsWith(".md")) corpora[name] = [readFileSync(name, "utf8")];
+for (const [name, documents] of Object.entries(corpora)) {
+  let list = args.includes("--definitions") ? documents.map(withDefinitions) : documents;
+  if (every > 0) {
+    list = list.flatMap((source) => {
+      const prefixes: string[] = [];
+      for (let end = every; end < source.length; end += every) prefixes.push(source.slice(0, end));
+      return [...prefixes, source];
+    });
+  }
+  corpora[name] = list;
+}
 
 const render = (component: unknown, source: string) =>
   renderToString(createElement(component as ComponentType<Record<string, unknown>>, props, source));

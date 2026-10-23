@@ -2,6 +2,7 @@
 // with your own Rust plugins) and decodes what it returns into HAST. Nothing here loads
 // WebAssembly, so a custom build imports this and `streamdown.ts` only.
 import { decodeHast, HastReader, type HastNode } from "./decode.ts";
+import { noteKept } from "./prefix.ts";
 import { encodeLoneSurrogates, restoreLoneSurrogates } from "./surrogates.ts";
 
 export { decodeHast, HastReader, type HastNode } from "./decode.ts";
@@ -46,6 +47,13 @@ export type Rill<A extends unknown[] = []> = {
     syntax: Syntax,
     options: MarkupOptions
   ) => HastReader | null;
+  /** The link definitions at the root of `source`, as UTF-16 `[start, end)` ranges, or
+   * `null` when one sits in a container or `source` has a footnote definition. Builds
+   * with the export only. */
+  definitions?: (source: string, syntax: Syntax) => [number, number][] | null;
+  /** Whether no root-level block of `source` spans UTF-16 offset `at`. Builds with the
+   * export only. */
+  splitsAt?: (source: string, syntax: Syntax, at: number) => boolean;
   /** remend 1.4.0 with its default options (Streamdown's streaming repair), or `null`
    * for text it cannot take (lone surrogates). Builds with the export only. */
   remend?: (text: string) => string | null;
@@ -92,30 +100,34 @@ export function createRill<A extends unknown[]>(
     ...args: A
   ) => RenderedHast,
   renderMarkup?: RenderMarkup,
+  definitions?: {
+    ranges(source: string, math: boolean, cjk: boolean): Uint32Array;
+    splitsAt(source: string, math: boolean, cjk: boolean, at: number): boolean;
+  },
   remend?: {
-    stream(appended: string, reset: boolean): Uint32Array;
+    /** Heals the text so far plus `appended` (or just `appended`, with `reset`):
+     * how many units of the last healed text the new one keeps, then `middle()`. */
+    stream(appended: string, reset: boolean): number;
     middle(): string;
   }
 ): Rill<A> {
-  // The text remend last healed in Rust, which keeps it: a text that extends it sends
-  // only what was appended.
+  // The text remend last healed in Rust, which keeps it (a text that extends it sends
+  // only what was appended), and what it healed it into (an update sends only the
+  // healed text that changed).
   let last: string | null = null;
+  let lastHealed = "";
   const heal = remend
     ? (text: string) => {
         const appended =
           last !== null && text.startsWith(last) ? text.slice(last.length) : null;
         // Unknown until this call returns (it may throw).
         last = null;
-        const [prefix = 0, suffix = 0, middle = 0] = remend.stream(
-          appended ?? text,
-          appended === null
-        );
+        const keep = remend.stream(appended ?? text, appended === null);
+        const healed = lastHealed.slice(0, keep) + remend.middle();
+        noteKept(lastHealed, healed, keep);
         last = text;
-        return (
-          text.slice(0, prefix) +
-          (middle > 0 ? remend.middle() : "") +
-          text.slice(text.length - suffix)
-        );
+        lastHealed = healed;
+        return healed;
       }
     : undefined;
   const markup = renderMarkup
@@ -144,6 +156,24 @@ export function createRill<A extends unknown[]>(
     : undefined;
   return {
     ...(markup ? { markup } : {}),
+    ...(definitions
+      ? {
+          definitions: (source: string, syntax: Syntax) => {
+            if (!source.isWellFormed() || source.includes("\0")) return null;
+            const flat = definitions.ranges(source, syntax.math === true, syntax.cjk === true);
+            if (flat.length === 1) return null;
+            const ranges: [number, number][] = [];
+            for (let index = 0; index < flat.length; index += 2) {
+              ranges.push([flat[index]!, flat[index + 1]!]);
+            }
+            return ranges;
+          },
+          splitsAt: (source: string, syntax: Syntax, at: number) =>
+            source.isWellFormed() &&
+            !source.includes("\0") &&
+            definitions.splitsAt(source, syntax.math === true, syntax.cjk === true, at),
+        }
+      : {}),
     ...(heal
       ? {
           remend: (text: string) => {

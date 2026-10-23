@@ -48,9 +48,9 @@ import {
 } from "streamdown";
 import type { Pluggable } from "unified";
 
-import { parseMarkdownIntoBlocks } from "./blocks.ts";
+import { parseMarkdownIntoBlocks, splitDefinitionBlock } from "./blocks.ts";
 import { CodeSegment } from "./code-block.ts";
-import type { HastNode, HastReader, Rill } from "./core.ts";
+import type { HastNode, HastReader, MarkupOptions, Rill } from "./core.ts";
 import { highlighterFor, type Highlighter } from "./highlight.ts";
 import { createCn, hastToHtml, type Cn } from "./html.ts";
 import { mathFragments } from "./math.ts";
@@ -425,6 +425,7 @@ export const Block = memo(function Block(props: BlockProps) {
     : props.content;
   const safe = Boolean(linkSafety?.enabled);
   const tables = useRef<TableCache | null>(null);
+  const pieces = useRef<Pieces | null>(null);
   const nodes = useMemo(() => {
     if (!(plan && settings && rill?.markup) || content.length > DEFAULT_MAX_SOURCE_LENGTH) {
       tables.current = null;
@@ -452,6 +453,19 @@ export const Block = memo(function Block(props: BlockProps) {
       }
       return reader ? segments(reader, env) : null;
     };
+    const chunks = rill.definitions && rill.splitsAt ? splitDefinitionBlock(content) : null;
+    if (chunks) {
+      tables.current = null;
+      const markupOptions = {
+        prefix: settings.prefix,
+        linkSafety: safe,
+        ssr,
+        overrides: plan.overrides,
+        spine: isAnimating,
+      };
+      return renderChunks(chunks, rill, plan, markupOptions, env, (pieces.current ??= newPieces()));
+    }
+    pieces.current = null;
     return renderGrowingTable(content, render, tables, env) ?? remember(content, render(content), tables, env);
     // `plan` is derived from these.
   }, [
@@ -491,6 +505,153 @@ export const Block = memo(function Block(props: BlockProps) {
     : createElement(Fragment, null, ...nodes, activator);
 }, sameBlockProps);
 (Block as { displayName?: string }).displayName = "Block";
+
+// ---------------------------------------------------------------------------------
+// Blocks that link definitions made one: Streamdown keeps a text with `[x]: url`
+// definitions in one block, so each streamed update renders all of it. rill renders it
+// as the pieces Streamdown would have split it into, each with the text's definitions
+// before it (a piece's links resolve as they do in the whole text), and keeps each
+// piece's React nodes until its text, the definitions it could use, or its place among
+// the pieces changes: an update renders the last piece.
+// ---------------------------------------------------------------------------------
+
+type Piece = {
+  /** The definitions it was rendered with ("" for a piece with no `]`, which has no
+   * reference). */
+  definitions: string;
+  last: boolean;
+  /** The block's `isIncomplete` when it holds a code block (each one reads it). */
+  incomplete: boolean | null;
+  /** The top-level tag counts before it (its keys continue them). */
+  before: string;
+  nodes: ReactNode[];
+  /** The top-level tags it holds, for the next piece's counts. */
+  counts: Map<string, number>;
+};
+
+type Pieces = {
+  rendered: Map<string, Piece>;
+  /** Each piece's root-level definitions, `null` when it holds one elsewhere. */
+  definitions: Map<string, string[] | null>;
+  /** A piece and the next piece it was found to end before (no block spans them). */
+  joins: Map<string, string>;
+};
+
+const newPieces = (): Pieces => ({
+  rendered: new Map(),
+  definitions: new Map(),
+  joins: new Map(),
+});
+
+const countsKey = (counts: Map<string, number>) => {
+  let key = "";
+  for (const [tag, count] of counts) key += `${tag}:${count},`;
+  return key;
+};
+
+/** `chunks` merged where micromark's blocks run across marked's (a lazy line). */
+function joinChunks(chunks: string[], rill: Rill, plan: Plan, pieces: Pieces): string[] {
+  const joined: string[] = [];
+  const joins = new Map<string, string>();
+  let current = chunks[0]!;
+  for (let index = 1; index < chunks.length; index += 1) {
+    const next = chunks[index]!;
+    const clean =
+      pieces.joins.get(current) === next ||
+      rill.splitsAt!(current + next, plan, current.length);
+    if (clean) {
+      joins.set(current, next);
+      joined.push(current);
+      current = next;
+    } else {
+      current += next;
+    }
+  }
+  joined.push(current);
+  pieces.joins = joins;
+  return joined;
+}
+
+function renderChunks(
+  split: string[],
+  rill: Rill,
+  plan: Plan,
+  options: MarkupOptions,
+  env: Env,
+  pieces: Pieces
+): ReactNode[] | null {
+  const chunks = joinChunks(split, rill, plan, pieces);
+  // The text's definitions, in order (the first of a label wins, as in the whole text).
+  const definitions: string[] = [];
+  for (const chunk of chunks) {
+    if (!chunk.includes("]:")) continue;
+    let found = pieces.definitions.get(chunk);
+    if (found === undefined) {
+      const ranges = rill.definitions!(chunk, plan);
+      found = ranges && ranges.map(([start, end]) => chunk.slice(start, end));
+      pieces.definitions.set(chunk, found);
+    }
+    // A definition in a container: render the whole block.
+    if (found === null) return null;
+    definitions.push(...found);
+  }
+  const before = definitions.length > 0 ? `${definitions.join("\n\n")}\n\n` : "";
+  const out: ReactNode[] = [];
+  const counts = new Map<string, number>();
+  const rendered = new Map<string, Piece>();
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index]!;
+    const last = index === chunks.length - 1;
+    const usable = chunk.includes("]") ? before : "";
+    const at = countsKey(counts);
+    let piece = pieces.rendered.get(chunk);
+    if (
+      !(
+        piece &&
+        piece.definitions === usable &&
+        piece.last === last &&
+        piece.before === at &&
+        (piece.incomplete === null || piece.incomplete === env.isIncomplete)
+      )
+    ) {
+      const source = usable + chunk;
+      let reader: HastReader | null = null;
+      try {
+        reader = rill.markup!(source, plan, { ...options, spine: Boolean(options.spine) && last });
+      } catch {
+        return null;
+      }
+      if (!reader) return null;
+      const own = new Map(counts);
+      const coded = { code: false };
+      const nodes = segments(reader, env, own, coded);
+      for (const [tag, count] of counts) own.set(tag, (own.get(tag) ?? 0) - count);
+      const incomplete = coded.code ? env.isIncomplete : null;
+      piece = { definitions: usable, last, incomplete, before: at, nodes, counts: own };
+    }
+    rendered.set(chunk, piece);
+    for (const [tag, count] of piece.counts) counts.set(tag, (counts.get(tag) ?? 0) + count);
+    if (piece.nodes.length === 0) continue;
+    // The root's children join with a line ending, which merges with text beside it
+    // (parse5 merges adjacent text: newlines it moves out of a table).
+    let first = 0;
+    if (out.length > 0) {
+      const previous = out.length - 1;
+      const head = piece.nodes[0];
+      if (typeof head === "string") {
+        out.push(`\n${head}`);
+        first = 1;
+      } else if (typeof out[previous] === "string") {
+        out[previous] = `${out[previous]}\n`;
+      } else {
+        out.push("\n");
+      }
+    }
+    for (let node = first; node < piece.nodes.length; node += 1) out.push(piece.nodes[node]);
+  }
+  pieces.rendered = rendered;
+  return out;
+}
 
 // ---------------------------------------------------------------------------------
 // Streaming tables: a GFM table's rows parse one line at a time, so once a row's line
@@ -668,13 +829,18 @@ type Env = {
 
 const LINK_BUTTON = 'button[data-streamdown="link"]';
 
-/** One block's segments as React nodes. */
-function segments(reader: HastReader, env: Env): ReactNode[] {
-  const list = (): ReactNode[] => {
+/** One block's segments as React nodes; `top` counts the tags of the top-level ones
+ * for their keys, from the counts it holds. */
+function segments(
+  reader: HastReader,
+  env: Env,
+  top: Map<string, number> = new Map(),
+  coded: { code: boolean } = { code: false }
+): ReactNode[] {
+  const list = (counts = new Map<string, number>()): ReactNode[] => {
     const count = reader.next();
     const out = new Array<ReactNode>(count);
     // hast-util-to-jsx-runtime's keys: `tag-n`, counting each tag among siblings.
-    const counts = new Map<string, number>();
     const key = (name: string) => {
       const count = counts.get(name) ?? 0;
       counts.set(name, count + 1);
@@ -767,6 +933,7 @@ function segments(reader: HastReader, env: Env): ReactNode[] {
         return createElement("button", element, ...list());
       }
       case SEG_CODE: {
+        coded.code = true;
         const code = reader.string();
         const codeProps = props("");
         delete codeProps.key;
@@ -794,7 +961,7 @@ function segments(reader: HastReader, env: Env): ReactNode[] {
         throw new Error(`Unknown rill segment ${kind}`);
     }
   };
-  return list();
+  return list(top);
 }
 
 function jsxOf(nodes: HastNode[], components: Record<string, unknown>): ReactElement {

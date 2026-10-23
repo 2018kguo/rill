@@ -1,11 +1,14 @@
 // Differential check: rill's block splitter (js/src/blocks.ts) against Streamdown
 // 2.7.1's parseMarkdownIntoBlocks, fed the same sequence of texts: every document, its
-// prefixes in order (a stream), and seeded random documents streamed the same way.
+// prefixes in order (a stream), and seeded random documents streamed the same way; each
+// stream raw and as Streamdown splits it while streaming, healed by remend (whose
+// closing markers end each text differently), and backwards (texts that shrink).
 //
 //   node conformance/blocks.mjs [--fuzz 2000] [--seed 7]
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import remend from "remend";
 import { parseMarkdownIntoBlocks as streamdown } from "streamdown";
 
 import { parseMarkdownIntoBlocks as rill } from "../js/src/blocks.ts";
@@ -63,8 +66,12 @@ const check = (text) => {
   if (expected !== actual && failures.length < 100) failures.push({ text, expected, actual });
 };
 const stream = (text, step) => {
-  for (let end = 1; end < text.length; end += step) check(text.slice(0, end));
-  check(text);
+  const ends = [];
+  for (let end = 1; end < text.length; end += step) ends.push(end);
+  ends.push(text.length);
+  for (const end of ends) check(text.slice(0, end));
+  for (const end of ends) check(remend(text.slice(0, end)));
+  for (const end of ends.reverse()) check(text.slice(0, end));
 };
 
 for (const document of documents) stream(document, Math.max(1, Math.floor(document.length / 1500)));

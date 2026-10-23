@@ -1,15 +1,19 @@
 // Streamdown 2.7.1's `parseMarkdownIntoBlocks` (lib/parse-blocks.tsx; Apache-2.0,
 // Copyright 2023 Vercel, Inc.), the same code on the same `marked`, except for what it
 // does to the whole text on every streaming update: its footnote and link-definition
-// tests look only at what was appended (once either holds it holds for every longer
-// text), so an update costs what lexing the tail costs. `conformance/blocks.mjs` checks
-// it against Streamdown's on streamed prefixes.
+// tests look only at what changed since the last text (a match found before still
+// holds while the text keeps it), and it reuses the blocks the last text settled when
+// the new one keeps them (Streamdown reuses them only when the text grew by an append,
+// but remend's closing markers make a streamed text end differently each time), so an
+// update costs what lexing the tail costs. `conformance/blocks.mjs` checks it against
+// Streamdown's on streamed prefixes, raw and healed.
 import { Lexer, type Token } from "marked";
+
+import { commonPrefix } from "./prefix.ts";
 
 const footnoteReferencePattern = /\[\^[\w-]{1,200}\](?!:)/;
 const footnoteDefinitionPattern = /\[\^[\w-]{1,200}\]:/;
 const openingTagPattern = /<([A-Za-z][\w:-]*)[\s>/]/;
-const linkDefinitionPattern = /^ {0,3}\[[^\]]+\]:/m;
 /** The longest footnote match: `[^` + 200 + `]:`, plus one for the lookahead. */
 const FOOTNOTE_WINDOW = 205;
 
@@ -80,21 +84,30 @@ const countDoubleDollars = (str: string): number => {
 
 const lineEndingPattern = /\r\n|\r/g;
 
-const lexBlocks = (markdown: string): { tokens: Token[]; hasLinkDefinitions: boolean } => {
-  const lexer = new Lexer({ gfm: true });
-  const tokens = lexer.blockTokens(markdown);
-  return {
-    tokens,
-    hasLinkDefinitions: Object.keys(lexer.tokens.links).length > 0,
-  };
-};
+/** Whether marked found a link definition in `token` (it keeps the first of each label
+ * as a `def` token, wherever it is). */
+const hasDefinition = (token: Token): boolean =>
+  token.type === "def" ||
+  Boolean((token as { tokens?: Token[] }).tokens?.some(hasDefinition)) ||
+  Boolean((token as { items?: { tokens?: Token[] }[] }).items?.some((item) => item.tokens?.some(hasDefinition)));
 
 interface ParseCache {
+  /** The input cut into blocks as if it had no link definitions. */
   blocks: string[];
+  /** Whether each block holds a link definition (they make the input one block). */
+  definitions: boolean[];
   input: string;
   verifiedCount: number;
   verifiedLength: number;
 }
+
+type Lexed = { blocks: string[]; definitions: boolean[] };
+
+const lexBlocks = (markdown: string): Lexed => {
+  const tokens = new Lexer({ gfm: true }).blockTokens(markdown);
+  const { blocks, definitions } = mergeTokensIntoBlocks(tokens);
+  return { blocks: copyBlocks(blocks), definitions };
+};
 
 const blankLineEnding = "\n\n";
 
@@ -108,15 +121,18 @@ const countStableBlocks = (blocks: string[]): number => {
 const copyString = (value: string): string => ` ${value}`.slice(1);
 const copyBlocks = (blocks: string[]): string[] => blocks.map(copyString);
 
-const mergeTokensIntoBlocks = (tokens: Token[]): string[] => {
+const mergeTokensIntoBlocks = (tokens: Token[]): Lexed => {
   const mergedBlocks: string[] = [];
+  const definitions: boolean[] = [];
   const htmlStack: string[] = [];
   let previousTokenWasCode = false;
   for (const token of tokens) {
     const currentBlock = token.raw;
     const mergedBlocksLen = mergedBlocks.length;
+    const definition = hasDefinition(token);
     if (htmlStack.length > 0) {
       mergedBlocks[mergedBlocksLen - 1] += currentBlock;
+      definitions[mergedBlocksLen - 1] ||= definition;
       const trackedTag = htmlStack.at(-1) as string;
       const newOpenTags = countNonSelfClosingOpenTags(currentBlock, trackedTag);
       const newCloseTags = countClosingTags(currentBlock, trackedTag);
@@ -144,35 +160,30 @@ const mergeTokensIntoBlocks = (tokens: Token[]): string[] => {
       const prevDollarCount = countDoubleDollars(previousBlock);
       if (prevDollarCount % 2 === 1) {
         mergedBlocks[mergedBlocksLen - 1] = previousBlock + currentBlock;
+        definitions[mergedBlocksLen - 1] ||= definition;
         continue;
       }
     }
     mergedBlocks.push(currentBlock);
+    definitions.push(definition);
     if (token.type !== "space") previousTokenWasCode = token.type === "code";
   }
-  return mergedBlocks;
+  return { blocks: mergedBlocks, definitions };
 };
 
-/** `reuseParsedBlocks`, with `linkDefinitions` the answer of its whole-input test. */
+/** `reuseParsedBlocks` for an input that keeps the last one's first `kept` units. */
 const reuseParsedBlocks = (
   previous: ParseCache,
   input: string,
-  linkDefinitions: boolean
+  kept: number
 ): ParseCache | null => {
-  if (input.length <= previous.input.length) return null;
-  if (input.slice(0, previous.input.length) !== previous.input || linkDefinitions) {
-    return null;
-  }
   const stableCount = countStableBlocks(previous.blocks);
   if (stableCount === 0) return null;
   let verifiedCount = previous.verifiedCount;
   let verifiedLength = previous.verifiedLength;
-  if (verifiedCount > stableCount) {
-    verifiedCount = stableCount;
+  if (verifiedCount > stableCount || verifiedLength > kept) {
+    verifiedCount = 0;
     verifiedLength = 0;
-    for (let i = 0; i < verifiedCount; i += 1) {
-      verifiedLength += (previous.blocks[i] as string).length;
-    }
   }
   while (
     verifiedCount < stableCount &&
@@ -182,73 +193,99 @@ const reuseParsedBlocks = (
     verifiedCount += 1;
   }
   if (verifiedCount !== stableCount) return null;
+  // A block's end (its trailing blank lines) depends on the text up to the next one: the
+  // text must keep some of that.
+  if (!/\S/.test(input.slice(verifiedLength, kept))) return null;
   const tail = lexBlocks(input.slice(verifiedLength));
-  if (tail.hasLinkDefinitions) return null;
-  const tailBlocks = copyBlocks(mergeTokensIntoBlocks(tail.tokens));
   return {
     input,
-    blocks: previous.blocks.slice(0, stableCount).concat(tailBlocks),
+    blocks: previous.blocks.slice(0, stableCount).concat(tail.blocks),
+    definitions: previous.definitions.slice(0, stableCount).concat(tail.definitions),
     verifiedCount,
     verifiedLength,
   };
 };
 
+/** `input` cut into blocks, from the last cut of a text when it can. */
+const cut = (previous: ParseCache | null, input: string): ParseCache => {
+  if (previous?.input === input) return previous;
+  const reused = previous ? reuseParsedBlocks(previous, input, commonPrefix(previous.input, input)) : null;
+  return reused ?? { input, ...lexBlocks(input), verifiedCount: 0, verifiedLength: 0 };
+};
+
 let lastParse: ParseCache | null = null;
 
-/** The answers of the whole-text tests for the last text, to extend from. */
-let lastTests: { text: string; footnotes: boolean; linkDefinitions: boolean } | null = null;
+/** Where the first footnote match in `text` from `from` ends (with its lookahead), or
+ * -1. */
+const firstFootnoteEnd = (text: string, from: number): number => {
+  const rest = from === 0 ? text : text.slice(from);
+  const ends: number[] = [];
+  const reference = footnoteReferencePattern.exec(rest);
+  if (reference) ends.push(from + reference.index + reference[0].length + 1);
+  const definition = footnoteDefinitionPattern.exec(rest);
+  if (definition) ends.push(from + definition.index + definition[0].length);
+  return ends.length > 0 ? Math.min(...ends) : -1;
+};
 
-/** Whether `text` holds a footnote reference or definition, and a link definition. */
-function wholeTextTests(text: string): { footnotes: boolean; linkDefinitions: boolean } {
-  const previous = lastTests;
-  let footnotes: boolean;
-  let linkDefinitions: boolean;
-  if (previous && text.length >= previous.text.length && text.startsWith(previous.text)) {
-    // A match in the old text stays one (a reference that becomes a definition is still a
-    // footnote); a new one must reach into the appended text.
-    const from = previous.text.length;
-    footnotes =
-      previous.footnotes ||
-      (() => {
-        const window = text.slice(Math.max(0, from - FOOTNOTE_WINDOW));
-        return footnoteReferencePattern.test(window) || footnoteDefinitionPattern.test(window);
-      })();
-    // A new definition ends past the old text, and its label holds no `]`, so its `[`
-    // comes after the old text's last `]` (bar one that is its final character): test
-    // from that line on.
-    const bracket = text.lastIndexOf("]", from - 2);
-    const line = bracket < 0 ? 0 : text.lastIndexOf("\n", bracket) + 1;
-    linkDefinitions = previous.linkDefinitions || linkDefinitionPattern.test(text.slice(line));
-  } else {
-    footnotes = footnoteReferencePattern.test(text) || footnoteDefinitionPattern.test(text);
-    linkDefinitions = linkDefinitionPattern.test(text);
-  }
-  lastTests = { text, footnotes, linkDefinitions };
-  return { footnotes, linkDefinitions };
-}
+/** Whether a text holds a footnote reference or definition, extending the answer for
+ * the last text it was asked about. */
+const footnoteTest = (): ((text: string) => boolean) => {
+  let last: { text: string; end: number } | null = null;
+  return (text) => {
+    let end: number;
+    if (last) {
+      // A match within what the text keeps of the last one still holds; a new match must
+      // reach past it, and is at most `FOOTNOTE_WINDOW` long.
+      const kept = commonPrefix(last.text, text);
+      end =
+        last.end >= 0 && last.end <= kept
+          ? last.end
+          : firstFootnoteEnd(text, Math.max(0, kept - FOOTNOTE_WINDOW));
+    } else {
+      end = firstFootnoteEnd(text, 0);
+    }
+    last = { text, end };
+    return end >= 0;
+  };
+};
+
+const hasFootnotes = footnoteTest();
+
+/** The input `parseMarkdownIntoBlocks` last kept in one block for its link definitions. */
+let definitionInput: string | null = null;
 
 /** Streamdown's `parseMarkdownIntoBlocks`. */
 export const parseMarkdownIntoBlocks = (markdown: string): string[] => {
-  const tests = wholeTextTests(markdown);
-  if (tests.footnotes) return [markdown];
-  // The link-definition test reads the normalized input; `\r` changes no match of it
-  // (the pattern ends at `]:` and `\r` is not `]`), but the text it extends from must be
-  // the same kind of string, so with `\r` it runs on the input.
+  if (hasFootnotes(markdown)) return [markdown];
   const input = markdown.includes("\r") ? markdown.replace(lineEndingPattern, "\n") : markdown;
-  if (lastParse?.input === input) return lastParse.blocks;
-  const linkDefinitions =
-    input === markdown ? tests.linkDefinitions : linkDefinitionPattern.test(input);
-  const reused = lastParse ? reuseParsedBlocks(lastParse, input, linkDefinitions) : null;
-  let entry = reused;
-  if (!entry) {
-    const { tokens, hasLinkDefinitions } = lexBlocks(input);
-    entry = {
-      input,
-      blocks: hasLinkDefinitions ? [copyString(input)] : copyBlocks(mergeTokensIntoBlocks(tokens)),
-      verifiedCount: 0,
-      verifiedLength: 0,
-    };
+  lastParse = cut(lastParse, input);
+  // Each block is its own Markdown document, so a text with link definitions stays one.
+  if (lastParse.definitions.some(Boolean)) {
+    definitionInput = input;
+    return [input];
   }
-  lastParse = entry;
-  return entry.blocks;
+  return lastParse.blocks;
+};
+
+let lastChunks: ParseCache | null = null;
+
+/**
+ * The pieces of a text `parseMarkdownIntoBlocks` kept in one block for its link
+ * definitions: the blocks it would have made without them, or `null` for a text it did
+ * not keep so (or one marked did not cut into pieces of itself: it drops a repeated
+ * definition and rewrites some blockquotes). rill renders the pieces one by one, with
+ * the text's definitions, and reuses all but the last as the text grows.
+ */
+export const splitDefinitionBlock = (input: string): string[] | null => {
+  if (input !== definitionInput) return null;
+  const parse = lastParse?.input === input ? lastParse : (lastChunks = cut(lastChunks, input));
+  const { blocks, verifiedCount } = parse;
+  // The reused blocks were compared with the text already.
+  let offset = parse.verifiedLength;
+  for (let index = verifiedCount; index < blocks.length; index += 1) {
+    const block = blocks[index] as string;
+    if (!input.startsWith(block, offset)) return null;
+    offset += block.length;
+  }
+  return offset === input.length ? blocks : null;
 };

@@ -4,8 +4,7 @@
 //! index, slice and comparison is the same; `conformance/remend.mjs` checks the output
 //! against the package.
 
-use std::cell::{OnceCell, RefCell};
-use std::rc::Rc;
+use std::cell::OnceCell;
 
 type Units = Vec<u16>;
 
@@ -38,65 +37,214 @@ const INCOMPLETE_IMAGE: &str = "](streamdown:incomplete-image)";
 /// remend with its default options: the text Streamdown renders while `children`
 /// streams.
 pub fn remend(text: &str) -> String {
-    let units: Units = text.encode_utf16().collect();
-    String::from_utf16_lossy(&remend_units(units))
+    String::from_utf16_lossy(&remend_units(&units(text)))
 }
 
-/// A healed text as an edit of its input: the input's first `prefix` units, then
-/// `middle`, then its last `suffix` units.
+/// [`remend`] on UTF-16 code units.
+pub fn remend_units(text: &[u16]) -> Units {
+    let mut healed = Units::new();
+    heal_from(text, &Settled::default(), &mut healed);
+    healed
+}
+
+/// A healed text as an edit of the one healed before it: that text's first `keep`
+/// units, then `middle`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Healing {
-    pub prefix: usize,
-    pub suffix: usize,
+    pub keep: usize,
     pub middle: String,
 }
 
-/// remend over a text that streams: it keeps the text, takes what was appended, and
-/// answers with the edit, so only the changes cross a language boundary.
+/// remend over a text that streams. It keeps the text and what it has settled about a
+/// prefix of it, so healing an update costs what the text after that prefix costs, not
+/// the whole text; and it answers with an edit of the text it healed last time, so
+/// only the changes cross a language boundary.
+///
+/// The settled prefix ends after a blank line, where nothing remend scans for is
+/// open: no inline code span (a blank line ends one), no math, and no comparison the
+/// next text could complete. Every handler of remend then sees the prefix the same
+/// way whatever follows it: its escapes are final, and what the handlers read from it
+/// (counts, the first and last markers, open brackets) is folded into [`Settled`]
+/// once. The text after it is healed as remend heals the whole text, with those
+/// folds standing in for the prefix; an edit that would reach into the prefix (rare:
+/// it needs the text after it to be blank) heals the whole text instead.
 #[derive(Debug, Default)]
 pub struct Stream {
+    /// The text so far.
     input: Units,
+    /// `input[..settled]` is the settled prefix.
+    settled: usize,
+    /// The fence open at `settled` in `input` (single-tilde's scan).
+    fence1: Option<OpenFence>,
+    /// The fence open at the end of single-tilde's output for the settled prefix
+    /// (comparison-operator's scan).
+    fence2: Option<OpenFence>,
+    /// What the later handlers need of the prefix comparison-operator makes of it.
+    prefix: Settled,
+    /// The settled prefix before the last one grew it: an edit that reaches back
+    /// over the whitespace ending the prefix (a trailing tag dropped with the blank
+    /// line before it) heals from there instead.
+    earlier: Option<Settled>,
+    /// The regions of the settled prefix's text.
+    regions: Vec<u8>,
+    /// That prefix's text (`prefix.len` units), then the rest of the last healed text
+    /// when the last heal took the fast path.
+    work: Units,
+    /// The last healed text when it came from healing the whole text instead.
+    whole: Option<Units>,
 }
 
 impl Stream {
     /// Heals the text so far plus `appended` (or, with `reset`, just `appended`).
     pub fn heal(&mut self, appended: &str, reset: bool) -> Healing {
         if reset {
-            self.input.clear();
+            *self = Stream::default();
         }
         self.input.extend(appended.encode_utf16());
-        let healed = remend_units(self.input.clone());
-        let input = &self.input;
-        let prefix = input
-            .iter()
-            .zip(&healed)
-            .take_while(|(left, right)| left == right)
-            .count();
-        let room = input.len().min(healed.len()) - prefix;
-        let suffix = input
-            .iter()
-            .rev()
-            .zip(healed.iter().rev())
-            .take(room)
-            .take_while(|(left, right)| left == right)
-            .count();
-        Healing {
-            prefix,
-            suffix,
-            middle: String::from_utf16_lossy(&healed[prefix..healed.len() - suffix]),
+        let known = self.prefix.len;
+        let previous_whole = self.whole.take();
+        let previous_tail = self.work.split_off(known);
+        self.settle();
+        // What the last heal returned: `work[..known]` and then `previous_tail`, or
+        // `previous_whole`.
+        let keep_of = |work: &[u16], new: &[u16]| -> usize {
+            if reset {
+                return 0;
+            }
+            if let Some(previous) = &previous_whole {
+                return common_prefix(previous, new);
+            }
+            let head = common_prefix(&work[..known], &new[..known.min(new.len())]);
+            if head < known {
+                return head;
+            }
+            known + common_prefix(&previous_tail, &new[known..])
+        };
+        if self.heal_tail().is_some() {
+            let keep = keep_of(&self.work, &self.work);
+            let middle = String::from_utf16_lossy(&self.work[keep..]);
+            return Healing { keep, middle };
         }
+        let whole = self.heal_earlier();
+        self.work.truncate(self.prefix.len);
+        let keep = keep_of(&self.work, &whole);
+        let middle = String::from_utf16_lossy(&whole[keep..]);
+        self.whole = Some(whole);
+        Healing { keep, middle }
+    }
+
+    /// The text after the settled prefix after the line-local escapes.
+    fn escaped_tail(&self) -> Units {
+        let input = &self.input;
+        let end = stripped_end(input);
+        let tail1 = single_tilde(&input[..end], self.settled, self.fence1);
+        comparison_operators(&tail1, 0, self.fence2).0
+    }
+
+    /// Heals `input` after the settled prefix into `work` (after the prefix's text);
+    /// `None` when an edit would reach into the prefix.
+    fn heal_tail(&mut self) -> Option<()> {
+        self.work.truncate(self.prefix.len);
+        if self.input.is_empty() {
+            return Some(());
+        }
+        let tail = self.escaped_tail();
+        self.work.extend_from_slice(&tail);
+        heal_handlers(&mut self.work, &self.prefix, &self.regions)
+    }
+
+    /// The healed text when an edit would reach into the settled prefix: from the
+    /// prefix before it (an edit that drops a trailing tag with the line ending
+    /// before it), else from the whole text.
+    fn heal_earlier(&self) -> Units {
+        if let Some(earlier) = &self.earlier {
+            let mut text = self.work[..self.prefix.len].to_vec();
+            text.extend_from_slice(&self.escaped_tail());
+            if heal_handlers(&mut text, earlier, &self.regions[..earlier.len]).is_some() {
+                return text;
+            }
+        }
+        remend_units(&self.input)
+    }
+
+    /// Moves the settled prefix up to the last line start that qualifies.
+    fn settle(&mut self) {
+        let input = &self.input;
+        let end = stripped_end(input);
+        let Some(cut) = settle_point(input, self.settled, end) else {
+            return;
+        };
+        let delta = &input[self.settled..cut];
+        let scan1 = TailScan::new(delta, self.fence1);
+        if scan1.open_span.is_some() {
+            return;
+        }
+        let escaped = single_tilde(delta, 0, self.fence1);
+        let scan2 = TailScan::new(&escaped, self.fence2);
+        if scan2.open_span.is_some() {
+            return;
+        }
+        let (compared, open) = comparison_operators(&escaped, 0, self.fence2);
+        if open {
+            return;
+        }
+        let from = self.work.len();
+        self.work.extend_from_slice(&compared);
+        let Some((prefix, regions)) = self.prefix.extended(&self.work, from, &self.regions) else {
+            self.work.truncate(from);
+            return;
+        };
+        self.earlier = Some(std::mem::replace(&mut self.prefix, prefix));
+        self.regions.extend_from_slice(&regions);
+        self.settled = cut;
+        self.fence1 = scan1.open_fence;
+        self.fence2 = scan2.open_fence;
     }
 }
 
-/// [`remend`] on UTF-16 code units.
-pub fn remend_units(text: Units) -> Units {
-    if text.is_empty() {
-        return text;
+/// Where `strip_single_trailing_space` ends the text: one trailing space goes.
+fn stripped_end(text: &[u16]) -> usize {
+    let n = text.len();
+    if n >= 1 && text[n - 1] == SPACE && !(n >= 2 && text[n - 2] == SPACE) {
+        n - 1
+    } else {
+        n
     }
-    let mut result = strip_single_trailing_space(text);
-    let handlers: [fn(Units) -> Units; 13] = [
-        single_tilde,
-        comparison_operators,
+}
+
+/// The start of the last line in `text[from..end]` with text that is not whitespace
+/// from it on (so an edit at the end seldom reaches back over it).
+fn settle_point(text: &[u16], from: usize, end: usize) -> Option<usize> {
+    let last_content = text[from..end].iter().rposition(|&unit| !js_space(unit))? + from;
+    let newline = rfind_unit(&text[from..last_content], NEWLINE)? + from;
+    (newline + 1 > from).then_some(newline + 1)
+}
+
+fn common_prefix(left: &[u16], right: &[u16]) -> usize {
+    left.iter()
+        .zip(right)
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+/// remend on `text` after the settled `prefix` of its comparison output.
+fn heal_from(text: &[u16], prefix: &Settled, out: &mut Units) {
+    debug_assert_eq!(prefix.len, 0);
+    out.clear();
+    if text.is_empty() {
+        return;
+    }
+    let end = stripped_end(text);
+    let escaped = single_tilde(&text[..end], 0, None);
+    out.extend_from_slice(&comparison_operators(&escaped, 0, None).0);
+    heal_handlers(out, prefix, &[]).expect("an empty prefix holds no edit");
+}
+
+/// The handlers after comparison-operator's, in remend's order; `None` when one would
+/// edit the settled prefix.
+fn heal_handlers(text: &mut Units, prefix: &Settled, head: &[u8]) -> Option<()> {
+    let mut ctx = Ctx::new(std::mem::take(text), prefix, head);
+    let handlers: [fn(&mut Ctx<'_>) -> Option<()>; 11] = [
         incomplete_html_tag,
         incomplete_setext_heading,
         incomplete_links_and_images,
@@ -109,26 +257,28 @@ pub fn remend_units(text: Units) -> Units {
         incomplete_strikethrough,
         incomplete_block_katex,
     ];
+    let mut result = Some(());
     for (index, handler) in handlers.into_iter().enumerate() {
-        result = handler(result);
-        // The links handler (index 4) ends healing once it closed a link or image.
-        if index == 4
-            && (ends_with(&result, INCOMPLETE_LINK) || ends_with(&result, INCOMPLETE_IMAGE))
+        if handler(&mut ctx).is_none() {
+            result = None;
+            break;
+        }
+        // The links handler (index 2) ends healing once it closed a link or image.
+        if index == 2
+            && (ends_with(&ctx.text, INCOMPLETE_LINK) || ends_with(&ctx.text, INCOMPLETE_IMAGE))
         {
-            LAST_SCAN.set(None);
-            return result;
+            *text = ctx.text;
+            return Some(());
         }
     }
-    // `clearScanCache`: no text stays alive between calls.
-    LAST_SCAN.set(None);
-    strip_single_trailing_space(result)
-}
-
-fn strip_single_trailing_space(mut text: Units) -> Units {
-    if text.last() == Some(&SPACE) && !(text.len() >= 2 && text[text.len() - 2] == SPACE) {
-        text.pop();
+    *text = ctx.text;
+    result?;
+    let end = stripped_end(text);
+    if end < prefix.len {
+        return None;
     }
-    text
+    text.truncate(end);
+    Some(())
 }
 
 // -------------------------------------------------------------------------------------
@@ -312,19 +462,6 @@ fn trim_end(text: &[u16]) -> &[u16] {
     &text[..end]
 }
 
-fn concat(parts: &[&[u16]]) -> Units {
-    let mut out = Vec::with_capacity(parts.iter().map(|part| part.len()).sum());
-    for part in parts {
-        out.extend_from_slice(part);
-    }
-    out
-}
-
-fn appended(mut text: Units, suffix: &str) -> Units {
-    text.extend(suffix.encode_utf16());
-    text
-}
-
 fn letter_or_number(code_point: u32) -> bool {
     char::from_u32(code_point).is_some_and(rill_cmark::letter_or_number)
 }
@@ -384,7 +521,7 @@ const FENCE_BODY: u8 = 3;
 const CODE_SPAN: u8 = 4;
 const CODE_SPAN_OPEN: u8 = 5;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct OpenFence {
     marker: u16,
     length: usize,
@@ -392,39 +529,10 @@ struct OpenFence {
     quote_depth: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct OpenSpan {
     run_length: usize,
     start: usize,
-}
-
-/// A text's regions (`TextScan` without the text).
-struct ScanData {
-    regions: Vec<u8>,
-    open_fence: Option<OpenFence>,
-    open_span: Option<OpenSpan>,
-    math: OnceCell<Vec<u8>>,
-    has_link: OnceCell<bool>,
-    has_less: OnceCell<bool>,
-}
-
-struct Scan<'t> {
-    text: &'t [u16],
-    data: Rc<ScanData>,
-}
-
-impl std::ops::Deref for Scan<'_> {
-    type Target = ScanData;
-
-    fn deref(&self) -> &ScanData {
-        &self.data
-    }
-}
-
-thread_local! {
-    /// scan.ts `getScan`'s single-entry memo: handlers mostly pass the text on as they
-    /// got it, so one scan serves several of them.
-    static LAST_SCAN: RefCell<Option<(Units, Rc<ScanData>)>> = const { RefCell::new(None) };
 }
 
 fn digit(unit: Option<u16>) -> bool {
@@ -598,9 +706,13 @@ fn fence_content_start(
     (blank || i - content_start >= fence.list_indent).then_some(content_start)
 }
 
-fn paint_fences(text: &[u16], regions: &mut [u8]) -> Option<OpenFence> {
+/// Paints the fences of `text`, which starts at a line start with `open` open.
+fn paint_fences(
+    text: &[u16],
+    regions: &mut [u8],
+    mut open: Option<OpenFence>,
+) -> Option<OpenFence> {
     let n = text.len();
-    let mut open: Option<OpenFence> = None;
     let mut line_start = 0;
     while line_start < n {
         let line_end = index_of_unit(text, NEWLINE, line_start).unwrap_or(n);
@@ -698,314 +810,6 @@ fn paint_spans(text: &[u16], regions: &mut [u8]) -> Option<OpenSpan> {
     None
 }
 
-impl<'t> Scan<'t> {
-    fn new(text: &'t [u16]) -> Self {
-        let cached = LAST_SCAN.with_borrow(|last| {
-            last.as_ref()
-                .filter(|(units, _)| units.as_slice() == text)
-                .map(|(_, data)| Rc::clone(data))
-        });
-        if let Some(data) = cached {
-            return Scan { text, data };
-        }
-        let mut regions = vec![PROSE; text.len()];
-        let open_fence = paint_fences(text, &mut regions);
-        let open_span = paint_spans(text, &mut regions);
-        let data = Rc::new(ScanData {
-            regions,
-            open_fence,
-            open_span,
-            math: OnceCell::new(),
-            has_link: OnceCell::new(),
-            has_less: OnceCell::new(),
-        });
-        LAST_SCAN.set(Some((text.to_vec(), Rc::clone(&data))));
-        Scan { text, data }
-    }
-
-    fn region(&self, position: isize) -> Option<u8> {
-        usize::try_from(position)
-            .ok()
-            .and_then(|position| self.regions.get(position).copied())
-    }
-
-    /// `isCodeAt`: a fence or inline span.
-    fn code_at(&self, position: isize) -> bool {
-        if position >= self.regions.len() as isize {
-            return self.open_fence.is_some() || self.open_span.is_some();
-        }
-        if position < 0 {
-            return false;
-        }
-        self.regions[position as usize] != PROSE
-    }
-
-    fn complete_span_at(&self, position: isize) -> bool {
-        self.region(position) == Some(CODE_SPAN)
-    }
-
-    fn mask_at(mask: &[u8], text: &[u16], position: isize) -> bool {
-        if position < 0 || position >= text.len() as isize {
-            return false;
-        }
-        mask.get(position as usize) == Some(&1)
-    }
-
-    fn in_math(&self, position: isize) -> bool {
-        let mask = self.math.get_or_init(|| {
-            let text = self.text;
-            let has = text.contains(&DOLLAR)
-                || text.windows(2).any(|pair| {
-                    pair[0] == BACKSLASH && matches!(pair[1], OPEN_PAREN | OPEN_BRACKET)
-                });
-            if has { self.math_mask() } else { Vec::new() }
-        });
-        Self::mask_at(mask, self.text, position)
-    }
-
-    /// The link URL mask at `position` (`inLinkUrlAt`), replaying the position's line:
-    /// inside a `](` URL with a `)` still to come on the line.
-    fn in_link_url(&self, position: isize) -> bool {
-        let text = self.text;
-        let Ok(position) = usize::try_from(position) else {
-            return false;
-        };
-        if position >= text.len()
-            || text[position] == NEWLINE
-            || !*self
-                .has_link
-                .get_or_init(|| index_of(text, &[CLOSE_BRACKET, OPEN_PAREN], 0).is_some())
-        {
-            return false;
-        }
-        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
-        let line_end = index_of_unit(text, NEWLINE, position).unwrap_or(text.len());
-        let mut in_url = false;
-        for i in line_start..position {
-            if self.regions[i] != PROSE {
-                continue;
-            }
-            if text[i] == CLOSE_PAREN {
-                in_url = false;
-            } else if text[i] == OPEN_PAREN {
-                in_url = i > 0 && text[i - 1] == CLOSE_BRACKET;
-            }
-        }
-        in_url && (position..line_end).any(|i| text[i] == CLOSE_PAREN && self.regions[i] == PROSE)
-    }
-
-    /// The HTML tag mask at `position` (`inHtmlTagAt`). The mask is line by line, so this
-    /// replays the position's line instead of building it.
-    fn in_html_tag(&self, position: isize) -> bool {
-        let text = self.text;
-        let Ok(position) = usize::try_from(position) else {
-            return false;
-        };
-        if position >= text.len()
-            || text[position] == NEWLINE
-            || !*self
-                .has_less
-                .get_or_init(|| find_unit(text, LESS).is_some())
-        {
-            return false;
-        }
-        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
-        let mut in_tag = false;
-        for i in line_start..position {
-            if self.regions[i] != PROSE {
-                continue;
-            }
-            if text[i] == GREATER {
-                in_tag = false;
-            } else if text[i] == LESS {
-                in_tag = text.get(i + 1).is_some_and(|&next| {
-                    (next < 0x80 && (next as u8).is_ascii_alphabetic()) || next == SLASH
-                });
-            }
-        }
-        in_tag
-    }
-
-    fn math_mask(&self) -> Vec<u8> {
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum Context {
-            None,
-            InlineDollar,
-            BlockDollar,
-            InlineLatex,
-            BlockLatex,
-        }
-        let text = self.text;
-        let n = text.len();
-        let mut mask = vec![0; n];
-        let mut context = Context::None;
-        let mut i = 0;
-        while i < n {
-            mask[i] = u8::from(context != Context::None);
-            let delimiter = if self.regions[i] == PROSE {
-                let next = text.get(i + 1).copied();
-                if text[i] == BACKSLASH {
-                    if next == Some(DOLLAR) {
-                        Some((context, 2))
-                    } else {
-                        let latex = match (next, context) {
-                            (Some(OPEN_BRACKET), Context::None) => Some(Context::BlockLatex),
-                            (Some(CLOSE_BRACKET), Context::BlockLatex) => Some(Context::None),
-                            (Some(OPEN_PAREN), Context::None) => Some(Context::InlineLatex),
-                            (Some(CLOSE_PAREN), Context::InlineLatex) => Some(Context::None),
-                            _ => None,
-                        };
-                        latex.map(|latex| (latex, 2))
-                    }
-                } else if text[i] == DOLLAR
-                    && !matches!(context, Context::InlineLatex | Context::BlockLatex)
-                {
-                    let block = next == Some(DOLLAR);
-                    let after = if block {
-                        if context == Context::BlockDollar {
-                            Context::None
-                        } else {
-                            Context::BlockDollar
-                        }
-                    } else if context == Context::BlockDollar {
-                        context
-                    } else if context == Context::InlineDollar {
-                        Context::None
-                    } else {
-                        Context::InlineDollar
-                    };
-                    Some((after, if block { 2 } else { 1 }))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let Some((after, length)) = delimiter else {
-                i += 1;
-                continue;
-            };
-            context = after;
-            if length == 2 && i + 1 < n {
-                mask[i + 1] = u8::from(context != Context::None);
-            }
-            i += length;
-        }
-        mask
-    }
-
-    /// `countDoublePairs`: `**`, `~~` or `$$` in prose.
-    fn count_double_pairs(&self, unit: u16) -> usize {
-        let text = self.text;
-        let pair = [unit, unit];
-        let mut count = 0;
-        let mut cursor = index_of(text, &pair, 0);
-        while let Some(i) = cursor {
-            let next = if self.regions[i] == PROSE {
-                count += 1;
-                i + 2
-            } else {
-                i + 1
-            };
-            cursor = index_of(text, &pair, next);
-        }
-        count
-    }
-}
-
-// -------------------------------------------------------------------------------------
-// patterns.ts: end-anchored delimiter patterns
-// -------------------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-enum Tail {
-    /// `(marker)([^x]*?)$`
-    Plain,
-    /// `(\*\*)([^*]*\*?)$`
-    OptionalStar,
-    /// `(marker)([^x]+)x$`
-    HalfComplete,
-}
-
-/// `matchTrailing`: the content group of the leftmost match, if any.
-fn match_trailing(text: &[u16], delimiter: u16, marker_length: usize, tail: Tail) -> Option<Units> {
-    let last = last_index_of(text, &[delimiter], Some(text.len() as isize - 2));
-    let marker_end = last.map_or(text.len() as isize - 1, |last| last as isize);
-    let start = usize::try_from((marker_end - marker_length as isize + 1).max(0)).unwrap_or(0);
-    let slice = text.get(start..).unwrap_or(&[]);
-    let n = slice.len();
-    // `last` is the slice's last delimiter before its final unit, so a match's rest
-    // holds a delimiter only as that final unit: the tests below need no scan. A marker
-    // ending before `last` leaves it in the rest, so the search starts just past it.
-    let before_final = last.map(|last| last - start);
-    let final_delimiter = slice.last() == Some(&delimiter);
-    let first = before_final.map_or(0, |at| (at + 1).saturating_sub(marker_length));
-    for p in first..n {
-        if !slice[p..]
-            .iter()
-            .take(marker_length)
-            .eq(std::iter::repeat_n(&delimiter, marker_length))
-            || p + marker_length > n
-        {
-            continue;
-        }
-        let rest_start = p + marker_length;
-        if before_final.is_some_and(|at| at >= rest_start) {
-            continue;
-        }
-        // The rest is `slice[rest_start..]`, with no delimiter except perhaps the final.
-        let rest_len = n - rest_start;
-        let rest_has_final = final_delimiter && rest_len > 0;
-        let matched = match tail {
-            Tail::Plain => !rest_has_final,
-            Tail::OptionalStar => true,
-            Tail::HalfComplete => rest_has_final && rest_len >= 2,
-        };
-        if matched {
-            let content_end = match tail {
-                Tail::HalfComplete => n - 1,
-                _ => n,
-            };
-            return Some(slice[rest_start..content_end].to_vec());
-        }
-    }
-    None
-}
-
-// -------------------------------------------------------------------------------------
-// utils.ts
-// -------------------------------------------------------------------------------------
-
-fn find_matching_opening_bracket(text: &[u16], close: usize) -> Option<usize> {
-    let mut depth = 1;
-    for i in (0..close).rev() {
-        if text[i] == CLOSE_BRACKET {
-            depth += 1;
-        } else if text[i] == OPEN_BRACKET {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-    }
-    None
-}
-
-fn find_matching_closing_bracket(text: &[u16], open: usize) -> Option<usize> {
-    let mut depth = 1;
-    for (i, &unit) in text.iter().enumerate().skip(open + 1) {
-        if unit == OPEN_BRACKET {
-            depth += 1;
-        } else if unit == CLOSE_BRACKET {
-            depth -= 1;
-            if depth == 0 {
-                return Some(i);
-            }
-        }
-    }
-    None
-}
-
 fn is_horizontal_rule(text: &[u16], marker_index: usize, marker: u16) -> bool {
     let line_start = text[..marker_index]
         .iter()
@@ -1024,294 +828,282 @@ fn is_horizontal_rule(text: &[u16], marker_index: usize, marker: u16) -> bool {
 }
 
 // -------------------------------------------------------------------------------------
-// Handlers, in remend's priority order
+// scan.ts over a text after a settled prefix
 // -------------------------------------------------------------------------------------
 
-/// single-tilde-handler.ts: `20~25` → `20\~25`.
-fn single_tilde(text: Units) -> Units {
-    if !text.contains(&TILDE) {
-        return text;
-    }
-    let scan = Scan::new(&text);
-    let mut out = Vec::with_capacity(text.len() + 4);
-    let mut copied = 0;
-    let mut i = 0;
-    while i < text.len() {
-        let (code_point, length) = code_point_at(&text, i);
-        let tilde = i + length;
-        let matched = word_code_point(code_point)
-            && text.get(tilde) == Some(&TILDE)
-            && text.get(tilde + 1) != Some(&TILDE)
-            && tilde + 1 < text.len()
-            && word_code_point(code_point_at(&text, tilde + 1).0);
-        if matched {
-            if !scan.code_at(tilde as isize) {
-                out.extend_from_slice(&text[copied..tilde]);
-                out.push(BACKSLASH);
-                out.push(TILDE);
-                copied = tilde + 1;
-            }
-            i = tilde + 1;
-        } else {
-            i += length;
-        }
-    }
-    if copied == 0 {
-        return text;
-    }
-    out.extend_from_slice(&text[copied..]);
-    out
+/// The regions of a text that starts at a line start where no inline code span is
+/// open (the start of a text, or a settled prefix's end), given the fence open there.
+#[derive(Debug)]
+struct TailScan {
+    regions: Vec<u8>,
+    open_fence: Option<OpenFence>,
+    open_span: Option<OpenSpan>,
 }
 
-/// comparison-operator-handler.ts: `- > 25` → `- \> 25`.
-fn comparison_operators(text: Units) -> Units {
-    if !text.contains(&GREATER) {
-        return text;
+impl TailScan {
+    fn new(text: &[u16], fence: Option<OpenFence>) -> TailScan {
+        let mut regions = vec![PROSE; text.len()];
+        let open_fence = paint_fences(text, &mut regions, fence);
+        let open_span = paint_spans(text, &mut regions);
+        TailScan {
+            regions,
+            open_fence,
+            open_span,
+        }
     }
-    // `/^(\s*(?:[-*+]|\d+[.)]) +)>(=?\s*[$]?\d)/gm`: the position of `>` and the end.
-    let attempt = |p: usize| -> Option<(usize, usize)> {
-        let mut i = p;
-        while i < text.len() && js_space(text[i]) {
-            i += 1;
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum MathContext {
+    #[default]
+    None,
+    InlineDollar,
+    BlockDollar,
+    InlineLatex,
+    BlockLatex,
+}
+
+/// `text` (whole) seen from `split` on: the regions of `text[split..]` and, for the
+/// positions before it, the settled prefix's. Every question a handler asks about a
+/// position at or after `split` reads only `text[split..]` and units just before it
+/// (the prefix ends with a blank line).
+struct View<'a> {
+    text: &'a [u16],
+    split: usize,
+    head: &'a [u8],
+    scan: &'a TailScan,
+    /// The math mask of `text[split..]` (the context at `split` is none), built when
+    /// first asked for.
+    math: OnceCell<Vec<u8>>,
+    has_link: OnceCell<bool>,
+    has_less: OnceCell<bool>,
+}
+
+impl<'a> View<'a> {
+    fn new(text: &'a [u16], split: usize, head: &'a [u8], scan: &'a TailScan) -> View<'a> {
+        View {
+            text,
+            split,
+            head,
+            scan,
+            math: OnceCell::new(),
+            has_link: OnceCell::new(),
+            has_less: OnceCell::new(),
         }
-        match text.get(i).copied() {
-            Some(DASH | STAR | PLUS) => i += 1,
-            _ => {
-                let digits = i;
-                while digit(text.get(i).copied()) {
-                    i += 1;
-                }
-                if i == digits || !matches!(text.get(i).copied(), Some(DOT | CLOSE_PAREN)) {
-                    return None;
-                }
-                i += 1;
-            }
-        }
-        let spaces = i;
-        while text.get(i) == Some(&SPACE) {
-            i += 1;
-        }
-        if i == spaces || text.get(i) != Some(&GREATER) {
-            return None;
-        }
-        let greater = i;
-        i += 1;
-        if text.get(i) == Some(&EQUALS) {
-            i += 1;
-        }
-        while i < text.len() && js_space(text[i]) {
-            i += 1;
-        }
-        if text.get(i) == Some(&DOLLAR) {
-            i += 1;
-        }
-        digit(text.get(i).copied()).then_some((greater, i + 1))
-    };
-    let mut scan: Option<Scan<'_>> = None;
-    let mut escapes = Vec::new();
-    // Without U+2028 or U+2029, lines end only at `\n` or `\r`, which memchr finds.
-    let separators = text.iter().any(|&unit| matches!(unit, 0x2028 | 0x2029));
-    let mut p = 0;
-    while p <= text.len() {
-        let line_start = p == 0 || line_terminator(text[p - 1]);
-        if let Some((greater, end)) = line_start.then(|| attempt(p)).flatten() {
-            let scan = scan.get_or_insert_with(|| Scan::new(&text));
-            if !scan.code_at(p as isize) {
-                escapes.push(greater);
-            }
-            p = end;
-            continue;
-        }
-        // `^` only matches at line starts: go to the next one.
-        let next = if separators {
-            text[p..].iter().position(|&unit| line_terminator(unit))
+    }
+
+    fn tail(&self) -> &'a [u16] {
+        &self.text[self.split..]
+    }
+
+    fn region_at(&self, position: usize) -> u8 {
+        if position < self.split {
+            self.head[position]
         } else {
-            find_unit2(&text[p..], NEWLINE, CR)
+            self.scan.regions[position - self.split]
+        }
+    }
+
+    fn region(&self, position: isize) -> Option<u8> {
+        let position = usize::try_from(position).ok()?;
+        (position < self.text.len()).then(|| self.region_at(position))
+    }
+
+    /// `isCodeAt`: a fence or inline span.
+    fn code_at(&self, position: isize) -> bool {
+        if position >= self.text.len() as isize {
+            return self.scan.open_fence.is_some() || self.scan.open_span.is_some();
+        }
+        if position < 0 {
+            return false;
+        }
+        self.region_at(position as usize) != PROSE
+    }
+
+    fn complete_span_at(&self, position: isize) -> bool {
+        self.region(position) == Some(CODE_SPAN)
+    }
+
+    /// The math mask at a position at or after `split`.
+    fn in_math(&self, position: isize) -> bool {
+        let Ok(position) = usize::try_from(position) else {
+            return false;
         };
-        match next {
-            Some(offset) => p += offset + 1,
-            None => break,
+        if position < self.split || position >= self.text.len() {
+            return false;
         }
-    }
-    if escapes.is_empty() {
-        return text;
-    }
-    let mut out = Vec::with_capacity(text.len() + escapes.len());
-    let mut copied = 0;
-    for greater in escapes {
-        out.extend_from_slice(&text[copied..greater]);
-        out.push(BACKSLASH);
-        copied = greater;
-    }
-    out.extend_from_slice(&text[copied..]);
-    out
-}
-
-/// html-tag-handler.ts: drops an incomplete trailing tag (`text <custom`).
-fn incomplete_html_tag(text: Units) -> Units {
-    let starts_tag = |index: usize| {
-        text.get(index + 1).is_some_and(|&next| {
-            (next < 0x80 && (next as u8).is_ascii_alphabetic()) || next == SLASH
-        })
-    };
-    // `/<[a-zA-Z/][^>]*$/`: the first such `<` after the last `>`.
-    let after = text
-        .iter()
-        .rposition(|&unit| unit == GREATER)
-        .map_or(0, |index| index + 1);
-    let Some(first) = (after..text.len()).find(|&index| text[index] == LESS && starts_tag(index))
-    else {
-        return text;
-    };
-    let check_math = text.contains(&DOLLAR)
-        || text
-            .windows(2)
-            .any(|pair| pair[0] == BACKSLASH && matches!(pair[1], OPEN_PAREN | OPEN_BRACKET));
-    let scan = Scan::new(&text);
-    for index in first..text.len() {
-        if text[index] != LESS || !starts_tag(index) {
-            continue;
-        }
-        if scan.code_at(index as isize) {
-            continue;
-        }
-        if check_math && scan.in_math(index as isize) {
-            continue;
-        }
-        return trim_end(&text[..index]).to_vec();
-    }
-    drop(scan);
-    text
-}
-
-/// setext-heading-handler.ts: breaks a `-`/`=` line that would make a heading.
-fn incomplete_setext_heading(text: Units) -> Units {
-    let Some(last_newline) = text.iter().rposition(|&unit| unit == NEWLINE) else {
-        return text;
-    };
-    let last_line = &text[last_newline + 1..];
-    let previous = &text[..last_newline];
-    let trimmed = trim(last_line);
-    for marker in [DASH, EQUALS] {
-        // `/^-{1,2}$/` on the trimmed line, and not `/^[\s]*-{1,2}[\s]+$/`.
-        let only = matches!(trimmed.len(), 1 | 2) && trimmed.iter().all(|&unit| unit == marker);
-        let with_space = {
-            let rest = trim_start(last_line);
-            let run = rest.iter().take_while(|&&unit| unit == marker).count();
-            let after = &rest[run..];
-            matches!(run, 1 | 2) && !after.is_empty() && after.iter().all(|&unit| js_space(unit))
-        };
-        if only && !with_space {
-            let previous_line = previous
-                .iter()
-                .rposition(|&unit| unit == NEWLINE)
-                .map_or(previous, |index| &previous[index + 1..]);
-            if !previous_line.is_empty() && !trim(previous_line).is_empty() {
-                return appended(text, "\u{200b}");
+        let mask = self.math.get_or_init(|| {
+            let text = self.tail();
+            let has = text.contains(&DOLLAR)
+                || text.windows(2).any(|pair| {
+                    pair[0] == BACKSLASH && matches!(pair[1], OPEN_PAREN | OPEN_BRACKET)
+                });
+            if has {
+                math_mask(text, &self.scan.regions, MathContext::None).0
+            } else {
+                Vec::new()
             }
-        }
+        });
+        mask.get(position - self.split) == Some(&1)
     }
-    text
-}
 
-/// link-image-handler.ts, `linkMode: "protocol"`.
-fn incomplete_links_and_images(text: Units) -> Units {
-    let mut current = text;
-    for _ in 0..32 {
-        let next = heal_trailing_link_or_image(&current);
-        if next.len() >= current.len() {
-            return next;
-        }
-        current = next;
-    }
-    current
-}
-
-fn heal_trailing_link_or_image(text: &[u16]) -> Units {
-    let scan = Scan::new(text);
-    let paren = last_index_of(text, &units("]("), None);
-    if let Some(paren) = paren
-        && !scan.code_at(paren as isize)
-        && let Some(result) = incomplete_url(text, &scan, paren)
-    {
-        return result;
-    }
-    // The last `[` outside code with no matching `]` (`findMatchingClosingBracket`, which
-    // counts every bracket): one pass pairs them all, instead of a scan per `[`.
-    let mut open = Vec::new();
-    for_each_unit2(text, OPEN_BRACKET, CLOSE_BRACKET, |index| {
-        if text[index] == OPEN_BRACKET {
-            open.push(index);
-        } else {
-            open.pop();
-        }
-    });
-    for &i in open.iter().rev() {
-        if !scan.code_at(i as isize)
-            && let Some(result) = incomplete_link_text(text, i)
+    /// The link URL mask at `position` (`inLinkUrlAt`), replaying the position's line:
+    /// inside a `](` URL with a `)` still to come on the line.
+    fn in_link_url(&self, position: isize) -> bool {
+        let text = self.text;
+        let Ok(position) = usize::try_from(position) else {
+            return false;
+        };
+        if position >= text.len()
+            || text[position] == NEWLINE
+            || !*self
+                .has_link
+                .get_or_init(|| index_of(self.tail(), &[CLOSE_BRACKET, OPEN_PAREN], 0).is_some())
         {
-            return result;
+            return false;
         }
+        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
+        let line_end = index_of_unit(text, NEWLINE, position).unwrap_or(text.len());
+        let mut in_url = false;
+        for i in line_start..position {
+            if self.region_at(i) != PROSE {
+                continue;
+            }
+            if text[i] == CLOSE_PAREN {
+                in_url = false;
+            } else if text[i] == OPEN_PAREN {
+                in_url = i > 0 && text[i - 1] == CLOSE_BRACKET;
+            }
+        }
+        in_url && (position..line_end).any(|i| text[i] == CLOSE_PAREN && self.region_at(i) == PROSE)
     }
-    text.to_vec()
+
+    /// The HTML tag mask at `position` (`inHtmlTagAt`). The mask is line by line, so this
+    /// replays the position's line instead of building it.
+    fn in_html_tag(&self, position: isize) -> bool {
+        let text = self.text;
+        let Ok(position) = usize::try_from(position) else {
+            return false;
+        };
+        if position >= text.len()
+            || text[position] == NEWLINE
+            || !*self
+                .has_less
+                .get_or_init(|| find_unit(self.tail(), LESS).is_some())
+        {
+            return false;
+        }
+        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
+        let mut in_tag = false;
+        for i in line_start..position {
+            if self.region_at(i) != PROSE {
+                continue;
+            }
+            if text[i] == GREATER {
+                in_tag = false;
+            } else if text[i] == LESS {
+                in_tag = text.get(i + 1).is_some_and(|&next| {
+                    (next < 0x80 && (next as u8).is_ascii_alphabetic()) || next == SLASH
+                });
+            }
+        }
+        in_tag
+    }
+
+    fn in_code(&self, index: usize) -> bool {
+        self.code_at(index as isize) || self.complete_span_at(index as isize)
+    }
 }
 
-fn incomplete_url(text: &[u16], scan: &Scan<'_>, paren: usize) -> Option<Units> {
-    if text[paren + 2..].contains(&CLOSE_PAREN) {
-        return None;
+/// The math mask of `text` from `context`, and the context at its end.
+fn math_mask(text: &[u16], regions: &[u8], mut context: MathContext) -> (Vec<u8>, MathContext) {
+    let n = text.len();
+    let mut mask = vec![0; n];
+    let mut i = 0;
+    while i < n {
+        mask[i] = u8::from(context != MathContext::None);
+        let delimiter = if regions[i] == PROSE {
+            let next = text.get(i + 1).copied();
+            if text[i] == BACKSLASH {
+                if next == Some(DOLLAR) {
+                    Some((context, 2))
+                } else {
+                    let latex = match (next, context) {
+                        (Some(OPEN_BRACKET), MathContext::None) => Some(MathContext::BlockLatex),
+                        (Some(CLOSE_BRACKET), MathContext::BlockLatex) => Some(MathContext::None),
+                        (Some(OPEN_PAREN), MathContext::None) => Some(MathContext::InlineLatex),
+                        (Some(CLOSE_PAREN), MathContext::InlineLatex) => Some(MathContext::None),
+                        _ => None,
+                    };
+                    latex.map(|latex| (latex, 2))
+                }
+            } else if text[i] == DOLLAR
+                && !matches!(context, MathContext::InlineLatex | MathContext::BlockLatex)
+            {
+                let block = next == Some(DOLLAR);
+                let after = if block {
+                    if context == MathContext::BlockDollar {
+                        MathContext::None
+                    } else {
+                        MathContext::BlockDollar
+                    }
+                } else if context == MathContext::BlockDollar {
+                    context
+                } else if context == MathContext::InlineDollar {
+                    MathContext::None
+                } else {
+                    MathContext::InlineDollar
+                };
+                Some((after, if block { 2 } else { 1 }))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let Some((after, length)) = delimiter else {
+            i += 1;
+            continue;
+        };
+        context = after;
+        if length == 2 && i + 1 < n {
+            mask[i + 1] = u8::from(context != MathContext::None);
+        }
+        i += length;
     }
-    let open = find_matching_opening_bracket(text, paren)?;
-    if scan.code_at(open as isize) {
-        return None;
-    }
-    let image = open > 0 && text[open - 1] == BANG;
-    let start = if image { open - 1 } else { open };
-    let label = &text[open + 1..paren];
-    let target = if image {
-        "](streamdown:incomplete-image)"
-    } else {
-        "](streamdown:incomplete-link)"
-    };
-    let opener: &[u16] = if image {
-        &[BANG, OPEN_BRACKET]
-    } else {
-        &[OPEN_BRACKET]
-    };
-    Some(concat(&[&text[..start], opener, label, &units(target)]))
+    (mask, context)
 }
 
-fn incomplete_link_text(text: &[u16], i: usize) -> Option<Units> {
-    let image = i > 0 && text[i - 1] == BANG;
-    let open = if image { i - 1 } else { i };
-    let unclosed =
-        !text[i + 1..].contains(&CLOSE_BRACKET) || find_matching_closing_bracket(text, i).is_none();
-    if !unclosed {
-        return None;
+// -------------------------------------------------------------------------------------
+// What the handlers read, from a position on
+// -------------------------------------------------------------------------------------
+
+/// `countDoublePairs` from `from`: `**`, `~~` or `$$` in prose.
+fn count_double_pairs(view: &View<'_>, unit: u16, from: usize) -> usize {
+    let text = view.text;
+    let pair = [unit, unit];
+    let mut count = 0;
+    let mut cursor = index_of(text, &pair, from);
+    while let Some(i) = cursor {
+        let next = if view.region_at(i) == PROSE {
+            count += 1;
+            i + 2
+        } else {
+            i + 1
+        };
+        cursor = index_of(text, &pair, next);
     }
-    if image {
-        let alt = &text[i + 1..];
-        return Some(concat(&[
-            &text[..open],
-            &[BANG, OPEN_BRACKET],
-            alt,
-            &units("](streamdown:incomplete-image)"),
-        ]));
-    }
-    Some(appended(text.to_vec(), "](streamdown:incomplete-link)"))
+    count
 }
 
 /// emphasis-handlers.ts `shouldSkipAsterisk`.
-fn skip_asterisk(scan: &Scan<'_>, index: usize, previous: Option<u16>, next: Option<u16>) -> bool {
+fn skip_asterisk(view: &View<'_>, index: usize, previous: Option<u16>, next: Option<u16>) -> bool {
     // `shouldSkipAsterisk` is an or of its tests; the math test, which needs the math
     // mask, goes last.
     let skip = if previous == Some(BACKSLASH) {
         true
     } else if previous != Some(STAR) && next == Some(STAR) {
-        let after = if index + 2 < scan.text.len() {
-            Some(scan.text[index + 2])
-        } else {
-            None
-        };
+        let after = view.text.get(index + 2).copied();
         after != Some(STAR)
     } else if previous == Some(STAR) {
         true
@@ -1320,19 +1112,20 @@ fn skip_asterisk(scan: &Scan<'_>, index: usize, previous: Option<u16>, next: Opt
         let next_space = next.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
         previous_space && next_space
     };
-    skip || scan.in_math(index as isize)
+    skip || view.in_math(index as isize)
 }
 
 fn whitespace_unit(unit: u16) -> bool {
     matches!(unit, SPACE | TAB | NEWLINE)
 }
 
-fn count_single_asterisks(scan: &Scan<'_>) -> usize {
-    let text = scan.text;
-    let mut count = 0;
+/// `countSingleAsterisks` from `from`, where the count so far is `count` (and no
+/// chain is open: the unit before `from` is a line ending, or there is none).
+fn count_single_asterisks(view: &View<'_>, from: usize, mut count: usize) -> usize {
+    let text = view.text;
     let mut chain = false;
-    for index in 0..text.len() {
-        if text[index] != STAR || scan.regions[index] != PROSE {
+    for index in from..text.len() {
+        if text[index] != STAR || view.region_at(index) != PROSE {
             if !word_unit(Some(text[index])) {
                 chain = false;
             }
@@ -1344,13 +1137,13 @@ fn count_single_asterisks(scan: &Scan<'_>) -> usize {
             None
         };
         let next = text.get(index + 1).copied();
-        if skip_asterisk(scan, index, previous, next) {
+        if skip_asterisk(view, index, previous, next) {
             continue;
         }
         let internal = word_unit(previous) && word_unit(next);
         let can_open = next.is_some_and(|unit| !whitespace_unit(unit));
         let can_close = previous.is_some_and(|unit| !whitespace_unit(unit));
-        if internal && count % 2 == 0 && !chain {
+        if internal && count.is_multiple_of(2) && !chain {
             continue;
         }
         if (can_close && count % 2 == 1) || can_open {
@@ -1361,13 +1154,13 @@ fn count_single_asterisks(scan: &Scan<'_>) -> usize {
     count
 }
 
-fn count_single_underscores(scan: &Scan<'_>) -> usize {
-    let text = scan.text;
+fn count_single_underscores(view: &View<'_>, from: usize) -> usize {
+    let text = view.text;
     let mut count = 0;
-    let mut cursor = index_of_unit(text, UNDERSCORE, 0);
+    let mut cursor = index_of_unit(text, UNDERSCORE, from);
     while let Some(index) = cursor {
         cursor = index_of_unit(text, UNDERSCORE, index + 1);
-        if scan.regions[index] != PROSE {
+        if view.region_at(index) != PROSE {
             continue;
         }
         let previous = if index > 0 {
@@ -1381,9 +1174,9 @@ fn count_single_underscores(scan: &Scan<'_>) -> usize {
             || previous == Some(UNDERSCORE)
             || next == Some(UNDERSCORE)
             || (word_unit(previous) && word_unit(next))
-            || scan.in_math(index as isize)
-            || scan.in_link_url(index as isize)
-            || scan.in_html_tag(index as isize);
+            || view.in_math(index as isize)
+            || view.in_link_url(index as isize)
+            || view.in_html_tag(index as isize);
         if !skip {
             count += 1;
         }
@@ -1391,11 +1184,11 @@ fn count_single_underscores(scan: &Scan<'_>) -> usize {
     count
 }
 
-fn count_triple_asterisks(scan: &Scan<'_>) -> usize {
+fn count_triple_asterisks(view: &View<'_>, from: usize) -> usize {
     let mut count = 0;
     let mut run = 0;
-    for (index, &unit) in scan.text.iter().enumerate() {
-        if unit == STAR && scan.regions[index] == PROSE {
+    for (index, &unit) in view.text.iter().enumerate().skip(from) {
+        if unit == STAR && view.region_at(index) == PROSE {
             run += 1;
         } else {
             count += run / 3;
@@ -1405,22 +1198,22 @@ fn count_triple_asterisks(scan: &Scan<'_>) -> usize {
     count + run / 3
 }
 
-/// `hasUnmatchedDoubleUnderscore`.
-fn unmatched_double_underscore(scan: &Scan<'_>) -> bool {
-    let text = scan.text;
+/// `hasUnmatchedDoubleUnderscore` from `from`: whether an odd number of runs count.
+fn unmatched_double_underscore(view: &View<'_>, from: usize) -> bool {
+    let text = view.text;
     let n = text.len();
     // `isThematicBreakRun`'s memo: the line end and verdict.
     let mut memo: (isize, bool) = (-1, false);
     let mut unmatched = false;
-    let mut i = 0;
+    let mut i = from;
     while i < n {
-        if text[i] != UNDERSCORE || scan.regions[i] != PROSE {
+        if text[i] != UNDERSCORE || view.region_at(i) != PROSE {
             i += 1;
             continue;
         }
         let first = i;
         let mut end = i + 1;
-        while end < n && text[end] == UNDERSCORE && scan.regions[end] == PROSE {
+        while end < n && text[end] == UNDERSCORE && view.region_at(end) == PROSE {
             end += 1;
         }
         i = end;
@@ -1457,9 +1250,9 @@ fn unmatched_double_underscore(scan: &Scan<'_>) -> bool {
                 continue;
             }
         }
-        if scan.in_math(start as isize)
-            || scan.in_link_url(start as isize)
-            || scan.in_html_tag(start as isize)
+        if view.in_math(start as isize)
+            || view.in_link_url(start as isize)
+            || view.in_html_tag(start as isize)
         {
             continue;
         }
@@ -1470,84 +1263,14 @@ fn unmatched_double_underscore(scan: &Scan<'_>) -> bool {
     unmatched
 }
 
-/// `shouldSkipBoldCompletion` / `shouldSkipItalicCompletion` (which differ in the rule's
-/// marker).
-fn skip_completion(text: &[u16], content: &[u16], marker_index: usize, rule: u16) -> bool {
-    if content.is_empty() || whitespace_or_markers(content) {
-        return true;
-    }
-    let line_start = text[..marker_index]
-        .iter()
-        .rposition(|&unit| unit == NEWLINE)
-        .map_or(0, |index| index + 1);
-    if list_item_prefix(&text[line_start..marker_index]) && content.contains(&NEWLINE) {
-        return true;
-    }
-    is_horizontal_rule(text, marker_index, rule)
-}
-
-fn in_code(scan: &Scan<'_>, index: usize) -> bool {
-    scan.code_at(index as isize) || scan.complete_span_at(index as isize)
-}
-
-fn incomplete_bold(text: Units) -> Units {
-    let Some(content) = match_trailing(&text, STAR, 2, Tail::OptionalStar) else {
-        return text;
-    };
-    let marker = last_index_of(&text, &[STAR, STAR], None).expect("the match holds **");
-    let scan = Scan::new(&text);
-    if in_code(&scan, marker) || skip_completion(&text, &content, marker, STAR) {
-        return text;
-    }
-    if scan.count_double_pairs(STAR) % 2 == 1 {
-        drop(scan);
-        return appended(
-            text,
-            if content.last() == Some(&STAR) {
-                "*"
-            } else {
-                "**"
-            },
-        );
-    }
-    drop(scan);
-    text
-}
-
-fn incomplete_double_underscore_italic(text: Units) -> Units {
-    let Some(content) = match_trailing(&text, UNDERSCORE, 2, Tail::Plain) else {
-        if match_trailing(&text, UNDERSCORE, 2, Tail::HalfComplete).is_some() {
-            let marker =
-                last_index_of(&text, &[UNDERSCORE, UNDERSCORE], None).expect("the match holds __");
-            let scan = Scan::new(&text);
-            if !in_code(&scan, marker) && unmatched_double_underscore(&scan) {
-                drop(scan);
-                return appended(text, "_");
-            }
-        }
-        return text;
-    };
-    let marker = last_index_of(&text, &[UNDERSCORE, UNDERSCORE], None).expect("the match holds __");
-    let scan = Scan::new(&text);
-    if in_code(&scan, marker) || skip_completion(&text, &content, marker, UNDERSCORE) {
-        return text;
-    }
-    if unmatched_double_underscore(&scan) {
-        drop(scan);
-        return appended(text, "__");
-    }
-    drop(scan);
-    text
-}
-
-fn first_single_asterisk(scan: &Scan<'_>) -> Option<usize> {
-    let text = scan.text;
-    let mut cursor = index_of_unit(text, STAR, 0);
+fn first_single_asterisk(view: &View<'_>, from: usize) -> Option<usize> {
+    let text = view.text;
+    let mut cursor = index_of_unit(text, STAR, from);
     while let Some(i) = cursor {
         cursor = index_of_unit(text, STAR, i + 1);
         let previous = at(text, i as isize - 1);
         let next = text.get(i + 1).copied();
-        let lone = scan.regions[i] == PROSE
+        let lone = view.region_at(i) == PROSE
             && previous != Some(STAR)
             && next != Some(STAR)
             && previous != Some(BACKSLASH);
@@ -1566,7 +1289,7 @@ fn first_single_asterisk(scan: &Scan<'_>) -> Option<usize> {
             continue;
         }
         // The last of `isLoneProseAsterisk`'s tests, which needs the math mask.
-        if scan.in_math(i as isize) {
+        if view.in_math(i as isize) {
             continue;
         }
         return Some(i);
@@ -1574,45 +1297,22 @@ fn first_single_asterisk(scan: &Scan<'_>) -> Option<usize> {
     None
 }
 
-fn incomplete_single_asterisk_italic(text: Units) -> Units {
-    if match_trailing(&text, STAR, 1, Tail::Plain).is_none() {
-        return text;
-    }
-    let scan = Scan::new(&text);
-    let Some(first) = first_single_asterisk(&scan) else {
-        return text;
-    };
-    if in_code(&scan, first) {
-        return text;
-    }
-    let content = &text[first + 1..];
-    if content.is_empty() || whitespace_or_markers(content) {
-        return text;
-    }
-    if count_single_asterisks(&scan) % 2 == 1 {
-        drop(scan);
-        return appended(text, "*");
-    }
-    drop(scan);
-    text
-}
-
-fn first_single_underscore(scan: &Scan<'_>) -> Option<usize> {
-    let text = scan.text;
-    let mut cursor = index_of_unit(text, UNDERSCORE, 0);
+fn first_single_underscore(view: &View<'_>, from: usize) -> Option<usize> {
+    let text = view.text;
+    let mut cursor = index_of_unit(text, UNDERSCORE, from);
     while let Some(i) = cursor {
         cursor = index_of_unit(text, UNDERSCORE, i + 1);
         let previous = at(text, i as isize - 1);
         let next = text.get(i + 1).copied();
         // Word-internal underscores are skipped either way; testing them first spares
         // the masks.
-        if scan.regions[i] == PROSE
+        if view.region_at(i) == PROSE
             && previous != Some(UNDERSCORE)
             && next != Some(UNDERSCORE)
             && previous != Some(BACKSLASH)
             && !(previous.is_some() && next.is_some() && word_unit(previous) && word_unit(next))
-            && !scan.in_math(i as isize)
-            && !scan.in_link_url(i as isize)
+            && !view.in_math(i as isize)
+            && !view.in_link_url(i as isize)
         {
             return Some(i);
         }
@@ -1620,144 +1320,856 @@ fn first_single_underscore(scan: &Scan<'_>) -> Option<usize> {
     None
 }
 
-fn incomplete_single_underscore_italic(text: Units) -> Units {
-    if match_trailing(&text, UNDERSCORE, 1, Tail::Plain).is_none() {
-        return text;
+fn starts_tag(text: &[u16], index: usize) -> bool {
+    text.get(index + 1)
+        .is_some_and(|&next| (next < 0x80 && (next as u8).is_ascii_alphabetic()) || next == SLASH)
+}
+
+/// The first `<` from `from` that starts a tag outside code and math (what
+/// html-tag-handler drops from).
+fn first_tag_start(view: &View<'_>, from: usize) -> Option<usize> {
+    let text = view.text;
+    let mut cursor = index_of_unit(text, LESS, from);
+    while let Some(index) = cursor {
+        cursor = index_of_unit(text, LESS, index + 1);
+        if starts_tag(text, index) && !view.code_at(index as isize) && !view.in_math(index as isize)
+        {
+            return Some(index);
+        }
     }
-    let scan = Scan::new(&text);
-    let Some(first) = first_single_underscore(&scan) else {
-        return text;
+    None
+}
+
+/// The `[`s from `from` with no `]` to close them (`findMatchingClosingBracket`, which
+/// counts every bracket), pushed onto `open`; and for each `](`, the `[` it closes
+/// (`findMatchingOpeningBracket`), the last one into `last_link`.
+fn pair_brackets(
+    text: &[u16],
+    from: usize,
+    open: &mut Vec<usize>,
+    last_link: &mut Option<(usize, Option<usize>)>,
+) {
+    for_each_unit2(&text[from..], OPEN_BRACKET, CLOSE_BRACKET, |offset| {
+        let index = from + offset;
+        if text[index] == OPEN_BRACKET {
+            open.push(index);
+        } else {
+            let matched = open.pop();
+            if text.get(index + 1) == Some(&OPEN_PAREN) {
+                *last_link = Some((index, matched));
+            }
+        }
+    });
+}
+
+/// `lastIndexOf(pattern)` with no start limit, in `text[from..]`.
+fn last_index_from(text: &[u16], pattern: &[u16], from: usize) -> Option<usize> {
+    last_index_of(&text[from..], pattern, None).map(|index| index + from)
+}
+
+// -------------------------------------------------------------------------------------
+// The settled prefix
+// -------------------------------------------------------------------------------------
+
+/// What the handlers read from a settled prefix of their text, folded as it grows.
+#[derive(Clone, Debug, Default)]
+struct Settled {
+    len: usize,
+    fence: Option<OpenFence>,
+    math: MathContext,
+    /// `**`, `~~` and `$$` pairs.
+    pairs: [usize; 3],
+    single_asterisks: usize,
+    single_underscores: usize,
+    triple_asterisks: usize,
+    double_underscore_odd: bool,
+    first_single_asterisk: Option<usize>,
+    first_single_underscore: Option<usize>,
+    first_double_star: Option<usize>,
+    first_double_dollar: Option<usize>,
+    /// The last `*`, `_` and `~`.
+    last_unit: [Option<usize>; 3],
+    /// The last `**`, `__`, `~~` and `***`.
+    last_run: [Option<usize>; 4],
+    last_close_paren: Option<usize>,
+    last_greater: Option<usize>,
+    /// The last unit `whitespace_or_markers` does not accept.
+    last_content: Option<usize>,
+    open_brackets: Vec<usize>,
+    last_link: Option<(usize, Option<usize>)>,
+    /// The first tag start after the last `>`.
+    tag_start: Option<usize>,
+}
+
+const MARKERS: [u16; 3] = [STAR, UNDERSCORE, TILDE];
+const RUNS: [&[u16]; 4] = [
+    &[STAR, STAR],
+    &[UNDERSCORE, UNDERSCORE],
+    &[TILDE, TILDE],
+    &[STAR, STAR, STAR],
+];
+
+fn later(old: Option<usize>, new: Option<usize>) -> Option<usize> {
+    new.or(old)
+}
+
+impl Settled {
+    /// This prefix grown to `text` (whose first `from` units are this prefix), with
+    /// the regions of `text[from..]` for [`Settled::commit`]; `None` when `text` does
+    /// not end where a prefix can (an inline code span or math still open).
+    fn extended(&self, text: &[u16], from: usize, head: &[u8]) -> Option<(Settled, Vec<u8>)> {
+        let scan = TailScan::new(&text[from..], self.fence);
+        if scan.open_span.is_some() {
+            return None;
+        }
+        let (mask, math) = math_mask(&text[from..], &scan.regions, self.math);
+        if math != MathContext::None || self.math != MathContext::None {
+            return None;
+        }
+        let view = View::new(text, from, head, &scan);
+        // The mask from a context of none is what `View` builds (only text with math
+        // delimiters can set it).
+        view.math.set(mask).expect("a new view");
+        let mut next = Settled {
+            len: text.len(),
+            fence: scan.open_fence,
+            math,
+            pairs: [0; 3],
+            single_asterisks: count_single_asterisks(&view, from, self.single_asterisks),
+            single_underscores: self.single_underscores + count_single_underscores(&view, from),
+            triple_asterisks: self.triple_asterisks + count_triple_asterisks(&view, from),
+            double_underscore_odd: self.double_underscore_odd
+                ^ unmatched_double_underscore(&view, from),
+            first_single_asterisk: self
+                .first_single_asterisk
+                .or_else(|| first_single_asterisk(&view, from)),
+            first_single_underscore: self
+                .first_single_underscore
+                .or_else(|| first_single_underscore(&view, from)),
+            first_double_star: self
+                .first_double_star
+                .or_else(|| index_of(text, &[STAR, STAR], from)),
+            first_double_dollar: self
+                .first_double_dollar
+                .or_else(|| index_of(text, &[DOLLAR, DOLLAR], from)),
+            last_unit: [None; 3],
+            last_run: [None; 4],
+            last_close_paren: later(
+                self.last_close_paren,
+                last_index_from(text, &[CLOSE_PAREN], from),
+            ),
+            last_greater: later(self.last_greater, last_index_from(text, &[GREATER], from)),
+            last_content: later(
+                self.last_content,
+                text[from..]
+                    .iter()
+                    .rposition(|&unit| !whitespace_or_markers(&[unit]))
+                    .map(|index| index + from),
+            ),
+            open_brackets: self.open_brackets.clone(),
+            last_link: self.last_link,
+            tag_start: None,
+        };
+        for (index, unit) in [STAR, TILDE, DOLLAR].into_iter().enumerate() {
+            next.pairs[index] = self.pairs[index] + count_double_pairs(&view, unit, from);
+        }
+        for (index, unit) in MARKERS.into_iter().enumerate() {
+            next.last_unit[index] =
+                later(self.last_unit[index], last_index_from(text, &[unit], from));
+        }
+        for (index, run) in RUNS.into_iter().enumerate() {
+            next.last_run[index] = later(self.last_run[index], last_index_from(text, run, from));
+        }
+        pair_brackets(text, from, &mut next.open_brackets, &mut next.last_link);
+        next.tag_start = match last_index_from(text, &[GREATER], from) {
+            Some(greater) => first_tag_start(&view, greater + 1),
+            None => self.tag_start.or_else(|| first_tag_start(&view, from)),
+        };
+        Some((next, scan.regions))
+    }
+}
+
+// -------------------------------------------------------------------------------------
+// The handlers' text
+// -------------------------------------------------------------------------------------
+
+/// A handler's text, `prefix.len` units of it settled, and the scan of the rest.
+struct Ctx<'p> {
+    text: Units,
+    prefix: &'p Settled,
+    /// The settled prefix's regions.
+    head: &'p [u8],
+    scan: TailScan,
+}
+
+impl<'p> Ctx<'p> {
+    fn split(&self) -> usize {
+        self.prefix.len
+    }
+
+    fn new(text: Units, prefix: &'p Settled, head: &'p [u8]) -> Ctx<'p> {
+        let scan = TailScan::new(&text[prefix.len..], prefix.fence);
+        Ctx {
+            text,
+            prefix,
+            head,
+            scan,
+        }
+    }
+
+    fn view(&self) -> View<'_> {
+        View::new(&self.text, self.prefix.len, self.head, &self.scan)
+    }
+
+    /// Cuts the text at `at` and appends `suffix`; `None` (with no change) when `at`
+    /// is inside the settled prefix.
+    fn edit(&mut self, at: usize, suffix: &[u16]) -> Option<()> {
+        if at < self.prefix.len {
+            return None;
+        }
+        self.text.truncate(at);
+        self.text.extend_from_slice(suffix);
+        self.scan = TailScan::new(&self.text[self.prefix.len..], self.prefix.fence);
+        Some(())
+    }
+
+    fn append(&mut self, suffix: &str) -> Option<()> {
+        let at = self.text.len();
+        self.edit(at, &units(suffix))
+    }
+
+    /// `lastIndexOf(pattern)`, limited to starts at or before `limit`.
+    fn last_index(
+        &self,
+        pattern: &[u16],
+        limit: Option<usize>,
+        settled: Option<usize>,
+    ) -> Option<usize> {
+        let split = self.split();
+        let text = &self.text;
+        let tail = match limit {
+            Some(limit) if limit < split => None,
+            Some(limit) => last_index_of(&text[split..], pattern, Some((limit - split) as isize))
+                .map(|index| index + split),
+            None => last_index_from(text, pattern, split),
+        };
+        tail.or(settled)
+    }
+
+    /// `whitespace_or_markers(text[from..])`.
+    fn blank_from(&self, from: usize) -> bool {
+        let split = self.split();
+        if from < split && self.prefix.last_content.is_some_and(|last| last >= from) {
+            return false;
+        }
+        whitespace_or_markers(&self.text[from.max(split)..])
+    }
+
+    /// Whether `text[from..]` holds a line ending.
+    fn newline_from(&self, from: usize) -> bool {
+        // The settled prefix ends with one.
+        from < self.split() || self.text[from..].contains(&NEWLINE)
+    }
+
+    fn pairs(&self, index: usize, unit: u16) -> usize {
+        let split = self.split();
+        let settled = self.prefix.pairs[index];
+        settled + count_double_pairs(&self.view(), unit, split)
+    }
+
+    fn single_asterisks(&self) -> usize {
+        let split = self.split();
+        let settled = self.prefix.single_asterisks;
+        count_single_asterisks(&self.view(), split, settled)
+    }
+}
+
+// -------------------------------------------------------------------------------------
+// patterns.ts: end-anchored delimiter patterns
+// -------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum Tail {
+    /// `(marker)([^x]*?)$`
+    Plain,
+    /// `(\*\*)([^*]*\*?)$`
+    OptionalStar,
+    /// `(marker)([^x]+)x$`
+    HalfComplete,
+}
+
+/// `matchTrailing`: where the content group of the leftmost match starts and ends.
+fn match_trailing(
+    ctx: &Ctx<'_>,
+    delimiter: u16,
+    marker_length: usize,
+    tail: Tail,
+) -> Option<std::ops::Range<usize>> {
+    let text = &ctx.text;
+    let n = text.len();
+    let marker = MARKERS
+        .iter()
+        .position(|&unit| unit == delimiter)
+        .expect("a marker");
+    let last = ctx.last_index(
+        &[delimiter],
+        Some(n.saturating_sub(2)),
+        ctx.prefix.last_unit[marker],
+    );
+    let marker_end = last.map_or(n as isize - 1, |last| last as isize);
+    let start = usize::try_from((marker_end - marker_length as isize + 1).max(0)).unwrap_or(0);
+    let slice = text.get(start..).unwrap_or(&[]);
+    let len = slice.len();
+    // `last` is the slice's last delimiter before its final unit, so a match's rest
+    // holds a delimiter only as that final unit, and a marker lies within
+    // `marker_length` of `last` or of the end: only those starts can match.
+    let before_final = last.map(|last| last - start);
+    let final_delimiter = slice.last() == Some(&delimiter);
+    let first = before_final.map_or(0, |at| (at + 1).saturating_sub(marker_length));
+    let near_last = first..before_final.map_or(first, |at| (at + 1).min(len));
+    let near_end = len.saturating_sub(marker_length).max(near_last.end)..len;
+    for p in near_last.chain(near_end) {
+        if p + marker_length > len
+            || !slice[p..p + marker_length]
+                .iter()
+                .all(|&unit| unit == delimiter)
+        {
+            continue;
+        }
+        let rest_start = p + marker_length;
+        if before_final.is_some_and(|at| at >= rest_start) {
+            continue;
+        }
+        let rest_len = len - rest_start;
+        let rest_has_final = final_delimiter && rest_len > 0;
+        let matched = match tail {
+            Tail::Plain => !rest_has_final,
+            Tail::OptionalStar => true,
+            Tail::HalfComplete => rest_has_final && rest_len >= 2,
+        };
+        if matched {
+            let content_end = match tail {
+                Tail::HalfComplete => len - 1,
+                _ => len,
+            };
+            return Some(start + rest_start..start + content_end);
+        }
+    }
+    None
+}
+
+/// `shouldSkipBoldCompletion` / `shouldSkipItalicCompletion` (which differ in the rule's
+/// marker), for the content `text[content..]`.
+fn skip_completion(ctx: &Ctx<'_>, content: usize, marker_index: usize, rule: u16) -> bool {
+    let text = &ctx.text;
+    if content == text.len() || ctx.blank_from(content) {
+        return true;
+    }
+    let line_start = text[..marker_index]
+        .iter()
+        .rposition(|&unit| unit == NEWLINE)
+        .map_or(0, |index| index + 1);
+    if list_item_prefix(&text[line_start..marker_index]) && ctx.newline_from(content) {
+        return true;
+    }
+    is_horizontal_rule(text, marker_index, rule)
+}
+
+// -------------------------------------------------------------------------------------
+// Handlers, in remend's priority order
+// -------------------------------------------------------------------------------------
+
+/// single-tilde-handler.ts (`20~25` → `20\~25`) on `text[from..]`, which starts at a
+/// line start with `fence` open and no inline code span: its output for that range.
+/// The escape needs only the units around the tilde and whether it is in code.
+fn single_tilde(text: &[u16], from: usize, fence: Option<OpenFence>) -> Units {
+    let text = &text[from..];
+    if !text.contains(&TILDE) {
+        return text.to_vec();
+    }
+    let scan = TailScan::new(text, fence);
+    let mut out = Vec::with_capacity(text.len() + 4);
+    let mut copied = 0;
+    let mut i = 0;
+    while i < text.len() {
+        let (code_point, length) = code_point_at(text, i);
+        let tilde = i + length;
+        let matched = word_code_point(code_point)
+            && text.get(tilde) == Some(&TILDE)
+            && text.get(tilde + 1) != Some(&TILDE)
+            && tilde + 1 < text.len()
+            && word_code_point(code_point_at(text, tilde + 1).0);
+        if matched {
+            if scan.regions[tilde] == PROSE {
+                out.extend_from_slice(&text[copied..tilde]);
+                out.push(BACKSLASH);
+                out.push(TILDE);
+                copied = tilde + 1;
+            }
+            i = tilde + 1;
+        } else {
+            i += length;
+        }
+    }
+    out.extend_from_slice(&text[copied..]);
+    out
+}
+
+/// comparison-operator-handler.ts (`- > 25` → `- \> 25`) on `text[from..]`, which
+/// starts at a line start with `fence` open: its output for that range, and whether
+/// a match was still possible at the range's end (more text could complete one).
+fn comparison_operators(text: &[u16], from: usize, fence: Option<OpenFence>) -> (Units, bool) {
+    let text = &text[from..];
+    let n = text.len();
+    if !text.contains(&GREATER) {
+        return (text.to_vec(), false);
+    }
+    let mut open = false;
+    // `/^(\s*(?:[-*+]|\d+[.)]) +)>(=?\s*[$]?\d)/gm`: the position of `>` and the end.
+    let mut attempt = |p: usize| -> Option<(usize, usize)> {
+        let mut at_end = |i: usize| {
+            if i >= n {
+                open = true;
+            }
+            i >= n
+        };
+        let mut i = p;
+        while i < n && js_space(text[i]) {
+            i += 1;
+        }
+        // Blank to the end: the same attempt as one from where more text starts.
+        if i >= n {
+            return None;
+        }
+        match text[i] {
+            DASH | STAR | PLUS => i += 1,
+            _ => {
+                let digits = i;
+                while digit(text.get(i).copied()) {
+                    i += 1;
+                }
+                if i == digits {
+                    return None;
+                }
+                if at_end(i) || !matches!(text[i], DOT | CLOSE_PAREN) {
+                    return None;
+                }
+                i += 1;
+            }
+        }
+        let spaces = i;
+        while text.get(i) == Some(&SPACE) {
+            i += 1;
+        }
+        if at_end(i) || i == spaces || text[i] != GREATER {
+            return None;
+        }
+        let greater = i;
+        i += 1;
+        if text.get(i) == Some(&EQUALS) {
+            i += 1;
+        }
+        while i < n && js_space(text[i]) {
+            i += 1;
+        }
+        if text.get(i) == Some(&DOLLAR) {
+            i += 1;
+        }
+        if at_end(i) {
+            return None;
+        }
+        digit(Some(text[i])).then_some((greater, i + 1))
     };
-    let content = &text[first + 1..];
-    if content.is_empty() || whitespace_or_markers(content) {
-        return text;
+    let mut scan: Option<TailScan> = None;
+    let mut escapes = Vec::new();
+    // Without U+2028 or U+2029, lines end only at `\n` or `\r`, which memchr finds.
+    let separators = text.iter().any(|&unit| matches!(unit, 0x2028 | 0x2029));
+    let mut p = 0;
+    while p <= n {
+        let line_start = p == 0 || line_terminator(text[p - 1]);
+        if let Some((greater, end)) = line_start.then(|| attempt(p)).flatten() {
+            let scan = scan.get_or_insert_with(|| TailScan::new(text, fence));
+            if !(p < n && scan.regions[p] != PROSE)
+                && !(p >= n && (scan.open_fence.is_some() || scan.open_span.is_some()))
+            {
+                escapes.push(greater);
+            }
+            p = end;
+            continue;
+        }
+        // `^` only matches at line starts: go to the next one.
+        let next = if separators {
+            text[p..].iter().position(|&unit| line_terminator(unit))
+        } else {
+            find_unit2(&text[p..], NEWLINE, CR)
+        };
+        match next {
+            Some(offset) => p += offset + 1,
+            None => break,
+        }
     }
-    if in_code(&scan, first) {
-        return text;
+    let mut out = Vec::with_capacity(n + escapes.len());
+    let mut copied = 0;
+    for greater in escapes {
+        out.extend_from_slice(&text[copied..greater]);
+        out.push(BACKSLASH);
+        copied = greater;
     }
-    if count_single_underscores(&scan).is_multiple_of(2) {
-        return text;
+    out.extend_from_slice(&text[copied..]);
+    (out, open)
+}
+
+/// html-tag-handler.ts: drops an incomplete trailing tag (`text <custom`).
+fn incomplete_html_tag(ctx: &mut Ctx<'_>) -> Option<()> {
+    let split = ctx.split();
+    // `/<[a-zA-Z/][^>]*$/` from the first such `<` after the last `>`, outside code
+    // and math (the mask of a text with no math delimiter is empty).
+    let tail_greater = rfind_unit(&ctx.text[split..], GREATER).map(|index| index + split);
+    let found = match tail_greater {
+        Some(greater) => first_tag_start(&ctx.view(), greater + 1),
+        None => ctx
+            .prefix
+            .tag_start
+            .or_else(|| first_tag_start(&ctx.view(), split)),
+    };
+    match found {
+        Some(index) => {
+            let end = trim_end(&ctx.text[..index]).len();
+            ctx.edit(end, &[])
+        }
+        None => Some(()),
     }
-    drop(scan);
+}
+
+/// setext-heading-handler.ts: breaks a `-`/`=` line that would make a heading.
+fn incomplete_setext_heading(ctx: &mut Ctx<'_>) -> Option<()> {
+    let text = &ctx.text;
+    let Some(last_newline) = rfind_unit(text, NEWLINE) else {
+        return Some(());
+    };
+    let last_line = &text[last_newline + 1..];
+    let previous = &text[..last_newline];
+    let trimmed = trim(last_line);
+    for marker in [DASH, EQUALS] {
+        // `/^-{1,2}$/` on the trimmed line, and not `/^[\s]*-{1,2}[\s]+$/`.
+        let only = matches!(trimmed.len(), 1 | 2) && trimmed.iter().all(|&unit| unit == marker);
+        let with_space = {
+            let rest = trim_start(last_line);
+            let run = rest.iter().take_while(|&&unit| unit == marker).count();
+            let after = &rest[run..];
+            matches!(run, 1 | 2) && !after.is_empty() && after.iter().all(|&unit| js_space(unit))
+        };
+        if only && !with_space {
+            let previous_line =
+                rfind_unit(previous, NEWLINE).map_or(previous, |index| &previous[index + 1..]);
+            if !previous_line.is_empty() && !trim(previous_line).is_empty() {
+                return ctx.append("\u{200b}");
+            }
+        }
+    }
+    Some(())
+}
+
+/// link-image-handler.ts, `linkMode: "protocol"`.
+fn incomplete_links_and_images(ctx: &mut Ctx<'_>) -> Option<()> {
+    for _ in 0..32 {
+        let before = ctx.text.len();
+        let shorter = heal_trailing_link_or_image(ctx)?;
+        if !shorter || ctx.text.len() >= before {
+            return Some(());
+        }
+    }
+    Some(())
+}
+
+/// One pass of the links handler; whether it shortened the text (`Some(false)` when it
+/// lengthened or kept it).
+fn heal_trailing_link_or_image(ctx: &mut Ctx<'_>) -> Option<bool> {
+    let split = ctx.split();
+    let paren = ctx.last_index(
+        &[CLOSE_BRACKET, OPEN_PAREN],
+        None,
+        ctx.prefix.last_link.map(|(paren, _)| paren),
+    );
+    // The brackets after the settled prefix, from the prefix's open ones.
+    let mut open = ctx.prefix.open_brackets.clone();
+    let mut last_link = ctx.prefix.last_link;
+    pair_brackets(&ctx.text, split, &mut open, &mut last_link);
+    if let Some(paren) = paren {
+        let view = ctx.view();
+        let text = &ctx.text;
+        let closed = if paren + 2 < split {
+            ctx.prefix
+                .last_close_paren
+                .is_some_and(|close| close >= paren + 2)
+                || text[split..].contains(&CLOSE_PAREN)
+        } else {
+            text[paren + 2..].contains(&CLOSE_PAREN)
+        };
+        // `findMatchingOpeningBracket`: the `[` the forward pairing gave this `]`.
+        let matched = last_link
+            .filter(|(at, _)| *at == paren)
+            .and_then(|(_, open)| open)
+            .filter(|&open| !view.code_at(open as isize));
+        if !view.code_at(paren as isize)
+            && !closed
+            && let Some(open) = matched
+        {
+            let image = open > 0 && text[open - 1] == BANG;
+            let target = if image {
+                INCOMPLETE_IMAGE
+            } else {
+                INCOMPLETE_LINK
+            };
+            let before = text.len();
+            ctx.edit(paren, &units(target))?;
+            return Some(ctx.text.len() < before);
+        }
+    }
+    // The last `[` outside code with no matching `]`.
+    let view = ctx.view();
+    let Some(&i) = open.iter().rev().find(|&&i| !view.code_at(i as isize)) else {
+        return Some(false);
+    };
+    let image = i > 0 && ctx.text[i - 1] == BANG;
+    ctx.append(if image {
+        INCOMPLETE_IMAGE
+    } else {
+        INCOMPLETE_LINK
+    })?;
+    Some(false)
+}
+
+fn incomplete_bold(ctx: &mut Ctx<'_>) -> Option<()> {
+    let Some(content) = match_trailing(ctx, STAR, 2, Tail::OptionalStar) else {
+        return Some(());
+    };
+    let marker = ctx
+        .last_index(&[STAR, STAR], None, ctx.prefix.last_run[0])
+        .expect("the match holds **");
+    if ctx.view().in_code(marker) || skip_completion(ctx, content.start, marker, STAR) {
+        return Some(());
+    }
+    if ctx.pairs(0, STAR) % 2 == 1 {
+        let suffix = if ctx.text.last() == Some(&STAR) {
+            "*"
+        } else {
+            "**"
+        };
+        return ctx.append(suffix);
+    }
+    Some(())
+}
+
+fn unmatched_double_underscores(ctx: &Ctx<'_>) -> bool {
+    let split = ctx.split();
+    let settled = ctx.prefix.double_underscore_odd;
+    settled ^ unmatched_double_underscore(&ctx.view(), split)
+}
+
+fn incomplete_double_underscore_italic(ctx: &mut Ctx<'_>) -> Option<()> {
+    let Some(content) = match_trailing(ctx, UNDERSCORE, 2, Tail::Plain) else {
+        if match_trailing(ctx, UNDERSCORE, 2, Tail::HalfComplete).is_some() {
+            let marker = ctx
+                .last_index(&[UNDERSCORE, UNDERSCORE], None, ctx.prefix.last_run[1])
+                .expect("the match holds __");
+            if !ctx.view().in_code(marker) && unmatched_double_underscores(ctx) {
+                return ctx.append("_");
+            }
+        }
+        return Some(());
+    };
+    let marker = ctx
+        .last_index(&[UNDERSCORE, UNDERSCORE], None, ctx.prefix.last_run[1])
+        .expect("the match holds __");
+    if ctx.view().in_code(marker) || skip_completion(ctx, content.start, marker, UNDERSCORE) {
+        return Some(());
+    }
+    if unmatched_double_underscores(ctx) {
+        return ctx.append("__");
+    }
+    Some(())
+}
+
+fn incomplete_single_asterisk_italic(ctx: &mut Ctx<'_>) -> Option<()> {
+    if match_trailing(ctx, STAR, 1, Tail::Plain).is_none() {
+        return Some(());
+    }
+    let split = ctx.split();
+    let settled = ctx.prefix.first_single_asterisk;
+    let Some(first) = settled.or_else(|| first_single_asterisk(&ctx.view(), split)) else {
+        return Some(());
+    };
+    if ctx.view().in_code(first) {
+        return Some(());
+    }
+    if first + 1 == ctx.text.len() || ctx.blank_from(first + 1) {
+        return Some(());
+    }
+    if ctx.single_asterisks() % 2 == 1 {
+        return ctx.append("*");
+    }
+    Some(())
+}
+
+fn first_underscore(ctx: &Ctx<'_>) -> Option<usize> {
+    let split = ctx.split();
+    let settled = ctx.prefix.first_single_underscore;
+    settled.or_else(|| first_single_underscore(&ctx.view(), split))
+}
+
+fn incomplete_single_underscore_italic(ctx: &mut Ctx<'_>) -> Option<()> {
+    if match_trailing(ctx, UNDERSCORE, 1, Tail::Plain).is_none() {
+        return Some(());
+    }
+    let Some(first) = first_underscore(ctx) else {
+        return Some(());
+    };
+    if first + 1 == ctx.text.len() || ctx.blank_from(first + 1) {
+        return Some(());
+    }
+    if ctx.view().in_code(first) {
+        return Some(());
+    }
+    let split = ctx.split();
+    let settled = ctx.prefix.single_underscores;
+    if (settled + count_single_underscores(&ctx.view(), split)).is_multiple_of(2) {
+        return Some(());
+    }
     // `handleTrailingAsterisksForUnderscore`: close `_` before a `**` that closed an
     // earlier one.
-    if text.ends_with(&[STAR, STAR]) {
-        let without = &text[..text.len() - 2];
-        let scan = Scan::new(without);
-        if scan.count_double_pairs(STAR) % 2 == 1 {
-            let bold = index_of(without, &[STAR, STAR], 0);
-            let underscore = first_single_underscore(&scan);
+    if ctx.text.ends_with(&[STAR, STAR]) && ctx.text.len() - 2 >= split {
+        let without = Ctx::new(
+            ctx.text[..ctx.text.len() - 2].to_vec(),
+            ctx.prefix,
+            ctx.head,
+        );
+        if without.pairs(0, STAR) % 2 == 1 {
+            let bold = ctx
+                .prefix
+                .first_double_star
+                .or_else(|| index_of(&without.text, &[STAR, STAR], split));
+            let underscore = first_underscore(&without);
             if let (Some(bold), Some(underscore)) = (bold, underscore)
                 && bold < underscore
             {
-                return concat(&[without, &units("_**")]);
+                let at = without.text.len();
+                return ctx.edit(at, &units("_**"));
             }
         }
     }
     // `insertClosingUnderscore`: before any trailing newlines.
-    let end = text
+    let end = ctx
+        .text
         .iter()
         .rposition(|&unit| unit != NEWLINE)
         .map_or(0, |index| index + 1);
-    concat(&[&text[..end], &[UNDERSCORE], &text[end..]])
+    let mut rest = vec![UNDERSCORE];
+    rest.extend_from_slice(&ctx.text[end..]);
+    ctx.edit(end, &rest)
 }
 
-fn incomplete_bold_italic(text: Units) -> Units {
-    if text.len() >= 4 && text.iter().all(|&unit| unit == STAR) {
-        return text;
+fn incomplete_bold_italic(ctx: &mut Ctx<'_>) -> Option<()> {
+    if ctx.text.len() >= 4 && ctx.text.iter().all(|&unit| unit == STAR) {
+        return Some(());
     }
-    let Some(content) = match_trailing(&text, STAR, 3, Tail::Plain) else {
-        return text;
+    let Some(content) = match_trailing(ctx, STAR, 3, Tail::Plain) else {
+        return Some(());
     };
-    let marker = last_index_of(&text, &[STAR, STAR, STAR], None).expect("the match holds ***");
-    if content.is_empty() || whitespace_or_markers(&content) {
-        return text;
+    let marker = ctx
+        .last_index(&[STAR, STAR, STAR], None, ctx.prefix.last_run[3])
+        .expect("the match holds ***");
+    if content.is_empty() || ctx.blank_from(content.start) {
+        return Some(());
     }
-    let scan = Scan::new(&text);
-    if in_code(&scan, marker) || is_horizontal_rule(&text, marker, STAR) {
-        return text;
+    if ctx.view().in_code(marker) || is_horizontal_rule(&ctx.text, marker, STAR) {
+        return Some(());
     }
-    if count_triple_asterisks(&scan) % 2 == 1 {
-        let balanced = scan.count_double_pairs(STAR).is_multiple_of(2)
-            && count_single_asterisks(&scan).is_multiple_of(2);
-        drop(scan);
+    let split = ctx.split();
+    let triples = ctx.prefix.triple_asterisks + count_triple_asterisks(&ctx.view(), split);
+    if triples % 2 == 1 {
+        let balanced =
+            ctx.pairs(0, STAR).is_multiple_of(2) && ctx.single_asterisks().is_multiple_of(2);
         if balanced {
-            return text;
+            return Some(());
         }
-        return appended(text, "***");
+        return ctx.append("***");
     }
-    drop(scan);
-    text
+    Some(())
 }
 
-fn incomplete_inline_code(text: Units) -> Units {
-    let scan = Scan::new(&text);
-    if scan.open_fence.is_some() {
-        return text;
+fn incomplete_inline_code(ctx: &mut Ctx<'_>) -> Option<()> {
+    let view = ctx.view();
+    if view.scan.open_fence.is_some() {
+        return Some(());
     }
-    let Some(span) = scan.open_span else {
-        return text;
+    let Some(span) = view.scan.open_span else {
+        return Some(());
     };
-    drop(scan);
-    let content = &text[span.start + span.run_length..];
-    if content.is_empty() || whitespace_or_markers(content) {
-        return text;
+    let split = ctx.split();
+    let content = split + span.start + span.run_length;
+    if content >= ctx.text.len() || whitespace_or_markers(&ctx.text[content..]) {
+        return Some(());
     }
-    let trailing = text
+    let trailing = ctx
+        .text
         .iter()
         .rev()
         .take_while(|&&unit| unit == BACKTICK)
         .count();
     if trailing >= span.run_length {
-        return text;
+        return Some(());
     }
-    let mut out = text;
-    out.extend(std::iter::repeat_n(BACKTICK, span.run_length - trailing));
-    out
+    let at = ctx.text.len();
+    ctx.edit(at, &vec![BACKTICK; span.run_length - trailing])
 }
 
-fn incomplete_strikethrough(text: Units) -> Units {
-    if let Some(content) = match_trailing(&text, TILDE, 2, Tail::Plain) {
-        if content.is_empty() || whitespace_or_markers(&content) {
-            return text;
+fn incomplete_strikethrough(ctx: &mut Ctx<'_>) -> Option<()> {
+    if let Some(content) = match_trailing(ctx, TILDE, 2, Tail::Plain) {
+        if content.is_empty() || ctx.blank_from(content.start) {
+            return Some(());
         }
-        let marker = last_index_of(&text, &[TILDE, TILDE], None).expect("the match holds ~~");
-        let scan = Scan::new(&text);
-        if in_code(&scan, marker) {
-            return text;
+        let marker = ctx
+            .last_index(&[TILDE, TILDE], None, ctx.prefix.last_run[2])
+            .expect("the match holds ~~");
+        if ctx.view().in_code(marker) {
+            return Some(());
         }
-        if scan.count_double_pairs(TILDE) % 2 == 1 {
-            drop(scan);
-            return appended(text, "~~");
+        if ctx.pairs(1, TILDE) % 2 == 1 {
+            return ctx.append("~~");
         }
-    } else if match_trailing(&text, TILDE, 2, Tail::HalfComplete).is_some() {
-        let marker = last_index_of(&text, &[TILDE, TILDE], None).expect("the match holds ~~");
-        let scan = Scan::new(&text);
-        if in_code(&scan, marker) {
-            return text;
+    } else if match_trailing(ctx, TILDE, 2, Tail::HalfComplete).is_some() {
+        let marker = ctx
+            .last_index(&[TILDE, TILDE], None, ctx.prefix.last_run[2])
+            .expect("the match holds ~~");
+        if ctx.view().in_code(marker) {
+            return Some(());
         }
-        if scan.count_double_pairs(TILDE) % 2 == 1 {
-            drop(scan);
-            return appended(text, "~");
+        if ctx.pairs(1, TILDE) % 2 == 1 {
+            return ctx.append("~");
         }
     }
-    text
+    Some(())
 }
 
-fn incomplete_block_katex(text: Units) -> Units {
-    let pairs = Scan::new(&text).count_double_pairs(DOLLAR);
-    if pairs.is_multiple_of(2) {
-        return text;
+fn incomplete_block_katex(ctx: &mut Ctx<'_>) -> Option<()> {
+    if ctx.pairs(2, DOLLAR).is_multiple_of(2) {
+        return Some(());
     }
+    let text = &ctx.text;
     if text.ends_with(&[DOLLAR]) && !text.ends_with(&[DOLLAR, DOLLAR]) {
-        return appended(text, "$");
+        return ctx.append("$");
     }
-    let first = index_of(&text, &[DOLLAR, DOLLAR], 0);
-    let newline_after = first.is_some_and(|first| index_of_unit(&text, NEWLINE, first).is_some());
+    let split = ctx.split();
+    let first = ctx
+        .prefix
+        .first_double_dollar
+        .or_else(|| index_of(text, &[DOLLAR, DOLLAR], split));
+    let newline_after = first.is_some_and(|first| ctx.newline_from(first));
     if newline_after && text.last() != Some(&NEWLINE) {
-        return appended(text, "\n$$");
+        return ctx.append("\n$$");
     }
-    appended(text, "$$")
+    ctx.append("$$")
 }
 
 #[cfg(test)]
@@ -1772,11 +2184,45 @@ mod whole_timing {
             .collect();
         let start = std::time::Instant::now();
         for _ in 0..std::env::var("REMEND_ROUNDS").map_or(500, |r| r.parse().unwrap()) {
-            super::remend_units(text.clone());
+            super::remend_units(&text);
         }
         println!(
             "remend {:>7.1} µs",
             start.elapsed().as_secs_f64() * 1e6 / 500.0
+        );
+    }
+}
+
+#[cfg(test)]
+mod probe {
+    #[test]
+    #[ignore = "probe"]
+    fn stream_probe() {
+        let text = std::fs::read_to_string(std::env::var("REMEND_DOC").unwrap()).unwrap();
+        let chars: Vec<char> = text.chars().collect();
+        let mut stream = super::Stream::default();
+        let mut whole = 0;
+        let start = std::time::Instant::now();
+        let mut updates = 0;
+        for chunk in chars.chunks(24) {
+            let appended: String = chunk.iter().collect();
+            stream.heal(&appended, updates == 0);
+            if stream.whole.is_some() {
+                whole += 1;
+            }
+            updates += 1;
+        }
+        let elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        let units: Vec<u16> = text.encode_utf16().collect();
+        for end in (24..units.len()).step_by(24) {
+            super::remend_units(&units[..end]);
+        }
+        println!(
+            "updates {updates} whole {whole} settled {} of {}: stream {elapsed:?}, whole texts {:?}",
+            stream.settled,
+            stream.input.len(),
+            start.elapsed()
         );
     }
 }
