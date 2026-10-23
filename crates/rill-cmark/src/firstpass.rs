@@ -645,6 +645,15 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 break;
             };
             let previous = text[..at].chars().next_back().filter(|_| at > from);
+            // An autolink (`<http://a>`) is claimed whole first: no literal starts in it.
+            let escaped = |lt: usize| scan_rev_while(&bytes[from..lt], |b| b == b'\\') % 2 == 1;
+            if previous == Some('<') && !escaped(at - 1) {
+                if let Some((autolink_end, ..)) = scan_autolink(text, at) {
+                    end = autolink_end;
+                    scanned = autolink_end;
+                    continue;
+                }
+            }
             match crate::autolink_literal::scan(text, at, previous) {
                 Some((literal_end, _)) if !self.bracket_open(at) => {
                     end = literal_end;

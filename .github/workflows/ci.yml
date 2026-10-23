@@ -40,6 +40,8 @@ jobs:
           node conformance/diff.mjs --pieces '["[^a]","[^b]","[^c]","\n\n[^a]: ","\n\n[^b]: ","\n\n[^c]: ","x"]' --length 5
           # Line endings after a failed code run, inside containers: only plain text holds one.
           node conformance/diff.mjs --pieces '["1. ","> ","[`a`][r]","![`a`](y)","<a b=\"`\">","<http://a`b>","www.a.com/`x","`","x\n   ","\n> x\n> ","[x](y)","\n\n[r]: /u"]' --length 4
+          # Backslash escapes beside autolinks: an autolink is claimed before any literal in it.
+          node conformance/diff.mjs --pieces '["<","http://a","\\\\_",">","www.b.c","a@b.co","x"]' --length 5
       - name: JavaScript package
         working-directory: js
         run: |
