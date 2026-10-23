@@ -1509,6 +1509,13 @@ fn scan_nodes_to_ix(
     node
 }
 
+/// rill: micromark's GFM footnote labels refuse spaces, tabs, and line endings.
+pub(crate) fn footnote_label_has_whitespace(label: &str) -> bool {
+    label
+        .bytes()
+        .any(|b| matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+}
+
 /// Scans an inline link label, which cannot be interrupted.
 /// Returns number of bytes (including brackets) and label on success.
 fn scan_link_label<'text>(
@@ -1523,6 +1530,7 @@ fn scan_link_label<'text>(
     if b'^' == bytes[1] && bytes.get(2) != Some(&b']') {
         if let Some((byte_index, cow)) =
             scan_link_label_rest(&text[2..], &|_| None, tree.is_in_table())
+                .filter(|(byte_index, _)| !footnote_label_has_whitespace(&text[2..1 + byte_index]))
         {
             return Some((byte_index + 2, ReferenceLabel::Footnote(cow)));
         }

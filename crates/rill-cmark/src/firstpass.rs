@@ -1435,14 +1435,10 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         if !bytes.starts_with(b"[^") {
             return None;
         }
-        // GitHub doesn't allow footnote definition labels to contain line breaks.
-        // It actually does allow this for link definitions under certain circumstances,
-        // but for this it's simpler to avoid it.
+        // rill: nor spaces or tabs, as in micromark; such a label is a link definition's.
         let (mut i, label) =
             scan_link_label_rest(&self.text[start + 2..], &|_| None, self.tree.is_in_table())?;
-        if label.bytes().any(|b| b == b'\r' || b == b'\n') {
-            // GitHub doesn't allow footnote definition labels to contain line breaks,
-            // even if they're escaped.
+        if crate::parse::footnote_label_has_whitespace(&self.text[start + 2..start + 1 + i]) {
             return None;
         }
         i += 2;
@@ -1844,13 +1840,13 @@ fn scan_paragraph_interrupt_no_table(
                 || starts_html_block_type_6(&bytes[1..])
                 // rill: micromark lets complete HTML interrupt on a lazy line.
                 || !current_container && scan_html_type_7(bytes).is_some())
-        || (bytes.starts_with(b"[^")
-            && scan_link_label_rest(
-                std::str::from_utf8(&bytes[2..]).unwrap(),
-                &|_| None,
-                tree.is_in_table(),
-            )
-            .map_or(false, |(len, _)| bytes.get(2 + len) == Some(&b':')))
+        || (bytes.starts_with(b"[^") && {
+            let label = std::str::from_utf8(&bytes[2..]).unwrap();
+            scan_link_label_rest(label, &|_| None, tree.is_in_table()).map_or(false, |(len, _)| {
+                bytes.get(2 + len) == Some(&b':')
+                    && !crate::parse::footnote_label_has_whitespace(&label[..len - 1])
+            })
+        })
 }
 
 /// Assumes `text_bytes` is preceded by `<`.
