@@ -101,6 +101,9 @@ function firstDifference(expected, actual, path = "$") {
   return null;
 }
 
+/** How many sources rill took to each kind (`raw` ones ran rehype-raw in JavaScript). */
+const kinds = {};
+
 /** The first difference for each source, or null where rill matches. */
 function compare(cases) {
   const results = rill(cases);
@@ -110,6 +113,7 @@ function compare(cases) {
     const mdast = processor.parse(source);
     const expectedHast = processor.runSync(processor.parse(source), source);
     const kind = result.hast.kind;
+    kinds[kind] = (kinds[kind] ?? 0) + 1;
     if (!(kind in tails)) return `rill kind ${kind}`;
     const tail = tails[kind];
     const actualHast = tail ? tail.runSync(result.hast.tree, source) : result.hast.tree;
@@ -137,7 +141,8 @@ const differences = compare(cases);
 const failures = cases
   .map((source, index) => ({ source, difference: differences[index] }))
   .filter(({ difference }) => difference);
-console.log(`${cases.length - failures.length}/${cases.length} identical`);
+const counted = { ...kinds };
+console.log(`${cases.length - failures.length}/${cases.length} identical (rill's kinds: ${Object.entries(counted).map(([kind, count]) => `${kind} ${count}`).join(", ")})`);
 for (const { source, difference } of failures.slice(0, Number(option("--show") ?? 10))) {
   console.log(`  ${JSON.stringify(source)}\n    ${difference}`);
   if (args.includes("--minimize")) {

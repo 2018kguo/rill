@@ -731,7 +731,13 @@ impl<'s> ToHast<'_, 's> {
                 );
                 // A comment ends where micromark's does and restructures nothing.
                 let simple = SimpleRaw::parse(value);
-                if simple.is_some() && (!flow || simple == Some(SimpleRaw::Comment)) {
+                let flow_ok = matches!(
+                    simple,
+                    Some(SimpleRaw::Comment | SimpleRaw::WrapOpen | SimpleRaw::WrapClose)
+                );
+                // `<listing>` closes an open `p`: only where none is open.
+                let listing = simple.is_some_and(|raw| raw.listing(value));
+                if simple.is_some() && (if flow { flow_ok } else { !listing }) {
                     self.simple_raw = true;
                 } else {
                     self.raw_boundary = true;
@@ -1230,6 +1236,12 @@ enum SimpleRaw {
     Close(&'static str),
     /// A comment parse5 ends where micromark does; sanitize removes it.
     Comment,
+    /// A start tag of an element sanitize replaces with its children (see
+    /// [`wrapper_tag`]): parse5 opens it, and its end tag among the same siblings
+    /// closes it, so its content stays where it is.
+    WrapOpen,
+    /// Its end tag.
+    WrapClose,
 }
 
 impl SimpleRaw {
@@ -1247,9 +1259,16 @@ impl SimpleRaw {
         }
         let inner = value.strip_prefix('<')?.strip_suffix('>')?;
         if let Some(name) = inner.strip_prefix('/') {
+            if wrapper_tag(name) {
+                return Some(SimpleRaw::WrapClose);
+            }
             return paired_tag(name).map(SimpleRaw::Close);
         }
         let tag = StartTag::parse(inner)?;
+        if wrapper_tag(tag.name) {
+            // parse5 ignores `/>` here too: the element stays open.
+            return (!tag.self_closing).then_some(SimpleRaw::WrapOpen);
+        }
         raw_props(value)?;
         if let Some(void) = ["br", "img"]
             .into_iter()
@@ -1263,6 +1282,170 @@ impl SimpleRaw {
         }
         paired_tag(tag.name).map(SimpleRaw::Open)
     }
+}
+
+impl SimpleRaw {
+    /// Whether this is `<listing>` or `</listing>` (`value` is its raw node's).
+    fn listing(self, value: &str) -> bool {
+        matches!(self, SimpleRaw::WrapOpen | SimpleRaw::WrapClose)
+            && wrapper_name(value).eq_ignore_ascii_case("listing")
+    }
+}
+
+/// The tag name of a wrapper's start or end tag.
+fn wrapper_name(value: &str) -> &str {
+    let inner = value.trim_start_matches('<').trim_start_matches('/');
+    let end = inner
+        .bytes()
+        .position(|byte| !(byte.is_ascii_alphanumeric() || byte == b'-'))
+        .unwrap_or(inner.len());
+    &inner[..end]
+}
+
+/// Tag names parse5 7.3.0 knows (`TAG_NAMES` in common/html.js; any other is "any other
+/// start tag" and "any other end tag" in body), sorted.
+const PARSE5_TAGS: &[&str] = &[
+    "a",
+    "address",
+    "annotation-xml",
+    "applet",
+    "area",
+    "article",
+    "aside",
+    "b",
+    "base",
+    "basefont",
+    "bgsound",
+    "big",
+    "blockquote",
+    "body",
+    "br",
+    "button",
+    "caption",
+    "center",
+    "code",
+    "col",
+    "colgroup",
+    "dd",
+    "desc",
+    "details",
+    "dialog",
+    "dir",
+    "div",
+    "dl",
+    "dt",
+    "em",
+    "embed",
+    "fieldset",
+    "figcaption",
+    "figure",
+    "font",
+    "footer",
+    "form",
+    "frame",
+    "frameset",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "head",
+    "header",
+    "hgroup",
+    "hr",
+    "html",
+    "i",
+    "iframe",
+    "image",
+    "img",
+    "input",
+    "keygen",
+    "label",
+    "li",
+    "link",
+    "listing",
+    "main",
+    "malignmark",
+    "marquee",
+    "math",
+    "menu",
+    "meta",
+    "mglyph",
+    "mi",
+    "mn",
+    "mo",
+    "ms",
+    "mtext",
+    "nav",
+    "nobr",
+    "noembed",
+    "noframes",
+    "noscript",
+    "object",
+    "ol",
+    "optgroup",
+    "option",
+    "p",
+    "param",
+    "plaintext",
+    "pre",
+    "rb",
+    "rp",
+    "rt",
+    "rtc",
+    "ruby",
+    "s",
+    "script",
+    "search",
+    "section",
+    "select",
+    "small",
+    "source",
+    "span",
+    "strike",
+    "strong",
+    "style",
+    "sub",
+    "summary",
+    "sup",
+    "svg",
+    "table",
+    "tbody",
+    "td",
+    "template",
+    "textarea",
+    "tfoot",
+    "th",
+    "thead",
+    "title",
+    "tr",
+    "track",
+    "tt",
+    "u",
+    "ul",
+    "var",
+    "wbr",
+    "xmp",
+];
+
+/// An element whose start and end tags parse5 handles as an ordinary element's and that
+/// sanitize replaces with its children (not in its `tagNames`, not in `strip`): a name
+/// parse5 does not know, or `listing` (opened like `pre`: it closes an open `p`, and the
+/// newline it would skip arrives as text, which parse5 does not skip). The Rust Book's
+/// `<Listing>` around its code listings is one.
+fn wrapper_tag(name: &str) -> bool {
+    if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    lower == "listing"
+        || (PARSE5_TAGS.binary_search(&lower.as_str()).is_err()
+            && TAG_NAMES.binary_search(&lower.as_str()).is_err())
 }
 
 /// parse5's whitespace in tags.
@@ -1292,7 +1475,12 @@ impl<'v> StartTag<'v> {
             .position(|&byte| tag_space(byte) || byte == b'/')
             .unwrap_or(bytes.len());
         let name = &inner[..name_end];
-        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+        // Letters and digits, and `-` after the first (custom element names).
+        if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
             return None;
         }
         let mut tag = StartTag {
@@ -1598,16 +1786,38 @@ fn closes_open_children(tag: Option<&str>) -> bool {
     )
 }
 
+/// An element [`raw_tags_pair`] has seen open.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opened {
+    Tag(&'static str),
+    /// A wrapper, by the raw node of its start tag.
+    Wrap(NodeId),
+}
+
+fn raw_value<'t>(tree: &'t Tree<'_>, ix: NodeId) -> &'t str {
+    match &tree.nodes[ix as usize].kind {
+        NodeKind::Raw(value) => value,
+        _ => unreachable!("a raw node"),
+    }
+}
+
 fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId, close_open: bool) -> bool {
     let mut open = Vec::new();
     for child in tree.children(parent) {
         match simple_raw_at(tree, child) {
-            Some(SimpleRaw::Open(tag)) => open.push(tag),
+            Some(SimpleRaw::Open(tag)) => open.push(Opened::Tag(tag)),
             Some(SimpleRaw::Close(tag)) => {
-                if open.pop() != Some(tag) {
+                if open.pop() != Some(Opened::Tag(tag)) {
                     return false;
                 }
             }
+            Some(SimpleRaw::WrapOpen) => open.push(Opened::Wrap(child)),
+            Some(SimpleRaw::WrapClose) => match open.pop() {
+                Some(Opened::Wrap(start))
+                    if wrapper_name(raw_value(tree, start))
+                        .eq_ignore_ascii_case(wrapper_name(raw_value(tree, child))) => {}
+                _ => return false,
+            },
             Some(SimpleRaw::Void(_) | SimpleRaw::Comment) => {}
             None => {
                 if !raw_tags_pair(tree, child, close_open) {
@@ -1616,10 +1826,14 @@ fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId, close_open: bool) -> bool {
             }
         }
     }
-    open.is_empty()
-        || (close_open
-            && closes_open_children(tree.tag_name(parent))
-            && open.iter().all(|tag| closes_with_parent(tag)))
+    // A wrapper left open closes with its parent: parse5 pops it with the parent's end
+    // tag (or at the end), and it is neither a scope boundary nor reopened, so what
+    // follows it among the siblings is just inside it.
+    let closes = close_open && closes_open_children(tree.tag_name(parent));
+    open.iter().all(|opened| match opened {
+        Opened::Wrap(_) => true,
+        Opened::Tag(tag) => closes && closes_with_parent(tag),
+    })
 }
 
 fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
@@ -1651,9 +1865,10 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
                     data: None,
                 };
             }
-            // Kept raw: it separates the text around it, as parse5's comment node does,
-            // and sanitize then drops it.
-            Some(SimpleRaw::Comment) => {}
+            // Kept raw: it separates the text around it, as parse5's comment node does
+            // (and a wrapper's tags, which put the text on each side in another
+            // parent), and sanitize then drops it.
+            Some(SimpleRaw::Comment | SimpleRaw::WrapOpen | SimpleRaw::WrapClose) => {}
             None => rewrite_simple_raw(tree, cursor),
         }
         if let Some(node) = keep {
