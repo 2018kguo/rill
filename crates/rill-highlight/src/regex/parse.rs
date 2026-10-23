@@ -86,6 +86,7 @@ pub fn parse_with_placeholders(pattern: &str, flags: &str, values: Option<&[Vec<
         pos: 0,
         modes,
         unicode_sets,
+        ignore_case_flag: modes.ignore_case,
         next_group: 1,
         group_names: names,
         placeholder_values: values,
@@ -130,6 +131,8 @@ fn scan_groups(chars: &[char]) -> Vec<Option<String>> {
 
 struct Parser<'v> {
     placeholder_values: Option<&'v [Vec<u16>]>,
+    /// Whether the pattern has the `i` flag (rather than only `(?i:...)` groups).
+    ignore_case_flag: bool,
     chars: Vec<char>,
     pos: usize,
     modes: Modes,
@@ -256,7 +259,7 @@ impl Parser<'_> {
         let text = values.get((c - 0xE000) as usize).map_or(&[][..], |v| v.as_slice());
         let chars = char::decode_utf16(text.iter().copied())
             .map(|r| r.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from))
-            .map(|c| Node::Set(self.char_set(c)))
+            .map(|c| Node::Set(self.literal_set(c)))
             .collect();
         Some(chars)
     }
@@ -331,12 +334,11 @@ impl Parser<'_> {
                 // of times; their sets are memoized by source text and mode.
                 let end = self.class_end();
                 let key: Option<(String, bool, bool)> = end.map(|end| (self.chars[self.pos..end].iter().collect(), self.modes.ignore_case, self.unicode_sets));
-                if let Some(key) = &key {
-                    if let Some(set) = CLASS_CACHE.with_borrow(|cache| cache.get(key).cloned()) {
+                if let Some(key) = &key
+                    && let Some(set) = CLASS_CACHE.with_borrow(|cache| cache.get(key).cloned()) {
                         self.pos = end.unwrap();
                         return Ok(Node::Set(set));
                     }
-                }
                 self.pos += 1;
                 let set = if self.unicode_sets { self.parse_class_v()? } else { self.parse_class_u()? };
                 if let Some(key) = key {
@@ -358,7 +360,7 @@ impl Parser<'_> {
             }
             _ => {
                 self.pos += 1;
-                Ok(Node::Set(self.char_set(c as u32)))
+                Ok(Node::Set(self.literal_set(c as u32)))
             }
         }
     }
@@ -469,7 +471,7 @@ impl Parser<'_> {
                     return Ok(Node::Set(set));
                 }
                 let c = self.parse_character_escape(false)?;
-                Ok(Node::Set(self.char_set(c)))
+                Ok(Node::Set(self.literal_set(c)))
             }
         }
     }
@@ -525,6 +527,17 @@ impl Parser<'_> {
         if self.modes.ignore_case { set.case_closure() } else { set }
     }
 
+    /// A literal character atom. V8 quirk: under `i` from a modifier group only
+    /// (no `i` flag), a character above U+00FF does not match its case variants
+    /// in U+0000-U+00FF (`(?i:ſ)` does not match "s", `(?i:\u212A)` not "k").
+    fn literal_set(&self, c: u32) -> CharSet {
+        let set = self.char_set(c);
+        if self.modes.ignore_case && !self.ignore_case_flag && c > 0xFF {
+            return set.subtract(&CharSet::from_ranges(&[(0, 0xFF)]));
+        }
+        set
+    }
+
     fn char_set(&self, c: u32) -> CharSet {
         self.fold_set(CharSet::single(c))
     }
@@ -550,8 +563,8 @@ impl Parser<'_> {
             }
             '0' if !self.peek().is_some_and(|d| d.is_ascii_digit()) => 0,
             'x' => {
-                let value = self.parse_hex_digits(2).ok_or("bad \\x escape")?;
-                value
+                
+                self.parse_hex_digits(2).ok_or("bad \\x escape")?
             }
             'u' => self.parse_unicode_escape()?,
             '^' | '$' | '\\' | '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '/' => c as u32,
@@ -614,8 +627,8 @@ impl Parser<'_> {
                 break;
             }
             let start = self.parse_class_atom_u()?;
-            if self.peek() == Some('-') && self.peek_at(1).is_some_and(|c| c != ']') {
-                if let ClassAtom::Char(lo) = start {
+            if self.peek() == Some('-') && self.peek_at(1).is_some_and(|c| c != ']')
+                && let ClassAtom::Char(lo) = start {
                     self.pos += 1;
                     match self.parse_class_atom_u()? {
                         ClassAtom::Char(hi) if hi >= lo => {
@@ -625,7 +638,6 @@ impl Parser<'_> {
                         _ => return Err("bad class range".into()),
                     }
                 }
-            }
             match start {
                 ClassAtom::Char(c) => set.add(c),
                 ClassAtom::Set(s) => set.union(&s),

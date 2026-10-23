@@ -258,12 +258,11 @@ impl Compiler {
     fn emit_char(&mut self, set: &CharSet, back: bool) {
         let ranges = set.ranges();
         let is_unit = |c: u32| c < 0xD800 || (0xE000..0x10000).contains(&c);
-        if let Some(c) = set.as_single() {
-            if is_unit(c) {
+        if let Some(c) = set.as_single()
+            && is_unit(c) {
                 self.insts.push(Inst::Unit { unit: c as u16, back });
                 return;
             }
-        }
         if set.len() == 2 {
             let members: Vec<u32> = ranges.iter().flat_map(|&(lo, hi)| lo..=hi).collect();
             if members.iter().all(|&c| is_unit(c)) {
@@ -368,8 +367,8 @@ impl Compiler {
             Node::Capture { index, body } => (Some(*index), body.as_ref()),
             other => (None, other),
         };
-        if let Node::Repeat { min, max, greedy: true, body: repeated } = inner {
-            if let Node::Set(set) = repeated.as_ref() {
+        if let Node::Repeat { min, max, greedy: true, body: repeated } = inner
+            && let Node::Set(set) = repeated.as_ref() {
                 let set = self.add_set(set);
                 if let Some(index) = capture {
                     self.insts.push(Inst::Save { slot: index * 2 });
@@ -380,7 +379,6 @@ impl Compiler {
                 }
                 return;
             }
-        }
         let atomic = self.pc();
         self.insts.push(Inst::Atomic { body: atomic + 1, next: 0 });
         self.emit_node(body, back, None);
@@ -482,19 +480,15 @@ fn recognize_atomic(node: Node, back: bool) -> Node {
             let mut out: Vec<Node> = Vec::with_capacity(items.len());
             for item in items {
                 let item = recognize_atomic(item, back);
-                if !back {
-                    if let Node::Backref { groups, .. } = &item {
-                        if let [group] = groups.as_slice() {
-                            if let Some(Node::Look { behind: false, negate: false, body }) = out.last() {
-                                if matches!(body.as_ref(), Node::Capture { index, .. } if index == group) {
+                if !back
+                    && let Node::Backref { groups, .. } = &item
+                        && let [group] = groups.as_slice()
+                            && let Some(Node::Look { behind: false, negate: false, body }) = out.last()
+                                && matches!(body.as_ref(), Node::Capture { index, .. } if index == group) {
                                     let Some(Node::Look { body, .. }) = out.pop() else { unreachable!() };
                                     out.push(Node::Atomic(body));
                                     continue;
                                 }
-                            }
-                        }
-                    }
-                }
                 out.push(item);
             }
             Node::Seq(out)

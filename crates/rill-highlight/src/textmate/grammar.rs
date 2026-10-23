@@ -2,7 +2,7 @@
 //! (Shiki's `JavaScriptScanner` with its search cache shared by all scanners).
 
 use super::matcher::{Matcher, create_matchers};
-use super::raw::{RawGrammar, RawRule, ROOT_NODE, SELF_NODE};
+use super::raw::{RawGrammar, ROOT_NODE, SELF_NODE};
 use crate::regex::{EmulationOptions, JsRegExp, Matcher as RegexMatcher};
 use crate::fxhash::FxHashMap as HashMap;
 use std::rc::Rc;
@@ -136,15 +136,14 @@ fn resolve_anchors(source: &str, allow_a: bool, allow_g: bool) -> String {
     let mut chars = source.chars();
     while let Some(c) = chars.next() {
         out.push(c);
-        if c == '\\' {
-            if let Some(next) = chars.next() {
+        if c == '\\'
+            && let Some(next) = chars.next() {
                 out.push(match next {
                     'A' if !allow_a => '\u{FFFF}',
                     'G' if !allow_g => '\u{FFFF}',
                     other => other,
                 });
             }
-        }
     }
     out
 }
@@ -171,6 +170,9 @@ fn back_reference_template(source: &str) -> String {
     }
     out
 }
+
+/// The begin match's captured strings, by group number.
+pub type CapturedValues = Rc<[Vec<u16>]>;
 
 /// The resolved end/while pattern of a rule pushed with back-references: the
 /// captured strings of the begin match, by group number.
@@ -270,8 +272,8 @@ pub fn replace_captures(name: &str, line: &[u16], captures: &[(u32, u32)]) -> St
     let mut i = 0;
     let mut last = 0;
     while i < name.len() {
-        if let Some((group, command, len)) = capture_reference_at(name, i) {
-            if let Some(&(start, end)) = captures.get(group) {
+        if let Some((group, command, len)) = capture_reference_at(name, i)
+            && let Some(&(start, end)) = captures.get(group) {
                 out.push_str(&name[last..i]);
                 let start = (start as usize).min(line.len());
                 let end = (end as usize).min(line.len()).max(start);
@@ -286,7 +288,6 @@ pub fn replace_captures(name: &str, line: &[u16], captures: &[(u32, u32)]) -> St
                 last = i;
                 continue;
             }
-        }
         i += name[i..].chars().next().map_or(1, char::len_utf8);
     }
     out.push_str(&name[last..]);
@@ -328,7 +329,10 @@ pub struct CompiledRule {
 struct SearchCacheEntry {
     string_id: u64,
     searched_from: usize,
+    /// The leftmost match at or after `searched_from`, or -1 when none starts in
+    /// `searched_from..=searched_to`.
     match_index: i64,
+    searched_to: usize,
     captures: Vec<i32>,
 }
 
@@ -357,8 +361,8 @@ pub struct Grammar {
     /// Compiled regexes by id (`None`: skipped, as the forgiving JS engine does).
     regexes: Vec<RegexSlot>,
     regex_ids: HashMap<Rc<str>, u32>,
-    dynamic_regex_ids: HashMap<(Rc<str>, Rc<[Vec<u16>]>), u32>,
-    compiled: HashMap<(RuleId, u8, Option<Rc<[Vec<u16>]>>), Rc<CompiledRule>>,
+    dynamic_regex_ids: HashMap<(Rc<str>, CapturedValues), u32>,
+    compiled: HashMap<(RuleId, u8, Option<CapturedValues>), Rc<CompiledRule>>,
     /// Scanners of rules without back-referencing end patterns, by rule and
     /// (allowA, allowG, while) slot.
     static_scanners: Vec<[Option<Rc<CompiledRule>>; 8]>,
@@ -436,9 +440,6 @@ impl Grammar {
         Some(index)
     }
 
-    fn raw_rule(&self, desc: Desc) -> &RawRule {
-        &self.instances[desc.instance as usize].raw.nodes[desc.node as usize]
-    }
 
     fn register_rule(&mut self) -> RuleId {
         self.rules.push(Rule {
@@ -848,29 +849,35 @@ impl Grammar {
             let regex_index = regex_id as usize;
             let Some(regex) = self.regex(regex_index)? else { continue };
             let cacheable = regex.is_search_cacheable();
+            // A later pattern only wins with a match strictly before the best one.
+            let limit = best.map_or(usize::MAX, |(_, at)| at as usize - 1);
             let entry = &self.search_cache[regex_index];
-            let reuse = cacheable
-                && entry.string_id == string.id
-                && entry.searched_from <= start
-                && (entry.match_index == -1 || entry.match_index >= start as i64);
-            let match_index = if reuse {
+            let same = cacheable && entry.string_id == string.id && entry.searched_from <= start;
+            let mut search_from = start;
+            let match_index = if same && entry.match_index >= start as i64 {
                 entry.match_index
+            } else if same && entry.match_index == -1 && entry.searched_to >= limit {
+                -1
             } else {
+                if same && entry.match_index == -1 && entry.searched_to.saturating_add(1) >= start {
+                    // Nothing starts before `searched_to`: resume after it.
+                    search_from = entry.searched_to + 1;
+                }
                 self.execs += 1;
-                let found = regex.exec(&mut self.matcher, &string.content, start, &mut self.raw_captures, &mut self.exec_result);
+                let found = regex.exec_bounded(&mut self.matcher, &string.content, search_from, limit, &mut self.raw_captures, &mut self.exec_result);
                 let entry = &mut self.search_cache[regex_index];
-                entry.string_id = string.id;
-                entry.searched_from = start;
+                if search_from == start {
+                    entry.searched_from = start;
+                }
+                entry.string_id = if cacheable { string.id } else { 0 };
                 entry.captures.clear();
                 if found {
                     entry.match_index = i64::from(self.exec_result[0]);
+                    entry.searched_to = usize::MAX;
                     entry.captures.extend_from_slice(&self.exec_result);
                 } else {
                     entry.match_index = -1;
-                }
-                if !cacheable {
-                    // Not reusable later; mark so the next lookup re-executes.
-                    entry.string_id = 0;
+                    entry.searched_to = limit;
                 }
                 entry.match_index
             };

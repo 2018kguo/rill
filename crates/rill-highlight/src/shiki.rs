@@ -10,8 +10,11 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+/// Oniguruma sources and their translations (`None`: skipped).
+pub type Translations = Vec<(Rc<str>, Option<Translation>)>;
+
 /// One grammar file of the data build (`{ grammar, regexes }`).
-pub fn parse_grammar_file(text: &str) -> Result<(RawGrammar, Vec<(Rc<str>, Option<Translation>)>), String> {
+pub fn parse_grammar_file(text: &str) -> Result<(RawGrammar, Translations), String> {
     let value: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let grammar = RawGrammar::from_json(&value["grammar"])?;
     let mut translations = Vec::new();

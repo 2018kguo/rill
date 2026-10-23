@@ -42,14 +42,12 @@ fn is_trail(unit: u16) -> bool {
 #[inline]
 fn next_char(input: &[u16], pos: usize) -> Option<(u32, usize)> {
     let unit = *input.get(pos)?;
-    if is_lead(unit) {
-        if let Some(&low) = input.get(pos + 1) {
-            if is_trail(low) {
+    if is_lead(unit)
+        && let Some(&low) = input.get(pos + 1)
+            && is_trail(low) {
                 let c = 0x10000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
                 return Some((c, pos + 2));
             }
-        }
-    }
     Some((u32::from(unit), pos + 1))
 }
 
@@ -106,9 +104,10 @@ fn is_word_unit(unit: u16, extended: bool) -> bool {
 }
 
 impl Matcher {
-    /// Searches `input` from `start` (only at `start` when `sticky`). On a match,
-    /// fills `captures` (two slots per group, -1 for undefined) and returns true.
-    pub fn exec(&mut self, program: &Program, input: &[u16], start: usize, sticky: bool, captures: &mut Vec<i32>) -> bool {
+    /// Searches `input` for a match starting in `start..=limit` (only at `start`
+    /// when `sticky`). On a match, fills `captures` (two slots per group, -1 for
+    /// undefined) and returns true; false means no match starts in that range.
+    pub fn exec(&mut self, program: &Program, input: &[u16], start: usize, limit: usize, sticky: bool, captures: &mut Vec<i32>) -> bool {
         let slots = (program.group_count as usize + 1) * 2;
         captures.clear();
         captures.resize(slots, -1);
@@ -123,11 +122,10 @@ impl Matcher {
         if pos > 0 && pos < len && is_trail(input[pos]) && is_lead(input[pos - 1]) {
             pos -= 1;
         }
-        if let Some(literal) = &program.required_literal {
-            if !contains_literal(&input[pos..], literal) {
+        if let Some(literal) = &program.required_literal
+            && !contains_literal(&input[pos..], literal) {
                 return false;
             }
-        }
         if sticky {
             return self.attempt(program, input, pos, captures);
         }
@@ -136,18 +134,21 @@ impl Matcher {
         }
         match &program.first_units {
             Some(first) => {
-                while pos < len {
+                let end = len.min(limit.saturating_add(1));
+                while pos < end {
                     let unit = input[pos];
-                    if first.may_start(unit) && !(is_trail(unit) && pos > start && is_lead(input[pos - 1])) {
-                        if self.attempt(program, input, pos, captures) {
+                    if first.may_start(unit) && !(is_trail(unit) && pos > start && is_lead(input[pos - 1]))
+                        && self.attempt(program, input, pos, captures) {
                             return true;
                         }
-                    }
                     pos += 1;
                 }
                 false
             }
             None => loop {
+                if pos > limit {
+                    return false;
+                }
                 if self.attempt(program, input, pos, captures) {
                     return true;
                 }
@@ -350,7 +351,7 @@ impl Matcher {
                 }
                 Inst::LoopEnd { reg, min, test } => {
                     let (count, start) = self.loops[*reg as usize];
-                    if count - 1 >= *min && pos as u32 == start {
+                    if count > *min && pos as u32 == start {
                         false
                     } else {
                         pc = *test as usize;

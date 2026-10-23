@@ -34,10 +34,6 @@ impl CharSet {
         &self.ranges
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.ranges.is_empty()
-    }
-
     /// The only member, when the set has exactly one.
     pub fn as_single(&self) -> Option<u32> {
         match self.ranges.as_slice() {
@@ -169,12 +165,11 @@ impl CharSet {
         self.ranges.sort_unstable();
         let mut merged: Vec<(u32, u32)> = Vec::with_capacity(self.ranges.len());
         for &(lo, hi) in &self.ranges {
-            if let Some(last) = merged.last_mut() {
-                if lo <= last.1.saturating_add(1) {
+            if let Some(last) = merged.last_mut()
+                && lo <= last.1.saturating_add(1) {
                     last.1 = last.1.max(hi);
                     continue;
                 }
-            }
             merged.push((lo, hi));
         }
         self.ranges = merged;

@@ -157,8 +157,8 @@ pub fn create_matchers(selector: &str) -> Vec<PrioritizedMatcher> {
     let mut results = Vec::new();
     while parser.token().is_some() {
         let mut priority = 0;
-        if let Some(token) = parser.token() {
-            if token.len() == 2 && token.as_bytes()[1] == b':' {
+        if let Some(token) = parser.token()
+            && token.len() == 2 && token.as_bytes()[1] == b':' {
                 priority = match token.as_bytes()[0] {
                     b'R' => 1,
                     b'L' => -1,
@@ -166,7 +166,6 @@ pub fn create_matchers(selector: &str) -> Vec<PrioritizedMatcher> {
                 };
                 parser.next();
             }
-        }
         let matcher = parser.parse_conjunction();
         results.push(PrioritizedMatcher { matcher, priority });
         if parser.token() != Some(",") {

@@ -74,11 +74,17 @@ impl JsRegExp {
     /// `exec` with `lastIndex = start`. On a match, `result` holds start/end pairs
     /// for group 0 and each visible group (-1 for groups that did not participate).
     pub fn exec(&self, matcher: &mut Matcher, input: &[u16], start: usize, raw: &mut Vec<i32>, result: &mut Vec<i32>) -> bool {
+        self.exec_bounded(matcher, input, start, usize::MAX, raw, result)
+    }
+
+    /// `exec`, but only looking for matches that start at or before `limit`: false
+    /// means no match starts in `start..=limit`.
+    pub fn exec_bounded(&self, matcher: &mut Matcher, input: &[u16], start: usize, limit: usize, raw: &mut Vec<i32>, result: &mut Vec<i32>) -> bool {
         let offset = if self.clip_search && start > 0 { start.min(input.len()) } else { 0 };
         let found = if offset > 0 {
-            matcher.exec(&self.program, &input[offset..], 0, self.sticky, raw)
+            matcher.exec(&self.program, &input[offset..], 0, limit.saturating_sub(offset), self.sticky, raw)
         } else {
-            matcher.exec(&self.program, input, start, self.sticky, raw)
+            matcher.exec(&self.program, input, start, limit, self.sticky, raw)
         };
         if !found {
             return false;
