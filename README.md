@@ -35,8 +35,13 @@ contexts and its memoization are its own, and its blocks are the ones it would s
 (the same splitter, on the same `marked`). rill renders each block in Rust: static
 markup becomes one React element with its HTML, and React only builds the interactive
 parts (code block shells, tables, images, link buttons) from Streamdown's own exported
-components. With `@streamdown/code`, code is tokenized by rill-highlight (Shiki's
-tokenizer ported to Rust, the same tokens) in a Web Worker.
+components. A code block's copy and download buttons start as their markup and become
+Streamdown's own buttons when first pressed (which then get that click). With
+`@streamdown/code`, code is tokenized by rill-highlight (Shiki's tokenizer ported to
+Rust, the same tokens) in a Web Worker, which `setHighlightWasm` (or
+`preloadHighlighting()`) starts with its WebAssembly and themes before the first code
+block; finished code blocks ask for their tokens as they render, and the replies of a
+batch land in one React render.
 
 While an answer streams, each update costs what the block being written costs, not
 the whole answer: Streamdown's streaming repair (remend) runs in Rust on the text after
@@ -48,8 +53,9 @@ from one component instead of one per block, and what it computes from its text 
 cached by content, so mounting it again is cheap.
 
 Anything rill doesn't reproduce exactly renders with Streamdown's own `Block`, the same
-way: raw HTML that needs the HTML5 parser (rill handles comments and phrasing tags,
-`<img>` and `<br>`, with or without attributes), `animated`, `allowedTags`, custom
+way: raw HTML that needs the HTML5 parser (rill handles comments, phrasing tags, `<img>`
+and `<br>` with or without attributes, and tags sanitize removes around Markdown, such as
+custom elements or the Rust Book's `<Listing>`), `animated`, `allowedTags`, custom
 `remarkPlugins`/`rehypePlugins`, `urlTransform` and the other Markdown filters,
 `fallbackComponent`, and every block until the WebAssembly has loaded (and on the server
 without `initRill`). `mode="static"` is Streamdown's own as well.
@@ -163,7 +169,8 @@ source text instead of copying it.
 
 - `@2018kguo/rill/streamdown`: `Streamdown` and `Block`, the drop-in above, plus everything
   `streamdown` exports. `setRillHighlight(false)` keeps Shiki for code;
-  `setHighlightWasm(url)` points at `rill_highlight.wasm` where a bundler can't place it.
+  `setHighlightWasm(url)` points at `rill_highlight.wasm` where a bundler can't place it
+  (and starts the highlighting worker); `preloadHighlighting()` starts it without one.
 - `@2018kguo/rill/react`: `useRill(plugins?)`, plugins for Streamdown's own component.
 - `@2018kguo/rill/plugins`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
   and `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
@@ -329,8 +336,9 @@ Chromium, waits until both stop changing (highlighting included), and compares t
 `innerHTML` and the lengths of their text nodes (parsed HTML joins adjacent text that
 React keeps apart). Configurations are `default`, `code` (`@streamdown/code`), `math`, `cjk` and
 `all`; variants cover `prefix`, `controls={false}`, `linkSafety` off, `lineNumbers`
-off, a `components` override, `dir="rtl"`, `mode="static"`, `caret` and a custom
-`BlockComponent` around `Block`. With `--stream` it streams the chat corpus into one
+off, a `components` override, `dir="rtl"`, `mode="static"`, `caret`, a custom
+`BlockComponent` around `Block`, `translations` for the code controls' labels, and a copy
+icon of your own. With `--stream` it streams the chat corpus into one
 root with `isAnimating`, comparing after every Nth character.
 
 ### Benchmarks

@@ -51,6 +51,10 @@ jobs:
             node conformance/diff.mjs --config "$config" --pieces '["<br>","<BR />","<sup>","</sup>","<b>","</b>","*","a","\n"]' --length 5
             node conformance/diff.mjs --config "$config" --pieces '["| a |\n|-|\n| ","<br>","<kbd>","</kbd>","<!-- c -->","x","|","\n"]' --length 5
           done
+          # Wrapper tags sanitize removes (custom elements, listing), closed and left open,
+          # in flow and inline, with what they wrap.
+          node conformance/diff.mjs --pieces '["<Listing n=\"1\">","</Listing>","<foo>","</foo>","<listing>","</listing>","```\nc\n```","\n\n","\n","> ","- ","x","<b>","</b>","<!-- c -->"]' --length 4
+          node conformance/diff.mjs --pieces '["<a-b>","</a-b>","<x-y z=\"1\">","</X-Y>","**","`c`","[a](b)","| a |\n|-|\n| ","x","\n"]' --length 4
           # Streamdown 2.7.1's sanitize schema: tel: and streamdown: (remend's sentinels) URLs.
           node conformance/diff.mjs --pieces '["[a](","![i](","<a href=\"","\">x</a>","tel:+1","streamdown:incomplete-link","Tel:1","javascript:x",")","/p#"]' --length 4
           # remarkCodeMeta: the fence's meta string as `metastring` on <code>.
@@ -83,7 +87,7 @@ jobs:
           for config in default code math cjk all; do
             node conformance/dom/dom-diff.mjs --build --config "$config"
           done
-          for variant in prefix controls nosafety nolines components rtl static caret block; do
+          for variant in prefix controls nosafety nolines components rtl static caret block labels icons; do
             node conformance/dom/dom-diff.mjs --config code --variant "$variant"
           done
           node conformance/dom/dom-diff.mjs --config code --stream every=60,short=1
