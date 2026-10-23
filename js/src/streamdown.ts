@@ -637,6 +637,14 @@ function joinChunks(chunks: string[], rill: Rill, plan: Plan, pieces: Pieces): s
   return joined;
 }
 
+/** Whether a piece that rendered nothing holds more than definitions (a node sanitize
+ * removed, such as an HTML comment). */
+function removedNode(chunk: string, definitions: string[] | null | undefined): boolean {
+  let rest = chunk;
+  for (const definition of definitions ?? []) rest = rest.replace(definition, "");
+  return /\S/.test(rest);
+}
+
 function renderChunks(
   split: string[],
   rill: Rill,
@@ -666,6 +674,9 @@ function renderChunks(
   const out: ReactNode[] = [];
   const counts = new Map<string, number>();
   const rendered = new Map<string, Piece>();
+  /** Root children so far, and whether the last one was removed (it rendered nothing). */
+  let slots = 0;
+  let barrier = false;
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index]!;
     const last = index === chunks.length - 1;
@@ -698,22 +709,27 @@ function renderChunks(
     }
     rendered.set(chunk, piece);
     for (const [tag, count] of piece.counts) counts.set(tag, (counts.get(tag) ?? 0) + count);
-    if (piece.nodes.length === 0) continue;
+    // A piece of definitions alone has no node in the whole text's root; one whose
+    // nodes sanitize removed (an HTML comment) had one, with a line ending on each side.
+    if (piece.nodes.length === 0 && !removedNode(chunk, known.get(chunk))) continue;
     // The root's children join with a line ending, which merges with text beside it
-    // (parse5 merges adjacent text: newlines it moves out of a table).
+    // (parse5 merges adjacent text: newlines it moves out of a table), but not across a
+    // removed node (it was still there when parse5 ran).
     let first = 0;
-    if (out.length > 0) {
+    if (slots > 0) {
       const previous = out.length - 1;
       const head = piece.nodes[0];
       if (typeof head === "string") {
         out.push(`\n${head}`);
         first = 1;
-      } else if (typeof out[previous] === "string") {
+      } else if (!barrier && typeof out[previous] === "string") {
         out[previous] = `${out[previous]}\n`;
       } else {
         out.push("\n");
       }
     }
+    slots += 1;
+    barrier = piece.nodes.length === 0;
     for (let node = first; node < piece.nodes.length; node += 1) out.push(piece.nodes[node]);
   }
   pieces.rendered = rendered;
