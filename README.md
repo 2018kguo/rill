@@ -58,8 +58,9 @@ way: raw HTML that needs the HTML5 parser (rill handles comments, phrasing tags,
 and `<br>` with or without attributes, and tags sanitize removes around Markdown, such as
 custom elements or the Rust Book's `<Listing>`), `animated`, `allowedTags`, custom
 `remarkPlugins`/`rehypePlugins`, `urlTransform` and the other Markdown filters,
-`fallbackComponent`, and every block until the WebAssembly has loaded (and on the server
-without `initRill`). `mode="static"` is Streamdown's own as well.
+`fallbackComponent`, nesting deeper than 256 levels (quotes, lists, emphasis, raw tags),
+and every block until the WebAssembly has loaded (and on the server without
+`initRill`). `mode="static"` is Streamdown's own as well.
 
 The other tiers stay:
 
