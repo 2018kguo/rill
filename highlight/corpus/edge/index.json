@@ -1,0 +1,158 @@
+[
+ {
+  "lang": "typescript",
+  "file": "empty.typescript.txt"
+ },
+ {
+  "lang": "python",
+  "file": "only-newlines.python.txt"
+ },
+ {
+  "lang": "javascript",
+  "file": "unterminated-string.javascript.txt"
+ },
+ {
+  "lang": "c",
+  "file": "unterminated-comment.c.txt"
+ },
+ {
+  "lang": "python",
+  "file": "unterminated-block.python.txt"
+ },
+ {
+  "lang": "typescript",
+  "file": "long-line.typescript.txt"
+ },
+ {
+  "lang": "javascript",
+  "file": "minified.javascript.txt"
+ },
+ {
+  "lang": "python",
+  "file": "unicode.python.txt"
+ },
+ {
+  "lang": "typescript",
+  "file": "unicode.typescript.txt"
+ },
+ {
+  "lang": "rust",
+  "file": "crlf.rust.txt"
+ },
+ {
+  "lang": "go",
+  "file": "lone-cr.go.txt"
+ },
+ {
+  "lang": "go",
+  "file": "tabs.go.txt"
+ },
+ {
+  "lang": "html",
+  "file": "embedded.html.txt"
+ },
+ {
+  "lang": "markdown",
+  "file": "fences.markdown.txt"
+ },
+ {
+  "lang": "ruby",
+  "file": "heredoc.ruby.txt"
+ },
+ {
+  "lang": "shellscript",
+  "file": "heredoc.shellscript.txt"
+ },
+ {
+  "lang": "php",
+  "file": "heredoc.php.txt"
+ },
+ {
+  "lang": "sql",
+  "file": "case-insensitive.sql.txt"
+ },
+ {
+  "lang": "powershell",
+  "file": "case-insensitive.powershell.txt"
+ },
+ {
+  "lang": "tsx",
+  "file": "jsx-generics.tsx.txt"
+ },
+ {
+  "lang": "javascript",
+  "file": "regex-literals.javascript.txt"
+ },
+ {
+  "lang": "python",
+  "file": "f-strings.python.txt"
+ },
+ {
+  "lang": "rust",
+  "file": "raw-strings.rust.txt"
+ },
+ {
+  "lang": "csharp",
+  "file": "generics.csharp.txt"
+ },
+ {
+  "lang": "cpp",
+  "file": "templates.cpp.txt"
+ },
+ {
+  "lang": "yaml",
+  "file": "anchors.yaml.txt"
+ },
+ {
+  "lang": "json",
+  "file": "nested.json.txt"
+ },
+ {
+  "lang": "diff",
+  "file": "diff.diff.txt"
+ },
+ {
+  "lang": "docker",
+  "file": "dockerfile.docker.txt"
+ },
+ {
+  "lang": "graphql",
+  "file": "schema.graphql.txt"
+ },
+ {
+  "lang": "lua",
+  "file": "lua.lua.txt"
+ },
+ {
+  "lang": "r",
+  "file": "r.r.txt"
+ },
+ {
+  "lang": "toml",
+  "file": "toml.toml.txt"
+ },
+ {
+  "lang": "swift",
+  "file": "swift.swift.txt"
+ },
+ {
+  "lang": "kotlin",
+  "file": "kotlin.kotlin.txt"
+ },
+ {
+  "lang": "java",
+  "file": "java.java.txt"
+ },
+ {
+  "lang": "css",
+  "file": "css.css.txt"
+ },
+ {
+  "lang": "scss",
+  "file": "scss.scss.txt"
+ },
+ {
+  "lang": "xml",
+  "file": "xml.xml.txt"
+ }
+]

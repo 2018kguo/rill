@@ -1,0 +1,5 @@
+export function List<T extends { id: string }>({ items }: { items: T[] }) {
+  const [x, setX] = useState<number | null>(null);
+  return <ul>{items.map((i) => <li key={i.id} onClick={() => setX(1)}>{String(i.id)}</li>)}</ul>;
+}
+const f = <T,>(a: T) => a;

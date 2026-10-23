@@ -1,0 +1,40 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Highlight bench</title>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const engine = params.get('engine');
+  const scenario = params.get('scenario');
+  const chunk = Number(params.get('chunk') ?? 12);
+  await import(`/dist/browser/${engine}-entry.js`);
+  const themes = ['github-light', 'github-dark'];
+  const blocks = await (await fetch('/dist/bench/answers.json')).json();
+  const t0 = performance.now();
+  const plugin = await window.__createPlugin();
+  const setupMs = performance.now() - t0;
+  const highlight = (code, language, isIncomplete) =>
+    new Promise((resolve) => {
+      const result = plugin.highlight({ code, language, themes, isIncomplete }, resolve);
+      if (result) resolve(result);
+    });
+  let tokens = 0;
+  if (scenario === 'warm') {
+    // Load every language first, then time highlighting new code.
+    await Promise.all(blocks.map((b) => highlight(b.code, b.lang, false)));
+    const t1 = performance.now();
+    const results = await Promise.all(blocks.map((b) => highlight(' ' + b.code, b.lang, false)));
+    tokens = results.reduce((n, r) => n + r.tokens.flat().length, 0);
+    window.__result = { ms: performance.now() - t1, setupMs, tokens };
+  } else if (scenario === 'history') {
+    const results = await Promise.all(blocks.map((b) => highlight(b.code, b.lang, false)));
+    tokens = results.reduce((n, r) => n + r.tokens.flat().length, 0);
+    if (params.has('dump')) window.__dump = results.map((r) => JSON.stringify(r.tokens));
+  } else {
+    for (const b of blocks) {
+      for (let end = chunk; end < b.code.length; end += chunk) await highlight(b.code.slice(0, end), b.lang, true);
+      const result = await highlight(b.code, b.lang, false);
+      tokens += result.tokens.flat().length;
+    }
+  }
+  window.__result ??= { ms: performance.now() - t0, setupMs, tokens, dump: window.__dump };
+</script>

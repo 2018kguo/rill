@@ -1,0 +1,3 @@
+data class P(val x: Int = 0) { companion object { const val K = "k" } }
+fun <T> List<T>.second(): T = this[1]
+val s = """raw ${'$'}x ${x + 1}"""

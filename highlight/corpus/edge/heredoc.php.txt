@@ -1,0 +1,12 @@
+<?php
+$x = <<<EOT
+Hello {$name}
+EOT;
+$y = <<<'NOW'
+raw $text
+NOW;
+echo <<<HTML
+<div class="a">$x</div>
+HTML;
+?>
+<p><?= htmlspecialchars($y) ?></p>

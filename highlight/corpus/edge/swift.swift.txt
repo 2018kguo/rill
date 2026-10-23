@@ -1,0 +1,4 @@
+@MainActor final class VM: ObservableObject {
+    @Published var items: [String] = []
+    func load() async throws -> Int { let s = #"raw \(x)"#; return "\(items.count)".count }
+}

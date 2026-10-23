@@ -1,0 +1,3 @@
+const s = "never closed
+const t = `template ${a + `nested ${b}` 
+let x = 1;

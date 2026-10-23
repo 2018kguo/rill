@@ -1,0 +1,6 @@
+select Id, NAME from Users u
+INNER JOIN orders O ON o.user_id = U.id
+where u.created_at > now() - interval '7 days'
+GROUP by 1 order BY 2 desc limit 10;
+CREATE OR REPLACE FUNCTION f() RETURNS trigger AS $$
+BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;

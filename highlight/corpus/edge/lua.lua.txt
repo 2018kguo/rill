@@ -1,0 +1,5 @@
+local t = { [1] = "a", b = [[long
+string]], c = function(...) return select('#', ...) end }
+--[==[ block
+comment ]==]
+for k, v in pairs(t) do print(k, v) end

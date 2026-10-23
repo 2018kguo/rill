@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rill", "crates/rill-cmark"]
+members = ["crates/rill", "crates/rill-cmark", "crates/rill-highlight"]
 
 [profile.release]
 debug = "line-tables-only"

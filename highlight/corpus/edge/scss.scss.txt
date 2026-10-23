@@ -1,0 +1,4 @@
+@use 'sass:math';
+$map: (a: 1, b: 2);
+@mixin m($x: 10px) { width: math.div($x, 2); &:hover { color: darken(#fff, 10%); } }
+.a { @include m; #{$sel} & { x: y } }

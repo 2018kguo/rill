@@ -1,0 +1,15 @@
+key: value
+list:
+  - a
+  - b: c
+multi: |
+  line one
+  line two
+folded: >-
+  folded
+anchor: &a { x: 1 }
+ref: *a
+"quoted key": 'single'
+# comment
+---
+next: doc

@@ -1,0 +1,10 @@
+cat <<EOF > config.yaml
+name: $NAME
+path: ${HOME}/x
+EOF
+cat <<'RAW'
+$NOT_EXPANDED
+RAW
+if [[ -n "$1" && $# -gt 0 ]]; then echo "args: $@"; fi
+arr=(one two "three four")
+for i in "${arr[@]}"; do printf '%s\n' "$i"; done
