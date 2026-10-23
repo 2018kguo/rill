@@ -5,3 +5,5 @@ demo/dist/
 js/wasm/
 js/dist/
 *.tgz
+conformance/real/
+conformance/real.jsonl
