@@ -91,6 +91,13 @@ const formulas = Array.from(
 row("300 distinct formulas", formulas);
 row("Long answer with raw HTML", repeat(withHtml));
 row("Link-heavy answer (1,200 URLs)", links);
+// The raw HTML chat models write most: <br> in table cells and <sup> markers.
+const chatHtml = Array.from(
+  { length: 40 },
+  (_, index) =>
+    `### Option ${index}\n\nThe tradeoff<sup>${index}</sup> is **latency** vs. cost.\n\n| Plan | Pros | Cons |\n|---|---|---|\n| A | fast<br>cheap | limited<br>quota |\n| B | flexible<br/>scales | <kbd>Ctrl</kbd>+<kbd>C</kbd> to copy |`,
+).join("\n\n");
+row("Chat answer with <br>, <sup>, <kbd>", chatHtml);
 
 // Streaming: an answer arrives 24 characters at a time and every prefix is rendered,
 // as a chat UI does on each update. Times are the total for the whole stream.

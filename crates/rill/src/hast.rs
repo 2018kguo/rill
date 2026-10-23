@@ -503,6 +503,8 @@ struct ToHast<'t, 's> {
     footnote_calls: Vec<FootnoteCalls>,
     /// Raw HTML or links inside links: parse5 effects the native raw stage omits.
     raw_boundary: bool,
+    /// Raw HTML that `pair_simple_raw` can turn into elements instead.
+    simple_raw: bool,
     link_depth: usize,
     math: bool,
 }
@@ -696,7 +698,19 @@ impl<'s> ToHast<'_, 's> {
                 Chain::one(self.hast.element_around("sup", Vec::new(), at, link))
             }
             MKind::Html(value) => {
-                self.raw_boundary = true;
+                // Flow HTML (a block of its own) can restructure what follows it.
+                let flow = matches!(
+                    self.mdast.node(parent).kind,
+                    MKind::Root
+                        | MKind::Blockquote
+                        | MKind::ListItem { .. }
+                        | MKind::FootnoteDefinition(_)
+                );
+                if !flow && SimpleRaw::parse(value).is_some() {
+                    self.simple_raw = true;
+                } else {
+                    self.raw_boundary = true;
+                }
                 Chain::one(self.hast.push(HKind::Raw(value.clone()), at))
             }
             MKind::Image(image) => {
@@ -1114,6 +1128,7 @@ pub fn to_hast<'s>(mdast: &MTree<'s>) -> Converted<'s> {
         footnotes: HashMap::new(),
         footnote_calls: Vec::new(),
         raw_boundary: false,
+        simple_raw: false,
         link_depth: 0,
         math: false,
     };
@@ -1126,12 +1141,161 @@ pub fn to_hast<'s>(mdast: &MTree<'s>) -> Converted<'s> {
         state.hast.append(&mut children, section);
         state.hast.set_children(root, children);
     }
+    if state.simple_raw && !state.raw_boundary && !pair_simple_raw(&mut state.hast, root) {
+        state.raw_boundary = true;
+    }
     Converted {
         root,
         raw_boundary: state.raw_boundary,
         math: state.math,
         tree: state.hast,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Simple raw HTML: what rehype-raw (parse5) makes of the raw HTML chat answers carry
+// most, without parse5. Anything else keeps the raw boundary and runs in JavaScript.
+// ---------------------------------------------------------------------------
+
+/// Phrasing elements whose properly nested pair among siblings parse5 makes exactly an
+/// element around what lies between. The plain ones are "any other start tag" and "any
+/// other end tag" in body. The formatting ones (b, i, u, s, em, strong, small, strike,
+/// big, tt) run the adoption agency algorithm on their end tag, which, with only
+/// phrasing content opened since the start tag, finds no furthest block and just
+/// closes the element; nothing they leave in the active formatting list is ever
+/// reconstructed, because each is closed before its parent is.
+const PAIRED_TAGS: [&str; 24] = [
+    "abbr", "cite", "del", "dfn", "ins", "kbd", "mark", "q", "samp", "span", "sub", "sup", "time",
+    "var", "b", "i", "u", "s", "em", "strong", "small", "strike", "big", "tt",
+];
+
+/// One inline raw HTML node parse5 turns into something plain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SimpleRaw {
+    /// `<br>`, `<br/>` or `<br />`, in any case and without attributes.
+    Break,
+    /// A start tag of a [`PAIRED_TAGS`] element, without attributes.
+    Open(&'static str),
+    /// Its end tag.
+    Close(&'static str),
+    /// A comment parse5 ends where micromark does; sanitize removes it.
+    Comment,
+}
+
+impl SimpleRaw {
+    fn parse(value: &str) -> Option<SimpleRaw> {
+        if let Some(body) = value
+            .strip_prefix("<!--")
+            .and_then(|rest| rest.strip_suffix("-->"))
+        {
+            // parse5 ends a comment early at a leading `>` or `->` and at `--!>`.
+            let plain = !body.starts_with('>')
+                && !body.starts_with("->")
+                && !body.contains("--!>")
+                && !body.contains("-->");
+            return plain.then_some(SimpleRaw::Comment);
+        }
+        let inner = value.strip_prefix('<')?.strip_suffix('>')?;
+        if let Some(name) = inner.strip_prefix('/') {
+            return paired_tag(name).map(SimpleRaw::Close);
+        }
+        let void = inner.strip_suffix('/').map_or(inner, |name| {
+            name.trim_end_matches([' ', '\t', '\n', '\r', '\x0c'])
+        });
+        if void.eq_ignore_ascii_case("br") {
+            return Some(SimpleRaw::Break);
+        }
+        paired_tag(inner).map(SimpleRaw::Open)
+    }
+}
+
+fn paired_tag(name: &str) -> Option<&'static str> {
+    PAIRED_TAGS
+        .into_iter()
+        .find(|known| known.eq_ignore_ascii_case(name))
+}
+
+/// The simple raw node at `ix`, if it is one.
+fn simple_raw_at(tree: &HTree<'_>, ix: Ix) -> Option<SimpleRaw> {
+    match &tree.nodes[ix as usize].kind {
+        HKind::Raw(value) => SimpleRaw::parse(value),
+        _ => None,
+    }
+}
+
+/// Turns the simple raw HTML under `parent` into elements, as parse5 would. Returns
+/// `false`, leaving the tree as it was, when a start or end tag has no partner among
+/// its siblings (parse5 would then close or ignore it by rules this does not model).
+fn pair_simple_raw(tree: &mut HTree<'_>, parent: Ix) -> bool {
+    if !raw_tags_pair(tree, parent) {
+        return false;
+    }
+    rewrite_simple_raw(tree, parent);
+    true
+}
+
+fn raw_tags_pair(tree: &HTree<'_>, parent: Ix) -> bool {
+    let mut open = Vec::new();
+    for child in tree.children(parent) {
+        match simple_raw_at(tree, child) {
+            Some(SimpleRaw::Open(tag)) => open.push(tag),
+            Some(SimpleRaw::Close(tag)) => {
+                if open.pop() != Some(tag) {
+                    return false;
+                }
+            }
+            Some(SimpleRaw::Break | SimpleRaw::Comment) => {}
+            None => {
+                if !raw_tags_pair(tree, child) {
+                    return false;
+                }
+            }
+        }
+    }
+    open.is_empty()
+}
+
+fn rewrite_simple_raw(tree: &mut HTree<'_>, parent: Ix) {
+    // The element each open tag started, with the children gathered for it so far; the
+    // first entry gathers `parent`'s own.
+    let mut levels = vec![(parent, EMPTY)];
+    let mut cursor = tree.nodes[parent as usize].first;
+    while cursor != NIL {
+        let next = tree.nodes[cursor as usize].next;
+        let mut keep = Some(cursor);
+        match simple_raw_at(tree, cursor) {
+            Some(SimpleRaw::Open(tag)) => {
+                let element = tree.element(tag, Vec::new(), At::None);
+                tree.nodes[element as usize].start = tree.nodes[cursor as usize].start;
+                levels.push((element, EMPTY));
+                keep = None;
+            }
+            Some(SimpleRaw::Close(_)) => {
+                let (element, children) = levels.pop().expect("raw_tags_pair checked the nesting");
+                tree.set_children(element, children);
+                tree.nodes[element as usize].end = tree.nodes[cursor as usize].end;
+                keep = Some(element);
+            }
+            Some(SimpleRaw::Break) => {
+                tree.nodes[cursor as usize].kind = HKind::Element {
+                    tag: "br",
+                    props: Vec::new(),
+                    data: None,
+                };
+            }
+            // Kept raw: it separates the text around it, as parse5's comment node does,
+            // and sanitize then drops it.
+            Some(SimpleRaw::Comment) => {}
+            None => rewrite_simple_raw(tree, cursor),
+        }
+        if let Some(node) = keep {
+            let (_, children) = levels.last_mut().expect("the parent's level stays");
+            tree.append(children, node);
+        }
+        cursor = next;
+    }
+    let (_, children) = levels.pop().expect("only the parent's level is left");
+    tree.set_children(parent, children);
 }
 
 // ---------------------------------------------------------------------------

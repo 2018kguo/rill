@@ -44,6 +44,9 @@ jobs:
           node conformance/diff.mjs --pieces '["<","http://a","\\\\_",">","www.b.c","a@b.co","x"]' --length 5
           # Labels across lines in containers, and footnote labels with whitespace.
           node conformance/diff.mjs --pieces '["1. ","> ","[a\n","   ","b]: m","b]","[x]","[^","\n\n[a b]: /u"," "]' --length 4
+          # Raw HTML rill renders without parse5: <br>, paired phrasing and formatting tags, comments.
+          node conformance/diff.mjs --pieces '["<br>","<BR />","<sup>","</sup>","<b>","</b>","*","a","\n"]' --length 5
+          node conformance/diff.mjs --pieces '["| a |\n|-|\n| ","<br>","<kbd>","</kbd>","<!-- c -->","x","|","\n"]' --length 5
       - name: JavaScript package
         working-directory: js
         run: |
