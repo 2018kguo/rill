@@ -3,6 +3,7 @@
 // included), and reports both containers' HTML. Driven by dom-diff.mjs.
 //
 //   dom.html?config=default|code|math|cjk|all&variant=<name>&candidate=self|rill
+import "./no-time-limit.ts";
 import { createContext, createElement, memo, type ComponentType, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Block as StreamdownBlock, Streamdown } from "streamdown";
