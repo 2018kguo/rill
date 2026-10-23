@@ -648,18 +648,20 @@ function renderChunks(
   const chunks = joinChunks(split, rill, plan, pieces);
   // The text's definitions, in order (the first of a label wins, as in the whole text).
   const definitions: string[] = [];
+  const known = new Map<string, string[] | null>();
   for (const chunk of chunks) {
     if (!chunk.includes("]:")) continue;
     let found = pieces.definitions.get(chunk);
     if (found === undefined) {
       const ranges = rill.definitions!(chunk, plan);
       found = ranges && ranges.map(([start, end]) => chunk.slice(start, end));
-      pieces.definitions.set(chunk, found);
     }
+    known.set(chunk, found);
     // A definition in a container: render the whole block.
     if (found === null) return null;
     definitions.push(...found);
   }
+  pieces.definitions = known;
   const before = definitions.length > 0 ? `${definitions.join("\n\n")}\n\n` : "";
   const out: ReactNode[] = [];
   const counts = new Map<string, number>();

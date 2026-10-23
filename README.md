@@ -31,15 +31,25 @@ the same DOM, down to every class, attribute and text node, with the same behavi
 rendering and hydration, `components` overrides, `plugins`).
 
 What changes is the work behind it. Streamdown is still the component: its root, its
-contexts, its block splitting and memoization are its own. rill renders each block in
-Rust: static markup becomes one React element with its HTML, and React only builds the
-interactive parts (code block shells, tables, images, link buttons) from Streamdown's
-own exported components. With `@streamdown/code`, code is tokenized by rill-highlight
-(Shiki's tokenizer ported to Rust, the same tokens) in a Web Worker, and Streamdown's
-streaming repair (remend) runs in Rust on just what was appended.
+contexts and its memoization are its own, and its blocks are the ones it would split
+(the same splitter, on the same `marked`). rill renders each block in Rust: static
+markup becomes one React element with its HTML, and React only builds the interactive
+parts (code block shells, tables, images, link buttons) from Streamdown's own exported
+components. With `@streamdown/code`, code is tokenized by rill-highlight (Shiki's
+tokenizer ported to Rust, the same tokens) in a Web Worker.
+
+While an answer streams, each update costs what the block being written costs, not
+the whole answer: Streamdown's streaming repair (remend) runs in Rust on the text after
+a prefix it has settled, the block splitter lexes only the blocks that can still change,
+and a block that link definitions made one (`[1]: https://...` citations keep the whole
+answer in one block in Streamdown) renders as its pieces, of which only the last changes.
+A message that has not streamed (a conversation opened from history) renders its blocks
+from one component instead of one per block, and what it computes from its text alone is
+cached by content, so mounting it again is cheap.
 
 Anything rill doesn't reproduce exactly renders with Streamdown's own `Block`, the same
-way: raw HTML that needs the HTML5 parser, `animated`, `allowedTags`, custom
+way: raw HTML that needs the HTML5 parser (rill handles comments and phrasing tags,
+`<img>` and `<br>`, with or without attributes), `animated`, `allowedTags`, custom
 `remarkPlugins`/`rehypePlugins`, `urlTransform` and the other Markdown filters,
 `fallbackComponent`, and every block until the WebAssembly has loaded (and on the server
 without `initRill`). `mode="static"` is Streamdown's own as well.
@@ -306,12 +316,18 @@ node conformance/dom/dom-diff.mjs --config code --variant prefix  # props varian
 node conformance/dom/dom-diff.mjs --config code --stream every=40 # streamed prefixes
 bun conformance/dom/ssr.tsx --config code                         # renderToString
 node conformance/dom/interactions.mjs                             # buttons, menus, modal
-node conformance/remend.mjs --fuzz 100000                         # remend against remend
+node conformance/remend.mjs --fuzz 100000 --streams 400           # remend against remend
+node conformance/blocks.mjs --fuzz 3000                           # the block splitter
+bun conformance/dom/ssr.tsx --definitions --every 13 --corpus chat # reference-link blocks
 ```
+
+`js/test/doubling.test.ts` and `remend.rs`'s `stream_cost` test stream answers of n, 2n, 4n
+and 8n characters and fail if an update's cost grows with the answer.
 
 `dom-diff.mjs` renders each document with Streamdown 2.7.1 and with rill's component in
 Chromium, waits until both stop changing (highlighting included), and compares their
-`innerHTML`. Configurations are `default`, `code` (`@streamdown/code`), `math`, `cjk` and
+`innerHTML` and the lengths of their text nodes (parsed HTML joins adjacent text that
+React keeps apart). Configurations are `default`, `code` (`@streamdown/code`), `math`, `cjk` and
 `all`; variants cover `prefix`, `controls={false}`, `linkSafety` off, `lineNumbers`
 off, a `components` override, `dir="rtl"`, `mode="static"`, `caret` and a custom
 `BlockComponent` around `Block`. With `--stream` it streams the chat corpus into one
