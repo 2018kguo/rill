@@ -125,6 +125,17 @@ impl Points {
         self.utf16.get(byte as usize).copied().unwrap_or(byte)
     }
 
+    /// The point one unit past `byte`, a line ending, without starting a new line: where
+    /// micromark starts a task item's paragraph after the line ending that follows its
+    /// check, a point no source byte has.
+    #[must_use]
+    pub fn past_line_ending(&self, byte: u32) -> Pt {
+        let mut point = self.pt(byte);
+        point.column += 1;
+        point.offset += 1;
+        point
+    }
+
     #[must_use]
     pub fn pt(&self, byte: u32) -> Pt {
         let line = self.line_starts.partition_point(|start| *start <= byte);
@@ -144,8 +155,12 @@ pub enum At {
     None,
     /// Byte offsets into the parsed source.
     Bytes(u32, u32),
-    /// Explicit points, where micromark reports a position no source byte has.
-    Points(Pt, Pt),
+    /// From one unit past the line ending at byte `line_ending`, still on its line (see
+    /// [`Points::past_line_ending`]), to byte `end`.
+    PastLineEnding {
+        line_ending: u32,
+        end: u32,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -155,6 +170,54 @@ pub enum At {
 pub type Ix = u32;
 pub const NIL: Ix = u32::MAX;
 
+/// A fenced or indented code block's, or a math block's, payload.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CodeBlock<'s> {
+    pub value: Cow<'s, str>,
+    /// Always `None` for math.
+    pub lang: Option<Box<str>>,
+    pub meta: Option<Box<str>>,
+    /// Always `true` for math.
+    pub fenced: bool,
+}
+
+/// mdast's Resource and Alternative mixins: a link's or image's destination.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resource<'s> {
+    pub url: Cow<'s, str>,
+    pub title: Option<Cow<'s, str>>,
+    /// An image's alt; empty for a link.
+    pub alt: String,
+}
+
+/// mdast's Association mixin: a footnote definition's or footnote reference's label.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Association {
+    pub identifier: Box<str>,
+    pub label: Box<str>,
+}
+
+/// A link reference or image reference.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reference {
+    pub kind: ReferenceKind,
+    pub identifier: Box<str>,
+    pub label: Box<str>,
+    /// An image reference's alt; empty for a link reference.
+    pub alt: String,
+}
+
+/// A link or image definition.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Definition<'s> {
+    pub url: Cow<'s, str>,
+    pub title: Option<Cow<'s, str>>,
+    pub identifier: Box<str>,
+    pub label: Box<str>,
+}
+
+/// A node's type and fields. Rare, large payloads are boxed so the common nodes (text,
+/// paragraphs, table cells, list items) stay small.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MKind<'s> {
     Root,
@@ -172,22 +235,9 @@ pub enum MKind<'s> {
         checked: Option<bool>,
     },
     Html(Cow<'s, str>),
-    Code {
-        value: Cow<'s, str>,
-        lang: Option<String>,
-        meta: Option<String>,
-        fenced: bool,
-    },
-    Math {
-        value: Cow<'s, str>,
-        meta: Option<String>,
-    },
-    Definition {
-        url: Cow<'s, str>,
-        title: Option<Cow<'s, str>>,
-        identifier: String,
-        label: String,
-    },
+    Code(Box<CodeBlock<'s>>),
+    Math(Box<CodeBlock<'s>>),
+    Definition(Box<Definition<'s>>),
     Text(Cow<'s, str>),
     Emphasis,
     Strong,
@@ -195,35 +245,13 @@ pub enum MKind<'s> {
     InlineCode(Cow<'s, str>),
     InlineMath(Cow<'s, str>),
     Break,
-    Link {
-        url: Cow<'s, str>,
-        title: Option<Cow<'s, str>>,
-    },
-    LinkReference {
-        kind: ReferenceKind,
-        identifier: String,
-        label: String,
-    },
-    Image {
-        url: Cow<'s, str>,
-        title: Option<Cow<'s, str>>,
-        alt: String,
-    },
-    ImageReference {
-        kind: ReferenceKind,
-        identifier: String,
-        label: String,
-        alt: String,
-    },
-    FootnoteDefinition {
-        identifier: String,
-        label: String,
-    },
-    FootnoteReference {
-        identifier: String,
-        label: String,
-    },
-    Table(Vec<AlignKind>),
+    Link(Box<Resource<'s>>),
+    LinkReference(Box<Reference>),
+    Image(Box<Resource<'s>>),
+    ImageReference(Box<Reference>),
+    FootnoteDefinition(Box<Association>),
+    FootnoteReference(Box<Association>),
+    Table(Box<[AlignKind]>),
     TableRow,
     TableCell,
 }
@@ -332,14 +360,18 @@ impl<'s> MTree<'s> {
         match at {
             At::None => None,
             At::Bytes(start, end) => Some((self.points.pt(start), self.points.pt(end))),
-            At::Points(start, end) => Some((start, end)),
+            At::PastLineEnding { line_ending, end } => Some((
+                self.points.past_line_ending(line_ending),
+                self.points.pt(end),
+            )),
         }
     }
 
     /// The tree as remark's MDAST JSON, positions in UTF-16 units.
     #[must_use]
     pub fn to_json(&self) -> String {
-        let mut out = String::with_capacity(self.source.len() * 6 + 64);
+        // The text, plus up to about 150 bytes of syntax and position per node.
+        let mut out = String::with_capacity(self.source.len() + self.nodes.len() * 150);
         self.write_json(&mut out, MTree::ROOT);
         out
     }
@@ -362,7 +394,7 @@ impl<'s> MTree<'s> {
                 None => out.push_str("null"),
             }
         };
-        let reference = |out: &mut String, kind: ReferenceKind| {
+        let reference_type = |out: &mut String, kind: ReferenceKind| {
             field(out, "referenceType");
             out.push_str(match kind {
                 ReferenceKind::Shortcut => "\"shortcut\"",
@@ -412,70 +444,42 @@ impl<'s> MTree<'s> {
                 parent = false;
                 string(out, "value", value);
             }
-            MKind::Code {
-                value, lang, meta, ..
-            } => {
+            MKind::Code(code) | MKind::Math(code) => {
                 parent = false;
-                nullable(out, "lang", lang.as_deref());
-                nullable(out, "meta", meta.as_deref());
-                string(out, "value", value);
+                if matches!(node.kind, MKind::Code(_)) {
+                    nullable(out, "lang", code.lang.as_deref());
+                }
+                nullable(out, "meta", code.meta.as_deref());
+                string(out, "value", &code.value);
             }
-            MKind::Math { value, meta } => {
+            MKind::Definition(definition) => {
                 parent = false;
-                nullable(out, "meta", meta.as_deref());
-                string(out, "value", value);
+                string(out, "identifier", &definition.identifier);
+                string(out, "label", &definition.label);
+                nullable(out, "title", definition.title.as_deref());
+                string(out, "url", &definition.url);
             }
-            MKind::Definition {
-                url,
-                title,
-                identifier,
-                label,
-            } => {
-                parent = false;
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-                nullable(out, "title", title.as_deref());
-                string(out, "url", url);
+            MKind::Link(resource) | MKind::Image(resource) => {
+                if matches!(node.kind, MKind::Image(_)) {
+                    parent = false;
+                    string(out, "alt", &resource.alt);
+                }
+                nullable(out, "title", resource.title.as_deref());
+                string(out, "url", &resource.url);
             }
-            MKind::Link { url, title } => {
-                nullable(out, "title", title.as_deref());
-                string(out, "url", url);
+            MKind::LinkReference(reference) | MKind::ImageReference(reference) => {
+                if matches!(node.kind, MKind::ImageReference(_)) {
+                    parent = false;
+                    string(out, "alt", &reference.alt);
+                }
+                string(out, "identifier", &reference.identifier);
+                string(out, "label", &reference.label);
+                reference_type(out, reference.kind);
             }
-            MKind::LinkReference {
-                kind,
-                identifier,
-                label,
-            } => {
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-                reference(out, *kind);
-            }
-            MKind::Image { url, title, alt } => {
-                parent = false;
-                string(out, "alt", alt);
-                nullable(out, "title", title.as_deref());
-                string(out, "url", url);
-            }
-            MKind::ImageReference {
-                kind,
-                identifier,
-                label,
-                alt,
-            } => {
-                parent = false;
-                string(out, "alt", alt);
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-                reference(out, *kind);
-            }
-            MKind::FootnoteDefinition { identifier, label } => {
-                string(out, "identifier", identifier);
-                string(out, "label", label);
-            }
-            MKind::FootnoteReference { identifier, label } => {
-                parent = false;
-                string(out, "identifier", identifier);
-                string(out, "label", label);
+            MKind::FootnoteDefinition(association) | MKind::FootnoteReference(association) => {
+                parent = matches!(node.kind, MKind::FootnoteDefinition(_));
+                string(out, "identifier", &association.identifier);
+                string(out, "label", &association.label);
             }
             MKind::Table(align) => {
                 field(out, "align");
@@ -560,11 +564,11 @@ fn source_offset(source: &str, slice: &str) -> Option<usize> {
     (start + slice.len() <= source.len()).then_some(start)
 }
 
-fn push_cow<'s>(target: &mut Cow<'s, str>, value: &str) {
-    if target.is_empty() {
-        *target = Cow::Owned(value.to_owned());
-    } else {
-        target.to_mut().push_str(value);
+/// Appends `value`, copying a borrowed `target` once, into a string that fits both.
+pub(crate) fn push_cow(target: &mut Cow<'_, str>, value: &str) {
+    match target {
+        Cow::Owned(owned) => owned.push_str(value),
+        Cow::Borrowed(borrowed) => *target = Cow::Owned([*borrowed, value].concat()),
     }
 }
 
@@ -643,8 +647,8 @@ struct Builder<'s> {
     nested_images: usize,
     /// The open task item's paragraph with its check's byte span.
     task: Option<TaskCheck>,
-    /// Starts micromark reports at no real source point (see `task_paragraph`).
-    starts: Vec<(Ix, Pt)>,
+    /// Nodes that start past a line ending (see `task_paragraph`), with that line ending.
+    starts: Vec<(Ix, u32)>,
     exits: Vec<Exit>,
 }
 
@@ -766,9 +770,7 @@ impl<'s> Builder<'s> {
         let pulldown_end = end;
         let pending = !self.exits.is_empty();
         let fence_prefixes = match &self.tree.nodes[ix as usize].kind {
-            MKind::Code { fenced: true, .. } | MKind::Math { .. } if in_container => {
-                self.prefixes()
-            }
+            MKind::Code(code) | MKind::Math(code) if code.fenced && in_container => self.prefixes(),
             _ => Vec::new(),
         };
         let eof_prefixed = matches!(
@@ -789,14 +791,9 @@ impl<'s> Builder<'s> {
             )
         };
         match &mut self.tree.nodes[ix as usize].kind {
-            MKind::Code {
-                value,
-                fenced: true,
-                ..
-            }
-            | MKind::Math { value, .. } => {
+            MKind::Code(code) | MKind::Math(code) if code.fenced => {
                 let defer;
-                (end, defer) = fence_end(source, value, start, end, in_container);
+                (end, defer) = fence_end(source, &mut code.value, start, end, in_container);
                 if defer {
                     exit = Some(Exit {
                         node: ix,
@@ -809,7 +806,7 @@ impl<'s> Builder<'s> {
                     });
                 }
             }
-            MKind::Code { value, .. } => {
+            MKind::Code(code) => {
                 start = indented_code_start(source, start, synthesized);
                 end = trim_blank_lines(source, start, end);
                 // ponytail: top level only; container prefixes would need the spine.
@@ -817,7 +814,7 @@ impl<'s> Builder<'s> {
                     let (tail, suffix) = indented_tail(source, end);
                     end = tail;
                     if !suffix.is_empty() {
-                        value.to_mut().push_str(&suffix);
+                        push_cow(&mut code.value, &suffix);
                     }
                 }
             }
@@ -957,13 +954,13 @@ impl<'s> Builder<'s> {
     /// fence ends where `closeFlow` stopped feeding it: at the closing line's start when that
     /// line opens a container or item, else where it already ends.
     fn settle_exits(&mut self, next: Option<(usize, Opens)>) {
-        let exits = std::mem::take(&mut self.exits);
+        let mut exits = std::mem::take(&mut self.exits);
         for Exit {
             node: ix,
             settle,
             closing,
             content_end,
-        } in exits
+        } in exits.drain(..)
         {
             match settle {
                 Settle::Item { list } => self.settle_item(ix, list, next),
@@ -976,6 +973,8 @@ impl<'s> Builder<'s> {
                 }
             }
         }
+        // Settling never defers more, so the emptied buffer goes back for the next exits.
+        self.exits = exits;
     }
 
     /// A list item ends no earlier than its last child.
@@ -1019,8 +1018,8 @@ impl<'s> Builder<'s> {
             let (end, eof_value) = fence_at_eof(source, prefixes, fence_start as usize);
             let node = &mut self.tree.nodes[ix as usize];
             node.at = At::Bytes(fence_start, end as u32);
-            if let MKind::Code { value, .. } | MKind::Math { value, .. } = &mut node.kind {
-                *value = Cow::Owned(eof_value);
+            if let MKind::Code(code) | MKind::Math(code) = &mut node.kind {
+                code.value = Cow::Owned(eof_value);
             }
             return;
         }
@@ -1055,10 +1054,9 @@ impl<'s> Builder<'s> {
         // `onexitcodefenced` strips one final line ending from data that, closed lazily,
         // already stops before the last one: a blank last line goes.
         if !opens_container
-            && let MKind::Code { value, .. } | MKind::Math { value, .. } =
-                &mut self.tree.nodes[ix as usize].kind
+            && let MKind::Code(code) | MKind::Math(code) = &mut self.tree.nodes[ix as usize].kind
         {
-            pop_line_ending(value);
+            pop_line_ending(&mut code.value);
         }
     }
 
@@ -1167,11 +1165,8 @@ impl<'s> Builder<'s> {
             // `slice(1)` drops only the CR.
             value.to_mut().insert(0, '\n');
         }
-        let mut start = self.tree.points.pt(eol as u32);
-        start.column += 1;
-        start.offset += 1;
-        self.starts.push((head, start));
-        self.starts.push((ix, start));
+        self.starts.push((head, eol as u32));
+        self.starts.push((ix, eol as u32));
     }
 
     /// Removes `ix`, the newest child of the current parent frame.
@@ -1266,12 +1261,10 @@ impl<'s> Builder<'s> {
                     ..
                 } = self.stack.pop().ok_or(Error::Unbalanced)?;
                 match &mut self.tree.nodes[ix as usize].kind {
-                    MKind::Image { alt: slot, .. } => *slot = alt,
-                    MKind::ImageReference {
-                        alt: slot, kind, ..
-                    } => {
-                        *slot = alt;
-                        if *kind == ReferenceKind::Collapsed
+                    MKind::Image(image) => image.alt = alt,
+                    MKind::ImageReference(reference) => {
+                        reference.alt = alt;
+                        if reference.kind == ReferenceKind::Collapsed
                             && source.get(end..end + 2) == Some("[]")
                         {
                             end += 2;
@@ -1284,9 +1277,8 @@ impl<'s> Builder<'s> {
             }
             Event::End(TagEnd::CodeBlock | TagEnd::HtmlBlock | TagEnd::MathBlock) => {
                 match self.kind_mut() {
-                    Some(
-                        MKind::Code { value, .. } | MKind::Html(value) | MKind::Math { value, .. },
-                    ) => pop_line_ending(value),
+                    Some(MKind::Code(code) | MKind::Math(code)) => pop_line_ending(&mut code.value),
+                    Some(MKind::Html(value)) => pop_line_ending(value),
                     _ => return Err(Error::Unbalanced),
                 }
                 self.close()
@@ -1294,10 +1286,7 @@ impl<'s> Builder<'s> {
             Event::End(TagEnd::Link) => {
                 let collapsed = matches!(
                     self.kind_mut(),
-                    Some(MKind::LinkReference {
-                        kind: ReferenceKind::Collapsed,
-                        ..
-                    })
+                    Some(MKind::LinkReference(reference)) if reference.kind == ReferenceKind::Collapsed
                 );
                 if let Some(frame) = self.stack.last_mut()
                     && collapsed
@@ -1310,9 +1299,9 @@ impl<'s> Builder<'s> {
             Event::End(_) => self.close(),
             Event::Text(text) => {
                 match self.kind_mut() {
-                    Some(MKind::Code { value, .. } | MKind::Math { value, .. }) => {
-                        let synthesized = value.is_empty() && start == end;
-                        push_cow(value, &text);
+                    Some(MKind::Code(code) | MKind::Math(code)) => {
+                        let synthesized = code.value.is_empty() && start == end;
+                        push_cow(&mut code.value, &text);
                         if synthesized && let Some(frame) = self.stack.last_mut() {
                             frame.synthesized = text.len();
                         }
@@ -1362,10 +1351,10 @@ impl<'s> Builder<'s> {
                 self.leaf(MKind::InlineMath(Cow::from(value)), bytes(start, end))
             }
             Event::FootnoteReference(label) => self.leaf(
-                MKind::FootnoteReference {
-                    identifier: normalize_identifier(&label),
-                    label: label.into_string(),
-                },
+                MKind::FootnoteReference(Box::new(Association {
+                    identifier: normalize_identifier(&label).into(),
+                    label: label.into_string().into(),
+                })),
                 bytes(start, end),
             ),
             Event::SoftBreak => {
@@ -1381,12 +1370,12 @@ impl<'s> Builder<'s> {
             Event::Definition { label, dest, title } => {
                 let end = skip_blanks(source.as_bytes(), end);
                 self.leaf(
-                    MKind::Definition {
+                    MKind::Definition(Box::new(Definition {
                         url: Cow::from(dest),
                         title: title.map(Cow::from),
-                        identifier: normalize_identifier(&label),
-                        label: rill_cmark::decode_string(&label),
-                    },
+                        identifier: normalize_identifier(&label).into(),
+                        label: rill_cmark::decode_string(&label).into(),
+                    })),
                     bytes(start, end),
                 )
             }
@@ -1446,19 +1435,21 @@ impl<'s> Builder<'s> {
                 } else {
                     (None, None)
                 };
-                MKind::Code {
+                MKind::Code(Box::new(CodeBlock {
                     value: Cow::Borrowed(""),
                     lang,
                     meta,
                     fenced,
-                }
+                }))
             }
             Tag::MathBlock(_) => {
                 let info = fence_info_raw(source, start);
-                MKind::Math {
+                MKind::Math(Box::new(CodeBlock {
                     value: Cow::Borrowed(""),
-                    meta: (!info.is_empty()).then(|| rill_cmark::decode_string(info)),
-                }
+                    lang: None,
+                    meta: (!info.is_empty()).then(|| rill_cmark::decode_string(info).into()),
+                    fenced: true,
+                }))
             }
             Tag::HtmlBlock => MKind::Html(Cow::Borrowed("")),
             Tag::List(first) => MKind::List {
@@ -1470,10 +1461,10 @@ impl<'s> Builder<'s> {
                 spread: false,
                 checked: None,
             },
-            Tag::FootnoteDefinition(label) => MKind::FootnoteDefinition {
-                identifier: normalize_identifier(&label),
-                label: label.into_string(),
-            },
+            Tag::FootnoteDefinition(label) => MKind::FootnoteDefinition(Box::new(Association {
+                identifier: normalize_identifier(&label).into(),
+                label: label.into_string().into(),
+            })),
             Tag::Table(align) => MKind::Table(align.iter().copied().map(AlignKind::from).collect()),
             Tag::TableHead | Tag::TableRow => MKind::TableRow,
             Tag::TableCell => MKind::TableCell,
@@ -1486,19 +1477,21 @@ impl<'s> Builder<'s> {
                 title,
                 id,
             } => match reference_kind(link_type) {
-                Some(kind) => MKind::LinkReference {
+                Some(kind) => MKind::LinkReference(Box::new(Reference {
                     kind,
-                    identifier: normalize_identifier(&id),
-                    label: rill_cmark::decode_string(&id),
-                },
-                None => MKind::Link {
+                    identifier: normalize_identifier(&id).into(),
+                    label: rill_cmark::decode_string(&id).into(),
+                    alt: String::new(),
+                })),
+                None => MKind::Link(Box::new(Resource {
                     url: if link_type == LinkType::Email {
                         Cow::Owned(format!("mailto:{dest_url}"))
                     } else {
                         Cow::from(dest_url)
                     },
                     title: (!title.is_empty()).then(|| Cow::from(title)),
-                },
+                    alt: String::new(),
+                })),
             },
             Tag::Image {
                 link_type,
@@ -1508,17 +1501,17 @@ impl<'s> Builder<'s> {
             } => {
                 self.alt = Some(String::new());
                 match reference_kind(link_type) {
-                    Some(kind) => MKind::ImageReference {
+                    Some(kind) => MKind::ImageReference(Box::new(Reference {
                         kind,
-                        identifier: normalize_identifier(&id),
-                        label: rill_cmark::decode_string(&id),
+                        identifier: normalize_identifier(&id).into(),
+                        label: rill_cmark::decode_string(&id).into(),
                         alt: String::new(),
-                    },
-                    None => MKind::Image {
+                    })),
+                    None => MKind::Image(Box::new(Resource {
                         url: Cow::from(dest_url),
                         title: (!title.is_empty()).then(|| Cow::from(title)),
                         alt: String::new(),
-                    },
+                    })),
                 }
             }
         };
@@ -1547,7 +1540,8 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
     }
     let mut tree = MTree {
         source,
-        nodes: Vec::with_capacity(source.len() / 8 + 16),
+        // Chat Markdown runs 4 to 19 bytes per node, about 8 typically: room for 6.
+        nodes: Vec::with_capacity(source.len() / 6 + 16),
         points: Points::new(source),
     };
     tree.push(MKind::Root, bytes(0, source.len()));
@@ -1576,9 +1570,9 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
         return Err(Error::Unbalanced);
     }
     let mut tree = builder.tree;
-    for (ix, start) in builder.starts {
+    for (ix, line_ending) in builder.starts {
         if let At::Bytes(_, end) = tree.nodes[ix as usize].at {
-            tree.nodes[ix as usize].at = At::Points(start, tree.points.pt(end));
+            tree.nodes[ix as usize].at = At::PastLineEnding { line_ending, end };
         }
     }
     autolink_transform(&mut tree);
@@ -1700,10 +1694,11 @@ fn transform_children(tree: &mut MTree<'_>, parent: Ix, finder: Finder) {
                             Piece::Text(text) => tree.push(MKind::Text(Cow::Owned(text)), At::None),
                             Piece::Link { url, text } => {
                                 let link = tree.push(
-                                    MKind::Link {
+                                    MKind::Link(Box::new(Resource {
                                         url: Cow::Owned(url),
                                         title: None,
-                                    },
+                                        alt: String::new(),
+                                    })),
                                     At::None,
                                 );
                                 let child = tree.push(MKind::Text(Cow::Owned(text)), At::None);
@@ -2072,7 +2067,7 @@ fn fence_info_raw(source: &str, start: usize) -> &str {
 }
 
 /// micromark splits fenced-code info at the first space or tab; meta keeps its tail.
-fn fence_info(source: &str, start: usize) -> (Option<String>, Option<String>) {
+fn fence_info(source: &str, start: usize) -> (Option<Box<str>>, Option<Box<str>>) {
     let info = fence_info_raw(source, start);
     if info.is_empty() {
         return (None, None);
@@ -2082,11 +2077,11 @@ fn fence_info(source: &str, start: usize) -> (Option<String>, Option<String>) {
             let lang = &info[..split];
             let meta = info[split..].trim_start_matches([' ', '\t']);
             (
-                Some(rill_cmark::decode_string(lang)),
-                (!meta.is_empty()).then(|| rill_cmark::decode_string(meta)),
+                Some(rill_cmark::decode_string(lang).into()),
+                (!meta.is_empty()).then(|| rill_cmark::decode_string(meta).into()),
             )
         }
-        None => (Some(rill_cmark::decode_string(info)), None),
+        None => (Some(rill_cmark::decode_string(info).into()), None),
     }
 }
 

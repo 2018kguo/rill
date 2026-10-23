@@ -11,7 +11,10 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use crate::json::{json_string, json_u32};
-use crate::mdast::{self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, ReferenceKind};
+use crate::mdast::{
+    self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, Reference, ReferenceKind,
+    push_cow,
+};
 use crate::url::Url;
 
 // ---------------------------------------------------------------------------
@@ -23,7 +26,8 @@ use crate::url::Url;
 pub enum Edge {
     None,
     Byte(u32),
-    Pt(Pt),
+    /// One unit past the line ending at this byte (see [`Points::past_line_ending`]).
+    PastLineEnding(u32),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -40,14 +44,20 @@ pub enum Val<'s> {
 /// An element's properties, in hast's order.
 pub type Props<'s> = Vec<(&'static str, Val<'s>)>;
 
+/// An element's hast `data`, boxed because only some code elements have any.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Data {
+    /// `data.meta` from mdast-util-to-hast's code handler.
+    pub meta: Box<str>,
+}
+
 #[derive(Clone, Debug)]
 pub enum HKind<'s> {
     Root,
     Element {
         tag: &'static str,
         props: Props<'s>,
-        /// `data.meta` from mdast-util-to-hast's code handler.
-        meta: Option<String>,
+        data: Option<Box<Data>>,
     },
     Text(Cow<'s, str>),
     Raw(Cow<'s, str>),
@@ -114,7 +124,7 @@ impl Edge {
         match self {
             Edge::None => None,
             Edge::Byte(byte) => Some(points.pt(byte)),
-            Edge::Pt(pt) => Some(pt),
+            Edge::PastLineEnding(byte) => Some(points.past_line_ending(byte)),
         }
     }
 }
@@ -123,7 +133,9 @@ fn edges(at: At) -> (Edge, Edge) {
     match at {
         At::None => (Edge::None, Edge::None),
         At::Bytes(start, end) => (Edge::Byte(start), Edge::Byte(end)),
-        At::Points(start, end) => (Edge::Pt(start), Edge::Pt(end)),
+        At::PastLineEnding { line_ending, end } => {
+            (Edge::PastLineEnding(line_ending), Edge::Byte(end))
+        }
     }
 }
 
@@ -151,7 +163,7 @@ impl<'s> HTree<'s> {
             HKind::Element {
                 tag,
                 props,
-                meta: None,
+                data: None,
             },
             at,
         )
@@ -345,7 +357,14 @@ fn trim_markdown_space_start<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
 
 /// `trim-lines` 3.0.1.
 fn trim_lines<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
-    if !value.contains(['\n', '\r']) {
+    // Only spaces and tabs next to a line ending go.
+    let blank = |byte: &u8| matches!(byte, b' ' | b'\t');
+    let ending = |byte: &u8| matches!(byte, b'\n' | b'\r');
+    let unchanged = !value
+        .as_bytes()
+        .windows(2)
+        .any(|pair| blank(&pair[0]) && ending(&pair[1]) || ending(&pair[0]) && blank(&pair[1]));
+    if unchanged {
         return value.clone();
     }
     let mut out = String::with_capacity(value.len());
@@ -373,11 +392,7 @@ fn trim_lines<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
         first = false;
     }
     out.push_str(value[last..].trim_start_matches([' ', '\t']));
-    if out.len() == value.len() {
-        value.clone()
-    } else {
-        Cow::Owned(out)
-    }
+    Cow::Owned(out)
 }
 
 /// micromark-util-sanitize-uri 2.0.1 `normalizeUri`.
@@ -444,10 +459,18 @@ fn call_suffix(n: usize) -> String {
     }
 }
 
-fn revert_suffix(kind: ReferenceKind, label: &str, identifier: &str) -> String {
-    match kind {
+/// What follows an unresolved reference's content when it reverts to text.
+fn revert_suffix(reference: &Reference) -> String {
+    match reference.kind {
         ReferenceKind::Collapsed => "][]".into(),
-        ReferenceKind::Full => format!("][{}]", if label.is_empty() { identifier } else { label }),
+        ReferenceKind::Full => {
+            let label = if reference.label.is_empty() {
+                &reference.identifier
+            } else {
+                &reference.label
+            };
+            format!("][{label}]")
+        }
         ReferenceKind::Shortcut => "]".into(),
     }
 }
@@ -487,22 +510,17 @@ struct ToHast<'t, 's> {
 impl<'s> ToHast<'_, 's> {
     fn collect(&mut self, ix: Ix) {
         match &self.mdast.node(ix).kind {
-            MKind::Definition {
-                url,
-                title,
-                identifier,
-                ..
-            } => {
+            MKind::Definition(definition) => {
                 self.definitions
-                    .entry(identifier.to_uppercase())
+                    .entry(definition.identifier.to_uppercase())
                     .or_insert_with(|| Definition {
-                        url: url.clone(),
-                        title: title.clone(),
+                        url: definition.url.clone(),
+                        title: definition.title.clone(),
                     });
             }
-            MKind::FootnoteDefinition { identifier, .. } => {
+            MKind::FootnoteDefinition(association) => {
                 self.footnotes
-                    .entry(identifier.to_uppercase())
+                    .entry(association.identifier.to_uppercase())
                     .or_insert(ix);
             }
             _ => {}
@@ -510,6 +528,13 @@ impl<'s> ToHast<'_, 's> {
         for child in self.mdast.children(ix) {
             self.collect(child);
         }
+    }
+
+    /// The definition `reference` resolves to.
+    fn definition(&self, reference: &Reference) -> Option<Definition<'s>> {
+        self.definitions
+            .get(&reference.identifier.to_uppercase())
+            .cloned()
     }
 
     fn defined(&self, identifier: &str) -> bool {
@@ -520,8 +545,8 @@ impl<'s> ToHast<'_, 's> {
     fn returns_array(&self, ix: Ix) -> bool {
         match &self.mdast.node(ix).kind {
             MKind::Break => true,
-            MKind::LinkReference { identifier, .. } | MKind::ImageReference { identifier, .. } => {
-                !self.defined(identifier)
+            MKind::LinkReference(reference) | MKind::ImageReference(reference) => {
+                !self.defined(&reference.identifier)
             }
             _ => false,
         }
@@ -591,16 +616,14 @@ impl<'s> ToHast<'_, 's> {
                 self.hast.append(&mut chain, newline);
                 chain
             }
-            MKind::Code {
-                value, lang, meta, ..
-            } => {
-                let value = if value.is_empty() {
+            MKind::Code(code) => {
+                let value = if code.value.is_empty() {
                     Cow::Borrowed("")
                 } else {
-                    Cow::Owned(format!("{value}\n"))
+                    Cow::Owned(format!("{}\n", code.value))
                 };
                 let mut props = Vec::new();
-                if let Some(lang) = lang.as_deref().filter(|lang| !lang.is_empty()) {
+                if let Some(lang) = code.lang.as_deref().filter(|lang| !lang.is_empty()) {
                     let first = lang
                         .split(js_whitespace)
                         .next()
@@ -610,13 +633,17 @@ impl<'s> ToHast<'_, 's> {
                         Val::List(vec![Cow::Owned(format!("language-{first}"))]),
                     ));
                 }
-                let meta = meta.clone().filter(|meta| !meta.is_empty());
+                let data = code
+                    .meta
+                    .clone()
+                    .filter(|meta| !meta.is_empty())
+                    .map(|meta| Box::new(Data { meta }));
                 let text = self.hast.text(value);
                 let code = self.hast.parent(
                     HKind::Element {
                         tag: "code",
                         props,
-                        meta,
+                        data,
                     },
                     at,
                     Chain::one(text),
@@ -633,8 +660,8 @@ impl<'s> ToHast<'_, 's> {
                 self.element(tag, ix, Vec::new())
             }
             MKind::ThematicBreak => Chain::one(self.hast.element("hr", Vec::new(), at)),
-            MKind::FootnoteReference { identifier, .. } => {
-                let id = identifier.to_uppercase();
+            MKind::FootnoteReference(association) => {
+                let id = association.identifier.to_uppercase();
                 let safe_id = footnote_safe_id(&id);
                 let index = match self.footnote_calls.iter().position(|calls| calls.id == id) {
                     Some(index) => index,
@@ -670,18 +697,16 @@ impl<'s> ToHast<'_, 's> {
                 self.raw_boundary = true;
                 Chain::one(self.hast.push(HKind::Raw(value.clone()), at))
             }
-            MKind::Image { url, title, alt } => self.image(url.clone(), title.clone(), alt, at),
-            MKind::ImageReference {
-                kind,
-                identifier,
-                label,
-                alt,
-            } => match self.definitions.get(&identifier.to_uppercase()).cloned() {
+            MKind::Image(image) => {
+                self.image(image.url.clone(), image.title.clone(), &image.alt, at)
+            }
+            MKind::ImageReference(reference) => match self.definition(reference) {
                 None => {
-                    let suffix = revert_suffix(*kind, label, identifier);
+                    let suffix = revert_suffix(reference);
+                    let alt = &reference.alt;
                     Chain::one(self.hast.text(Cow::Owned(format!("![{alt}{suffix}"))))
                 }
-                Some(Definition { url, title }) => self.image(url, title, alt, at),
+                Some(Definition { url, title }) => self.image(url, title, &reference.alt, at),
             },
             MKind::InlineCode(value) => {
                 let value = if value.contains(['\n', '\r']) {
@@ -692,14 +717,10 @@ impl<'s> ToHast<'_, 's> {
                 let text = self.hast.push(HKind::Text(value), at);
                 Chain::one(self.hast.element_around("code", Vec::new(), at, text))
             }
-            MKind::Link { url, title } => self.link(ix, url.clone(), title.clone()),
-            MKind::LinkReference {
-                kind,
-                identifier,
-                label,
-            } => match self.definitions.get(&identifier.to_uppercase()).cloned() {
+            MKind::Link(link) => self.link(ix, link.url.clone(), link.title.clone()),
+            MKind::LinkReference(reference) => match self.definition(reference) {
                 None => {
-                    let suffix = revert_suffix(*kind, label, identifier);
+                    let suffix = revert_suffix(reference);
                     let mut contents = self.all(ix);
                     let head = (contents.first != NIL)
                         .then(|| &mut self.hast.nodes[contents.first as usize].kind);
@@ -711,7 +732,7 @@ impl<'s> ToHast<'_, 's> {
                         }
                     }
                     match &mut self.hast.nodes[contents.last as usize].kind {
-                        HKind::Text(value) => value.to_mut().push_str(&suffix),
+                        HKind::Text(value) => push_cow(value, &suffix),
                         _ => {
                             let close = self.hast.text(Cow::Owned(suffix));
                             self.hast.append(&mut contents, close);
@@ -744,9 +765,9 @@ impl<'s> ToHast<'_, 's> {
             MKind::ListItem { spread, checked } => self.list_item(ix, parent, *spread, *checked),
             MKind::Table(align) => self.table(ix, align, at),
             MKind::Text(value) => Chain::one(self.hast.push(HKind::Text(trim_lines(value)), at)),
-            MKind::Math { value, .. } => {
+            MKind::Math(math) => {
                 self.math = true;
-                let text = self.hast.text(value.clone());
+                let text = self.hast.text(math.value.clone());
                 let class = Val::List(vec![
                     Cow::Borrowed("language-math"),
                     Cow::Borrowed("math-display"),
@@ -792,7 +813,9 @@ impl<'s> ToHast<'_, 's> {
     }
 
     fn link(&mut self, ix: Ix, url: Cow<'s, str>, title: Option<Cow<'s, str>>) -> Chain {
-        let mut props = vec![("href", Val::Str(normalize_uri(url)))];
+        // Room for the title and rehype-harden's `target` and `rel`.
+        let mut props = Vec::with_capacity(4);
+        props.push(("href", Val::Str(normalize_uri(url))));
         if let Some(title) = title {
             props.push(("title", Val::Str(title)));
         }
@@ -903,18 +926,17 @@ impl<'s> ToHast<'_, 's> {
                     last: rows.last,
                 };
                 let children = self.hast.wrap(body_rows, Spacing::Loose);
-                let second = self.mdast.node(first_row).next;
-                let start = self.mdast.pt_range(self.mdast.node(second).at);
-                let end = self
-                    .mdast
-                    .pt_range(self.mdast.node(self.mdast.node(ix).last).at);
-                let body_at = match (start, end) {
-                    (Some((start, _)), Some((_, end))) => At::Points(start, end),
-                    _ => At::None,
-                };
                 let body = self
                     .hast
-                    .element_with("tbody", Vec::new(), body_at, children);
+                    .element_with("tbody", Vec::new(), At::None, children);
+                // From the second row's start to the last row's end.
+                let second = self.mdast.node(first_row).next;
+                let (start, _) = edges(self.mdast.node(second).at);
+                let (_, end) = edges(self.mdast.node(self.mdast.node(ix).last).at);
+                if start != Edge::None && end != Edge::None {
+                    self.hast.nodes[body as usize].start = start;
+                    self.hast.nodes[body as usize].end = end;
+                }
                 self.hast.append(&mut content, body);
             }
         }
@@ -927,16 +949,15 @@ impl<'s> ToHast<'_, 's> {
         let mut cells = EMPTY;
         let mut source = self.mdast.node(row).first;
         for alignment in align {
-            let mut props = Vec::new();
             let value = match alignment {
                 AlignKind::Left => Some("left"),
                 AlignKind::Right => Some("right"),
                 AlignKind::Center => Some("center"),
                 AlignKind::None => None,
             };
-            if let Some(value) = value {
-                props.push(("align", Val::Str(Cow::Borrowed(value))));
-            }
+            let props = value.map_or_else(Vec::new, |value| {
+                vec![("align", Val::Str(Cow::Borrowed(value)))]
+            });
             let cell = if source == NIL {
                 self.hast.element(tag, props, At::None)
             } else {
@@ -1013,7 +1034,7 @@ impl<'s> ToHast<'_, 's> {
                 let tail_text =
                     (inner.last != NIL).then(|| &mut self.hast.nodes[inner.last as usize].kind);
                 match tail_text {
-                    Some(HKind::Text(value)) => value.to_mut().push(' '),
+                    Some(HKind::Text(value)) => push_cow(value, " "),
                     _ => {
                         let space = self.hast.text(" ");
                         self.hast.append(&mut inner, space);
@@ -1083,7 +1104,8 @@ pub fn to_hast<'s>(mdast: &MTree<'s>) -> Converted<'s> {
     let mut state = ToHast {
         mdast,
         hast: HTree {
-            nodes: Vec::with_capacity(mdast.nodes.len() * 2),
+            // Prose and chat Markdown make 1.3 to 1.8 HAST nodes per MDAST node.
+            nodes: Vec::with_capacity(mdast.nodes.len() * 7 / 4 + 16),
             quirks: false,
         },
         definitions: HashMap::new(),
@@ -1471,7 +1493,7 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
     }
     if url.starts_with('#')
         && !image
-        && Url::parse_with_base(url, HARDEN_BASE).is_some_and(|test| test.hash == url)
+        && Url::parse_with_base(url, HARDEN_BASE).is_some_and(|test| test.hash() == url)
     {
         return Ok(None);
     }
@@ -1484,7 +1506,7 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
     }
     if let Some(after) = url.strip_prefix("blob:") {
         let parsed = Url::parse(url).ok_or(Blocked)?;
-        return if parsed.scheme == "blob" && !after.is_empty() && after != "invalid" {
+        return if parsed.scheme() == "blob" && !after.is_empty() && after != "invalid" {
             Ok(None)
         } else {
             Err(Blocked)
@@ -1495,16 +1517,13 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
         None if path_relative(url) => Url::parse_with_base(url, HARDEN_BASE).ok_or(Blocked)?,
         None => return Err(Blocked),
     };
-    if matches!(
-        parsed.scheme.as_str(),
-        "javascript" | "data" | "file" | "vbscript"
-    ) {
+    if matches!(parsed.scheme(), "javascript" | "data" | "file" | "vbscript") {
         return Err(Blocked);
     }
-    let result = if matches!(parsed.scheme.as_str(), "http" | "https") && path_relative(url) {
-        format!("{}{}{}", parsed.pathname, parsed.search, parsed.hash)
+    let result = if matches!(parsed.scheme(), "http" | "https") && path_relative(url) {
+        format!("{}{}{}", parsed.pathname(), parsed.search(), parsed.hash())
     } else {
-        parsed.href
+        parsed.into_href()
     };
     Ok((result != url).then_some(result))
 }
@@ -1602,7 +1621,7 @@ impl<'s> Finisher<'_, 's> {
         let HKind::Text(existing) = &mut into.kind else {
             unreachable!("mergeable nodes are text");
         };
-        existing.to_mut().push_str(&value);
+        push_cow(existing, &value);
         into.end = end;
     }
 
@@ -1647,11 +1666,11 @@ impl<'s> Finisher<'_, 's> {
     }
 
     fn element(&mut self, ix: Ix, out: &mut Chain) {
-        let HKind::Element { tag, props, meta } = &mut self.tree.nodes[ix as usize].kind else {
+        let HKind::Element { tag, props, data } = &mut self.tree.nodes[ix as usize].kind else {
             unreachable!("children() sends only elements here");
         };
         let tag = *tag;
-        *meta = None;
+        *data = None;
         *props = std::mem::take(props)
             .into_iter()
             .filter_map(|(key, value)| round_trip(key, value).map(|value| (key, value)))
@@ -1784,7 +1803,7 @@ impl<'s> Finisher<'_, 's> {
         node.kind = HKind::Element {
             tag: "span",
             props,
-            meta: None,
+            data: None,
         };
         node.start = Edge::None;
         node.end = Edge::None;
@@ -1883,7 +1902,7 @@ impl Json<'_, '_> {
                     self.out.push_str(",\"data\":{\"quirksMode\":false}");
                 }
             }
-            HKind::Element { tag, props, meta } => {
+            HKind::Element { tag, props, data } => {
                 self.out.push_str("{\"type\":\"element\",\"tagName\":\"");
                 self.out.push_str(tag);
                 self.out.push_str("\",\"properties\":{");
@@ -1898,9 +1917,9 @@ impl Json<'_, '_> {
                 }
                 self.out.push_str("},\"children\":");
                 self.children(ix);
-                if let Some(meta) = meta {
+                if let Some(data) = data {
                     self.out.push_str(",\"data\":{\"meta\":");
-                    json_string(&mut self.out, meta);
+                    json_string(&mut self.out, &data.meta);
                     self.out.push('}');
                 }
             }
@@ -2018,28 +2037,25 @@ pub struct Rendered {
 /// Markdown → Streamdown's HAST, as JSON.
 pub fn render(source: &str, options: &Options) -> Result<Rendered, Error> {
     let source = mdast::without_nul(source);
-    let Built {
-        kind,
-        mdast,
-        tree,
-        root,
-    } = build(&source, options)?;
-    let mut json = Json {
-        tree: &tree,
-        points: &mdast.points,
-        out: String::with_capacity(source.len() * 6 + 64),
-    };
-    json.node(root);
+    let built = build(&source, options)?;
+    let tree = built.json(String::with_capacity(built.json_capacity(&source)));
     Ok(Rendered {
-        kind,
-        tree: json.out,
+        kind: built.kind,
+        tree,
     })
 }
 
 /// `{"kind":"complete"|"raw"|"math","tree":HAST}`.
 pub fn render_json(source: &str, options: &Options) -> Result<String, Error> {
-    let Rendered { kind, tree } = render(source, options)?;
-    Ok(format!("{{\"kind\":\"{kind}\",\"tree\":{tree}}}"))
+    let source = mdast::without_nul(source);
+    let built = build(&source, options)?;
+    let mut out = String::with_capacity(built.json_capacity(&source) + 32);
+    out.push_str("{\"kind\":\"");
+    out.push_str(built.kind.as_str());
+    out.push_str("\",\"tree\":");
+    let mut out = built.json(out);
+    out.push('}');
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2174,7 +2190,7 @@ impl Encoder<'_, '_> {
                 self.ops.extend([op::ROOT, u32::from(tree.quirks)]);
                 self.children(ix);
             }
-            HKind::Element { tag, props, meta } => {
+            HKind::Element { tag, props, data } => {
                 self.ops.push(op::ELEMENT);
                 self.name(tag);
                 self.ops.push(props.len() as u32);
@@ -2182,10 +2198,10 @@ impl Encoder<'_, '_> {
                     self.name(key);
                     self.value(value);
                 }
-                match meta {
-                    Some(meta) => {
+                match data {
+                    Some(data) => {
                         self.ops.push(1);
-                        self.string(meta);
+                        self.string(&data.meta);
                     }
                     None => self.ops.push(0),
                 }
@@ -2210,12 +2226,31 @@ impl Encoder<'_, '_> {
     }
 }
 
-/// A rendered document before serialization. `mdast` stays for its `points`.
+/// A rendered document before serialization, with the MDAST's `points` for its positions.
 struct Built<'s> {
     kind: Kind,
-    mdast: MTree<'s>,
+    points: Points,
     tree: HTree<'s>,
     root: Ix,
+}
+
+impl Built<'_> {
+    /// The HAST as JSON, appended to `out`.
+    fn json(&self, out: String) -> String {
+        let mut json = Json {
+            tree: &self.tree,
+            points: &self.points,
+            out,
+        };
+        json.node(self.root);
+        json.out
+    }
+
+    /// Room for the JSON: the text, plus up to about 110 bytes of syntax and position per
+    /// node.
+    fn json_capacity(&self, source: &str) -> usize {
+        source.len() + self.tree.nodes.len() * 112
+    }
 }
 
 fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
@@ -2229,17 +2264,19 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
         raw_boundary,
         math,
     } = to_hast(&mdast);
+    // HAST owns or borrows the source for every string, so only the positions stay.
+    let MTree { points, .. } = mdast;
     if raw_boundary {
         return Ok(Built {
             kind: Kind::Raw,
-            mdast,
+            points,
             tree,
             root,
         });
     }
     let context = Context {
         source,
-        points: &mdast.points,
+        points: &points,
     };
     for plugin in &options.plugins {
         plugin.hast_unsanitized(&mut tree, root, &context);
@@ -2266,7 +2303,7 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
     }
     Ok(Built {
         kind: if math { Kind::Math } else { Kind::Complete },
-        mdast,
+        points,
         tree,
         root,
     })
@@ -2277,16 +2314,18 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
 pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
     let Built {
         kind,
-        mdast,
+        points,
         tree,
         root,
     } = build(source, options)?;
     let mut encoder = Encoder {
         tree: &tree,
-        points: &mdast.points,
+        points: &points,
         source,
-        ops: Vec::with_capacity(tree.nodes.len() * 8),
-        strings: String::new(),
+        // 7 to 12 opcodes per node, about 10 typically.
+        ops: Vec::with_capacity(tree.nodes.len() * 11),
+        // Generated strings run to about half the source.
+        strings: String::with_capacity(source.len() / 2),
         units: 0,
         interned: HashMap::new(),
     };
