@@ -33,6 +33,8 @@ const FUZZ = [
   "https://x.com/p", "www.y.org", "a@b.com", "[^1]", "\n[^1]: note", "\n[ref]: /url",
   "[ref]", "\n> ", "\n- ", "\n1. ", "\n```", "\n    ", "<div>", "</div>", "<b>", "中文",
   "😀", "\n| a | b |\n| - | - |", "\r\n",
+  // Streamdown 2.7.1: tel: and remend's streamdown: URLs, fence meta, CJK punctuation.
+  "[t](tel:+1)", "](streamdown:incomplete-link)", "\n```js m=1", "。", "「",
 ];
 
 function* fuzz(count, seed) {

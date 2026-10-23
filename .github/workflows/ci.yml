@@ -35,18 +35,37 @@ jobs:
       - name: Conformance against Streamdown's JavaScript pipeline
         run: |
           cargo build --release --example stdio
-          node conformance/diff.mjs
-          # Footnotes cited from inside other footnotes, every order up to five pieces.
-          node conformance/diff.mjs --pieces '["[^a]","[^b]","[^c]","\n\n[^a]: ","\n\n[^b]: ","\n\n[^c]: ","x"]' --length 5
-          # Line endings after a failed code run, inside containers: only plain text holds one.
-          node conformance/diff.mjs --pieces '["1. ","> ","[`a`][r]","![`a`](y)","<a b=\"`\">","<http://a`b>","www.a.com/`x","`","x\n   ","\n> x\n> ","[x](y)","\n\n[r]: /u"]' --length 4
-          # Backslash escapes beside autolinks: an autolink is claimed before any literal in it.
-          node conformance/diff.mjs --pieces '["<","http://a","\\\\_",">","www.b.c","a@b.co","x"]' --length 5
-          # Labels across lines in containers, and footnote labels with whitespace.
-          node conformance/diff.mjs --pieces '["1. ","> ","[a\n","   ","b]: m","b]","[x]","[^","\n\n[a b]: /u"," "]' --length 4
-          # Raw HTML rill renders without parse5: <br>, paired phrasing and formatting tags, comments.
-          node conformance/diff.mjs --pieces '["<br>","<BR />","<sup>","</sup>","<b>","</b>","*","a","\n"]' --length 5
-          node conformance/diff.mjs --pieces '["| a |\n|-|\n| ","<br>","<kbd>","</kbd>","<!-- c -->","x","|","\n"]' --length 5
+          # Streamdown's `plugins` configurations: none, plugins.math, plugins.cjk, both.
+          for config in default math cjk math+cjk; do
+            node conformance/diff.mjs --config "$config"
+            # Footnotes cited from inside other footnotes, every order up to five pieces.
+            node conformance/diff.mjs --config "$config" --pieces '["[^a]","[^b]","[^c]","\n\n[^a]: ","\n\n[^b]: ","\n\n[^c]: ","x"]' --length 5
+            # Line endings after a failed code run, inside containers: only plain text holds one.
+            node conformance/diff.mjs --config "$config" --pieces '["1. ","> ","[`a`][r]","![`a`](y)","<a b=\"`\">","<http://a`b>","www.a.com/`x","`","x\n   ","\n> x\n> ","[x](y)","\n\n[r]: /u"]' --length 4
+            # Backslash escapes beside autolinks: an autolink is claimed before any literal in it.
+            node conformance/diff.mjs --config "$config" --pieces '["<","http://a","\\\\_",">","www.b.c","a@b.co","x"]' --length 5
+            # Labels across lines in containers, and footnote labels with whitespace.
+            node conformance/diff.mjs --config "$config" --pieces '["1. ","> ","[a\n","   ","b]: m","b]","[x]","[^","\n\n[a b]: /u"," "]' --length 4
+            # Raw HTML rill renders without parse5: <br>, paired phrasing and formatting tags, comments.
+            node conformance/diff.mjs --config "$config" --pieces '["<br>","<BR />","<sup>","</sup>","<b>","</b>","*","a","\n"]' --length 5
+            node conformance/diff.mjs --config "$config" --pieces '["| a |\n|-|\n| ","<br>","<kbd>","</kbd>","<!-- c -->","x","|","\n"]' --length 5
+          done
+          # Streamdown 2.7.1's sanitize schema: tel: and streamdown: (remend's sentinels) URLs.
+          node conformance/diff.mjs --pieces '["[a](","![i](","<a href=\"","\">x</a>","tel:+1","streamdown:incomplete-link","Tel:1","javascript:x",")","/p#"]' --length 4
+          # remarkCodeMeta: the fence's meta string as `metastring` on <code>.
+          node conformance/diff.mjs --pieces '["```","~~~","js"," ","title=\"a\"","{1}","\n","x","\n```"]' --length 5
+          node conformance/diff.mjs --config math --pieces '["```","$$","math"," ","m=1","\n","x","\n```","\n$$"]' --length 5
+          # No clobber prefix: footnote ids and raw id/name attributes are not prefixed again.
+          node conformance/diff.mjs --pieces '["[^a]","\n\n[^a]: n","<a id=\"x\">","<a name=\"y\">","</a>","<h2 id=\"z\">","[^b]"," "]' --length 4
+          # GFM's email literal comes before attention, so it may start at `_`.
+          node conformance/diff.mjs --pieces '["_","__","a@b.co","x","\\\\"," ","*","["]' --length 5
+          # Flanking: micromark's by default (UTF-16 units), remark-cjk-friendly's with plugins.cjk.
+          for config in default cjk; do
+            node conformance/diff.mjs --config "$config" --pieces '["**","*","_","~~","中","」","「","a",".","。"," "]' --length 5
+            node conformance/diff.mjs --config "$config" --pieces '["*","_","~","\uFE0E","\uFE01","“","中","😀","a"," "]' --length 5
+          done
+          # @streamdown/cjk: autolink literals end at CJK punctuation; the rest is relinked.
+          node conformance/diff.mjs --config cjk --pieces '["https://x.com/a","www.y.org","a@b.co","。","，","（","）","中","<",">","](https://x.com/b。c)"," "]' --length 4
       - name: JavaScript package
         working-directory: js
         run: |

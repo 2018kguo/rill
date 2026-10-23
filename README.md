@@ -24,6 +24,9 @@ export function Message({ markdown }: { markdown: string }) {
 }
 ```
 
+With Streamdown's `plugins` for math or CJK, hand the same (stable) object to both:
+`<Streamdown plugins={plugins} {...useRill(plugins)}>`. rill targets Streamdown 2.7.1.
+
 That's the whole change. Until the WebAssembly arrives (and during server rendering)
 `useRill()` returns `null` and Streamdown renders as it always has; then rill takes over,
 with the same output, so nothing on the page moves. If rill ever can't take a document,
@@ -113,12 +116,12 @@ The demo needs Rust with the `wasm32-unknown-unknown` target and
 ### Rust
 
 ```rust
-use rill::{Kind, Options};
+use rill::{Kind, Options, Syntax};
 
-let (kind, hast_json) = rill::render("# Hello *world*", &Options::default())?;
-assert_eq!(kind, Kind::Complete);
+let rendered = rill::render("# Hello *world*", &Options::default())?;
+assert_eq!(rendered.kind, Kind::Complete);
 
-let mdast_json = rill::parse_json("- [x] done")?;
+let mdast_json = rill::parse_json("- [x] done", Syntax::default())?;
 ```
 
 `rill::mdast::parse_arena` returns the syntax tree itself, an arena that borrows the
@@ -128,15 +131,19 @@ source text instead of copying it.
 
 `@2018kguo/rill` ships the WebAssembly prebuilt, so you don't need Rust to use it.
 
-- `@2018kguo/rill/react`: `useRill()`, the drop-in above.
-- `@2018kguo/rill/streamdown`: `rillPlugins({ rill })` returns the `remarkPlugins` and
-  `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
-  it). It takes `after` for rehype plugins of your own (they run on the finished tree,
+- `@2018kguo/rill/react`: `useRill(plugins?)`, the drop-in above.
+- `@2018kguo/rill/streamdown`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
+  and `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
+  it). `plugins` is the `plugins` prop you give `<Streamdown>` (its `math` and `cjk`);
+  when the two disagree, documents render in JavaScript, with the same output. With
+  `plugins.math`, rill renders each formula with its KaTeX once and caches it. It takes
+  `after` for rehype plugins of your own (they run on the finished tree,
   like any plugin after Streamdown's), `maxSourceLength` (longer documents render in
   JavaScript; 128K UTF-16 units by default, since WebAssembly memory grows to fit the
   largest document and never shrinks), and `onRender` and `onError` callbacks.
 - `@2018kguo/rill`: `loadRill()` fetches the WebAssembly once; `initRill(bytes)` instantiates
-  it from bytes (Node, tests); `rill.render(markdown)` returns `{ kind, tree }` directly.
+  it from bytes (Node, tests); `rill.render(markdown, { math, cjk })` returns `{ kind, tree }`
+  directly.
 
 ```ts
 import { loadRill } from "@2018kguo/rill";
@@ -154,6 +161,12 @@ Three things rill can't do for you:
 - **Remark plugins.** rill parses in Rust, so there is no syntax tree in JavaScript for
   them to change. Write a Rust plugin (below) or work on the HTML tree with `after`.
 - **`remarkRehypeOptions`.** rill renders Streamdown's setting (`allowDangerousHtml`).
+- **`allowedTags`.** Streamdown widens its sanitize schema only with its own default
+  `rehypePlugins`, so with rill's the extra tags are removed.
+
+Without rehype-raw in `rehypePlugins` (Streamdown then shows raw HTML as text), and with
+`disableAutolinkProtocols` or any other remark plugin `<Streamdown>` adds, every document
+renders in JavaScript.
 
 The WebAssembly loads with `new URL("../wasm/rill_bg.wasm", import.meta.url)`, which Vite,
 webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
@@ -162,27 +175,29 @@ webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
 
 | Stage | Package ported | Runs in |
 |---|---|---|
-| Parse | remark-parse 11, remark-gfm 4, remark-math 6 (`singleDollarTextMath: false`), remark-cjk-friendly 1.2 (and its strikethrough) | Rust |
+| Parse | remark-parse 11, remark-gfm 4, Streamdown's remarkCodeMeta; `plugins.math`: remark-math 6 (`singleDollarTextMath: false`); `plugins.cjk`: remark-cjk-friendly 2.3 (and its strikethrough) and its autolink boundary | Rust |
 | MDAST → HAST | remark-rehype 11 (`allowDangerousHtml`) | Rust |
 | Raw HTML | rehype-raw 7 | Rust without raw HTML, else JavaScript |
-| Math | rehype-katex 7 | JavaScript |
-| Sanitize | rehype-sanitize 6, default schema | Rust |
+| Sanitize | rehype-sanitize 6, Streamdown 2.7.1's schema | Rust |
 | Harden | rehype-harden 1.1.8 with Streamdown's options | Rust |
+| Math | `plugins.math`: rehype-katex 7 | JavaScript |
 
 `render` reports how far it got:
 
 - `complete`: the whole chain ran, and the tree is final.
 - `raw`: the document has raw HTML (or a link inside a link), which needs parse5. Run
-  rehype-raw, rehype-katex, rehype-sanitize and rehype-harden on the tree.
-- `math`: Streamdown runs KaTeX before sanitizing, so rehype-katex, rehype-sanitize and
-  rehype-harden still run on the tree.
+  rehype-raw, rehype-sanitize and rehype-harden (and with math, rehype-katex) on the tree.
+- `math` (with `math` on): everything is final but the math elements, for rehype-katex,
+  which Streamdown runs last.
 
 `conformance/pipeline.mjs` has these tails ready to use.
 
 ### Options and plugins
 
-`Options` defaults to Streamdown's setup:
+`Options` defaults to Streamdown's setup with no `plugins` prop:
 
+- `math`, `cjk`: Streamdown's `plugins.math` (`@streamdown/math`) and `plugins.cjk`
+  (`@streamdown/cjk`).
 - `harden`: link and image block policies, `Indicator` (default), `TextOnly` or `Remove`.
 - `sanitize.code_classes`: extra `className`s `<code>` may keep.
 - `plugins`: your transforms.
@@ -212,8 +227,8 @@ To ship Rust plugins, build your own WebAssembly with one export that calls
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(js_name = renderHast)]
-pub fn render_hast(source: &str) -> Result<rill::wasm::RenderedHast, JsError> {
-    rill::wasm::render(source, &my_options())
+pub fn render_hast(source: &str, math: bool, cjk: bool) -> Result<rill::wasm::RenderedHast, JsError> {
+    rill::wasm::render(source, &rill::Options { math, cjk, ..my_options() })
 }
 ```
 
@@ -226,15 +241,14 @@ await init();
 const plugins = rillPlugins({
   rill: createRill(renderHast),
   // The JavaScript pipeline your options mirror: the fallback, and what still runs on
-  // raw HTML (all of `rehypePlugins`) and math (`mathTail`: KaTeX and what follows it).
+  // raw HTML (all of `rehypePlugins`).
   remarkPlugins,
   rehypePlugins,
-  mathTail,
 });
 ```
 
-Extra arguments on your export pass through: `createRill(renderHast)` gives
-`rill.render(source, ...args)`, and `rillPlugins({ args })` (required when your export
+Extra arguments on your export (after `source`, `math` and `cjk`) pass through:
+`createRill(renderHast)` gives `rill.render(source, { math, cjk }, ...args)`, and `rillPlugins({ args })` (required when your export
 takes any) supplies them per instance.
 
 ### Conformance
@@ -242,6 +256,7 @@ takes any) supplies them per instance.
 ```sh
 cargo build --release --example stdio
 node conformance/diff.mjs                                     # the examples
+node conformance/diff.mjs --config math+cjk                   # with Streamdown's plugins
 node conformance/diff.mjs --alphabet '~*_[]a `' --length 5    # every string over these
 node conformance/diff.mjs --pieces '["- ","> ","```","\n"]' --length 6
 node conformance/diff.mjs --fuzz 3000 --seed 7 --minimize     # random, with minimal witnesses
@@ -249,7 +264,9 @@ node conformance/probe.mjs '"> - a\n>"'                       # both trees side 
 ```
 
 The harness compares the MDAST (minus `data`) and the final HAST, positions included,
-against the latest releases of the packages above.
+against Streamdown 2.7.1's pipeline, built from the published `streamdown`,
+`@streamdown/math` and `@streamdown/cjk` packages, for each `plugins` configuration
+(`default`, `math`, `cjk`, `math+cjk`).
 
 Known differences, all of them position-only or in rare shapes:
 

@@ -1,6 +1,6 @@
 import { toHtml } from "hast-util-to-html";
 
-import { processor, tails } from "../conformance/pipeline.mjs";
+import { pipeline } from "../conformance/pipeline.mjs";
 import { createRill } from "../js/src/core.ts";
 import init, { renderHast } from "../js/wasm/rill.js";
 import emphasis from "../examples/01-emphasis.md" with { type: "text" };
@@ -40,6 +40,8 @@ function time(render) {
   return { result, ms: (now - start) / runs };
 }
 
+// Streamdown with `plugins={{ math, cjk }}`: the examples have both.
+const { processor, tails } = pipeline("math+cjk");
 const javascript = (source) => processor.runSync(processor.parse(source), source);
 const PATHS = {
   complete: "all in Rust",
@@ -50,7 +52,7 @@ let lastKind = "complete";
 // The npm package's own path: opcodes from WebAssembly, decoded into HAST.
 const engine = createRill(renderHast);
 function rill(source) {
-  const rendered = engine.render(source);
+  const rendered = engine.render(source, { math: true, cjk: true });
   if (!rendered) return javascript(source);
   const { kind, tree } = rendered;
   lastKind = kind;

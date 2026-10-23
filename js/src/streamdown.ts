@@ -1,14 +1,14 @@
 // rill as Streamdown plugins. `rillPlugins` returns the `remarkPlugins` and
 // `rehypePlugins` to hand `<Streamdown>`: rill parses and renders in Rust, the
-// JavaScript tails finish raw HTML and math, and a document rill cannot take renders
-// with the JavaScript pipeline it replaces. Either way the tree is the same.
-import remarkParse from "remark-parse";
-import remarkRehype from "remark-rehype";
+// JavaScript tail finishes raw HTML, Streamdown's own `plugins.math` renders KaTeX, and
+// a document rill cannot take renders with the JavaScript pipeline it replaces. Either
+// way the tree is the same.
 import { defaultRehypePlugins, defaultRemarkPlugins } from "streamdown";
+import type { PluginConfig } from "streamdown";
 import { unified } from "unified";
-import type { PluggableList, Processor } from "unified";
+import type { Pluggable, PluggableList, Processor } from "unified";
 
-import type { HastNode, Rill, RillKind } from "./core.ts";
+import type { HastNode, Rill, RillKind, Syntax } from "./core.ts";
 import { mathFragments } from "./math.ts";
 
 /** Which pipeline rendered a document; `javascript` is the fallback. */
@@ -23,17 +23,20 @@ export const DEFAULT_MAX_SOURCE_LENGTH = 128 * 1024;
 type BaseOptions<A extends unknown[]> = {
   rill: Rill<A>;
   /**
+   * The `plugins` you pass `<Streamdown>` (the same object): rill parses math and CJK
+   * as they configure it, and renders each formula once with `plugins.math`'s KaTeX,
+   * cached. Without them, rill renders documents only while `<Streamdown>` has no math
+   * or CJK plugin either, and JavaScript renders the rest.
+   */
+  plugins?: Pick<PluginConfig, "math" | "cjk">;
+  /**
    * The JavaScript pipeline rill replaces, which must be what its WebAssembly does:
-   * the fallback, and (rehype) the tail for raw HTML. Defaults to Streamdown's.
+   * Streamdown's `remarkPlugins` and `rehypePlugins` props. Defaults to Streamdown's.
+   * Without rehype-raw, every document renders in JavaScript (Streamdown then shows
+   * raw HTML as text, which rill does not do).
    */
   remarkPlugins?: PluggableList;
   rehypePlugins?: PluggableList;
-  /**
-   * What runs on each math element of a `math` tree: KaTeX and the plugins after it
-   * (the rest of the tree is already finished). Required with your own
-   * `rehypePlugins`; defaults to Streamdown's otherwise.
-   */
-  mathTail?: PluggableList;
   /** Rehype plugins of your own, run on the finished tree. */
   after?: PluggableList;
   /** Longer documents render in JavaScript (see `DEFAULT_MAX_SOURCE_LENGTH`). */
@@ -57,6 +60,8 @@ type HastRoot = {
 type RillData = { kind: RenderKind; data: unknown };
 type Point = { line: number; column: number; offset?: number };
 type Position = { start: Point; end: Point };
+type Attacher = (this: Processor, ...options: unknown[]) => unknown;
+type Transformer = (tree: never, file: never) => unknown;
 
 // Streamdown caches processors by plugin name and JSON options, so each set carries an
 // id, unique even across two copies of this package in one bundle.
@@ -72,60 +77,94 @@ export function rillPlugins<A extends unknown[]>(
 ) {
   const {
     rill,
+    plugins = {},
     remarkPlugins = Object.values(defaultRemarkPlugins),
-    rehypePlugins: customRehype,
-    mathTail,
+    rehypePlugins = Object.values(defaultRehypePlugins),
     after = [],
     maxSourceLength = DEFAULT_MAX_SOURCE_LENGTH,
     onRender,
     onError,
   } = options;
-  if (customRehype && !mathTail) {
-    throw new Error("rillPlugins: pass `mathTail` with your own `rehypePlugins`");
-  }
-  const rehypePlugins = customRehype ?? Object.values(defaultRehypePlugins);
   const args = ("args" in options ? (options.args ?? []) : []) as A;
+  const raw = rehypePlugins.find(
+    (plugin) => attacherOf(plugin) === attacherOf(defaultRehypePlugins.raw)
+  );
+  const syntax: Syntax = {
+    math: plugins.math !== undefined,
+    cjk: plugins.cjk !== undefined,
+  };
+  // rill parses `$$` only (remark-math's `singleDollarTextMath: false`).
+  const supported =
+    raw !== undefined &&
+    (plugins.math === undefined ||
+      optionsOf(plugins.math.remarkPlugin)?.singleDollarTextMath === false);
+  // Streamdown merges its `plugins` around these lists (index.tsx `mergedRemarkPlugins`):
+  // what rill expects before and after its remark plugin.
+  const expectedBefore = (plugins.cjk?.remarkPluginsBefore ?? []).map(
+    attacherOf
+  );
+  const expectedAfter = [
+    ...(plugins.cjk?.remarkPluginsAfter ?? []),
+    ...(plugins.math ? [plugins.math.remarkPlugin] : []),
+  ].map(attacherOf);
 
   // Built on first use: most documents need neither.
-  let javascript: Processor | undefined;
   let rawTail: Processor | undefined;
   let renderMath: ReturnType<typeof mathFragments> | undefined;
 
-  function render(source: string): { kind: RenderKind; tree: HastRoot } {
-    if (source.length <= maxSourceLength) {
-      try {
-        const result = rill.render(source, ...args);
-        if (result) {
-          return { kind: result.kind, tree: asHastRoot(result.tree) };
-        }
-      } catch (error) {
-        onError?.(error);
-      }
-    }
-    javascript ??= unified().use([
-      remarkParse,
-      ...remarkPlugins,
-      [remarkRehype, { allowDangerousHtml: true }],
-      ...rehypePlugins,
-    ]) as Processor;
-    return {
-      kind: "javascript",
-      tree: asHastRoot(javascript.runSync(javascript.parse(source), source)),
-    };
-  }
-
   function remarkRill(this: Processor) {
-    this.parser = (source) => {
+    const processor = this;
+    // remark-parse's parser, which reads the extensions attached below at parse time.
+    const remarkParser = processor.parser;
+    // Streamdown's remark plugins, attached in their place: their syntax extensions
+    // serve the JavaScript fallback, and their transforms run on its tree.
+    const transformers = remarkPlugins.flatMap((plugin) => {
+      const transformer = attach(processor, plugin);
+      return typeof transformer === "function"
+        ? [transformer as Transformer]
+        : [];
+    });
+    let matches: boolean | undefined;
+
+    function render(
+      source: string,
+      file: unknown
+    ): { kind: RenderKind; tree: unknown } {
+      matches ??= supported && configuredAsExpected(processor);
+      if (matches && source.length <= maxSourceLength) {
+        try {
+          const result = rill.render(source, syntax, ...args);
+          if (result) {
+            return { kind: result.kind, tree: asHastRoot(result.tree) };
+          }
+        } catch (error) {
+          onError?.(error);
+        }
+      }
+      if (!remarkParser) {
+        throw new Error(
+          "rillPlugins: <Streamdown> runs remark-parse before rill"
+        );
+      }
+      return { kind: "javascript", tree: remarkParser(source, file as never) };
+    }
+
+    processor.parser = (source, file) => {
       const start = performance.now();
-      const { kind, tree } = render(source);
+      const { kind, tree } = render(source, file);
       onRender?.(kind, performance.now() - start, source);
-      const rillData: RillData = { kind, data: tree.data };
+      if (kind === "javascript") {
+        // remark's own tree: the transforms and remark-rehype take it from here.
+        return tree as never;
+      }
+      const root = tree as HastRoot;
+      const rillData: RillData = { kind, data: root.data };
       // remark-rehype emits `hChildren` as the HAST root's children.
       return {
         type: "root" as const,
         children: [],
-        ...(isPosition(tree.position) ? { position: tree.position } : {}),
-        data: { hChildren: tree.children, rill: rillData },
+        ...(isPosition(root.position) ? { position: root.position } : {}),
+        data: { hChildren: root.children, rill: rillData },
       };
     };
     // Runs after plugins that replace the tree (a cache), so it carries its kind.
@@ -133,8 +172,31 @@ export function rillPlugins<A extends unknown[]>(
       tree: { data?: { rill?: RillData } },
       file: { data: Record<string, unknown> }
     ) => {
+      for (const transformer of transformers) {
+        transformer(tree as never, file as never);
+      }
       file.data.rill = tree.data?.rill;
     };
+  }
+
+  /** Whether the processor around rill's remark plugin is the pipeline it renders:
+   * Streamdown's merge of exactly these `plugins`, and nothing else. */
+  function configuredAsExpected(processor: Processor): boolean {
+    const attachers = processor.attachers.map(([attacher]) => attacher);
+    const at = attachers.indexOf(remarkRill as never);
+    const rehype = attachers.indexOf(rehypeRill as never);
+    // remark-parse comes first and remark-rehype just before rill's rehype plugin.
+    const before = attachers.slice(1, at);
+    const remarkAfter = attachers.slice(at + 1, rehype - 1);
+    const same = (left: unknown[], right: unknown[]) =>
+      left.length === right.length &&
+      left.every((value, index) => value === right[index]);
+    return (
+      at > 0 &&
+      rehype > at &&
+      same(before, expectedBefore) &&
+      same(remarkAfter, expectedAfter)
+    );
   }
 
   function rehypeRill() {
@@ -143,9 +205,12 @@ export function rillPlugins<A extends unknown[]>(
       file: { value?: unknown; data: Record<string, unknown> }
     ) => {
       const rillData = file.data.rill;
-      // rill did not parse (its remark plugin was replaced): this is remark-rehype's
-      // tree, so run the whole rehype chain on it, as the JavaScript pipeline would.
-      const kind = isRillData(rillData) ? rillData.kind : "raw";
+      // remark-rehype's tree (the JavaScript fallback, or rill's remark plugin was
+      // replaced): run the whole rehype chain on it, as the JavaScript pipeline would.
+      const kind =
+        isRillData(rillData) && rillData.kind !== "javascript"
+          ? rillData.kind
+          : "raw";
       if (kind === "raw") {
         // A cached root shares its children with remark-rehype; the tail edits in place.
         tree.children = structuredClone(tree.children);
@@ -155,15 +220,14 @@ export function rillPlugins<A extends unknown[]>(
         );
         tree.children = finished.children;
         tree.data = finished.data;
-        return;
-      }
-      if (kind === "math") {
-        // Copies only what it changes, so a cached root stays as it was.
-        renderMath ??= mathFragments(mathTail ?? defaultMathTail());
-        tree.children = renderMath(tree.children as never);
-      }
-      if (isRillData(rillData) && rillData.data !== undefined) {
+      } else if (isRillData(rillData) && rillData.data !== undefined) {
         tree.data = rillData.data;
+      }
+      // Streamdown's KaTeX runs next on whatever math is left: render each formula once,
+      // cached, so it finds none. Copies only what it changes; a cached root stays.
+      if (plugins.math) {
+        renderMath ??= mathFragments([plugins.math.rehypePlugin]);
+        tree.children = renderMath(tree.children as never);
       }
     };
   }
@@ -174,21 +238,41 @@ export function rillPlugins<A extends unknown[]>(
     rehypePlugins: [
       [rehypeRill, { instance }],
       ...after,
-      // Off (`false`): Streamdown loads KaTeX's stylesheet only when its rehype-katex
-      // is in the list; rill runs KaTeX itself.
-      [attacherOf(defaultRehypePlugins.katex), false],
+      // Off (`false`): Streamdown adds remarkEscapeHtml (raw HTML as text) unless it sees
+      // rehype-raw; rill's tail runs it.
+      ...(raw === undefined ? [] : [[attacherOf(raw), false]]),
     ] as PluggableList,
   };
+}
+
+/** Attaches `plugin` to `processor` as `use` would at this point; returns its
+ * transformer. */
+function attach(processor: Processor, plugin: Pluggable): unknown {
+  const attacher = attacherOf(plugin);
+  if (typeof attacher !== "function") {
+    throw new Error(
+      "rillPlugins: remarkPlugins must be plugins or [plugin, options]"
+    );
+  }
+  const parameters = Array.isArray(plugin) ? plugin.slice(1) : [];
+  if (parameters[0] === false) {
+    return undefined;
+  }
+  return (attacher as Attacher).call(
+    processor,
+    ...(parameters[0] === true ? [] : parameters)
+  );
 }
 
 function attacherOf(plugin: unknown): unknown {
   return Array.isArray(plugin) ? plugin[0] : plugin;
 }
 
-/** Streamdown's rehype chain from KaTeX on: what each math element still needs. */
-function defaultMathTail(): PluggableList {
-  const { katex, sanitize, harden } = defaultRehypePlugins;
-  return [katex, sanitize, harden].filter((plugin) => plugin !== undefined);
+function optionsOf(plugin: unknown): Record<string, unknown> | undefined {
+  const options: unknown = Array.isArray(plugin) ? plugin[1] : undefined;
+  return typeof options === "object" && options !== null
+    ? (options as Record<string, unknown>)
+    : undefined;
 }
 
 /** A processor's result, which for these pipelines is always a HAST root. */

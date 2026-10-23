@@ -1,10 +1,11 @@
-//! rill: Streamdown's Markdown pipeline in Rust.
+//! rill: Streamdown 2.7.1's Markdown pipeline in Rust.
 //!
 //! [`mdast`] parses Markdown into the tree remark builds with Streamdown's remark plugins
-//! (remark-gfm, remark-math with `singleDollarTextMath: false`, remark-cjk-friendly), and
-//! [`hast`] turns it into the HAST its rehype chain produces (rehype-raw, rehype-sanitize,
-//! rehype-harden). Both match the JavaScript output node for node, positions included;
-//! `conformance/` checks that against remark itself.
+//! (remark-gfm and remarkCodeMeta, plus `@streamdown/math` and `@streamdown/cjk` when
+//! [`Options`] turns them on), and [`hast`] turns it into the HAST its rehype chain
+//! produces (rehype-raw, rehype-sanitize, rehype-harden; KaTeX stays in JavaScript). Both
+//! match the JavaScript output node for node, positions included; `conformance/` checks
+//! that against remark itself.
 
 pub mod hast;
 pub mod mdast;
@@ -55,7 +56,9 @@ pub mod wasm {
     }
 
     /// Renders `source` for JavaScript. `source` must be NUL-free and well formed; the
-    /// JavaScript package sees to both.
+    /// JavaScript package sees to both. An export built on this takes `(source, math,
+    /// cjk, ...)`, the first three as `createRill` passes them, and sets
+    /// [`Options::math`] and [`Options::cjk`] from them.
     pub fn render(source: &str, options: &Options) -> Result<RenderedHast, JsError> {
         let encoded =
             hast::render_ops(source, options).map_err(|error| JsError::new(&error.to_string()))?;
@@ -73,10 +76,15 @@ pub mod wasm {
         use super::RenderedHast;
         use crate::Options;
 
-        /// Streamdown's pipeline with its default options.
+        /// Streamdown's pipeline, with `plugins.math` and `plugins.cjk` as given.
         #[wasm_bindgen(js_name = renderHast)]
-        pub fn render_hast(source: &str) -> Result<RenderedHast, JsError> {
-            super::render(source, &Options::default())
+        pub fn render_hast(source: &str, math: bool, cjk: bool) -> Result<RenderedHast, JsError> {
+            let options = Options {
+                math,
+                cjk,
+                ..Options::default()
+            };
+            super::render(source, &options)
         }
     }
 }

@@ -1,6 +1,7 @@
-// What a page pays per render: Streamdown's JavaScript pipeline against rill's package
-// (`rill.render`: WebAssembly, decoding, and the JavaScript tail a raw-HTML or math
-// document still needs). Build the WebAssembly first (`npm run wasm`).
+// What a page pays per render: Streamdown's JavaScript pipeline (with `plugins.math`, as
+// the documents have math) against rill's package (`rill.render`: WebAssembly, decoding,
+// and the JavaScript tail a raw-HTML or math document still needs). Build the WebAssembly
+// first (`npm run wasm`).
 //
 //   node conformance/bench-js.mjs              bundled examples, a link-heavy answer, streaming
 //   node conformance/bench-js.mjs --real       also conformance/real.jsonl (node conformance/real.mjs)
@@ -10,7 +11,9 @@ import { initRill } from "../js/src/index.ts";
 import { unified } from "unified";
 
 import { rehypeMathFragments } from "../js/src/math.ts";
-import { mathPlugins, processor, tails } from "./pipeline.mjs";
+import { pipeline } from "./pipeline.mjs";
+
+const { processor, tails, mathPlugins } = pipeline("math");
 
 const rill = await initRill(readFileSync(new URL("../js/wasm/rill_bg.wasm", import.meta.url)));
 
@@ -21,7 +24,7 @@ const streamdown = (source) => processor.runSync(processor.parse(source), source
 function freshRill() {
   const mathTail = unified().use(rehypeMathFragments(mathPlugins));
   return (source) => {
-    const { kind, tree } = rill.render(source);
+    const { kind, tree } = rill.render(source, { math: true });
     if (kind === "math") return mathTail.runSync(tree, source);
     const tail = tails[kind];
     return tail ? tail.runSync(tree, source) : tree;

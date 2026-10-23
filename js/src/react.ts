@@ -1,15 +1,21 @@
-// The drop-in: `<Streamdown {...useRill()}>`. Until the WebAssembly arrives (and
-// during SSR) the hook returns `null` and Streamdown renders with its own plugins; the
-// trees are the same, so the switch is invisible.
+// The drop-in: `<Streamdown plugins={plugins} {...useRill(plugins)}>`. Until the
+// WebAssembly arrives (and during SSR) the hook returns `null` and Streamdown renders
+// with its own plugins; the trees are the same, so the switch is invisible.
 import { useEffect, useSyncExternalStore } from "react";
+import type { PluginConfig } from "streamdown";
 
+import type { Rill } from "./core.ts";
 import { loadRill } from "./index.ts";
 import { rillPlugins } from "./streamdown.ts";
 
 type Plugins = ReturnType<typeof rillPlugins>;
+type StreamdownPlugins = Pick<PluginConfig, "math" | "cjk">;
 
-// One set per page, shared by every message (and Streamdown's processor cache).
-let plugins: Plugins | null = null;
+// One set per `plugins` object, shared by every message (and Streamdown's processor
+// cache).
+let rill: Rill | null = null;
+let withoutPlugins: Plugins | undefined;
+const byPlugins = new WeakMap<StreamdownPlugins, Plugins>();
 let attempted = false;
 const listeners = new Set<() => void>();
 
@@ -20,8 +26,8 @@ function load() {
   }
   attempted = true;
   loadRill()
-    .then((rill) => {
-      plugins = rillPlugins({ rill });
+    .then((loaded) => {
+      rill = loaded;
       for (const listener of listeners) {
         listener();
       }
@@ -43,13 +49,30 @@ function subscribe(listener: () => void) {
   };
 }
 
-/** Streamdown's plugins on rill once it loads, else `null` (spread it either way). */
-export function useRill(): Plugins | null {
-  const current = useSyncExternalStore(
+function pluginsFor(loaded: Rill, plugins: StreamdownPlugins | undefined) {
+  if (plugins === undefined) {
+    withoutPlugins ??= rillPlugins({ rill: loaded });
+    return withoutPlugins;
+  }
+  let set = byPlugins.get(plugins);
+  if (set === undefined) {
+    set = rillPlugins({ rill: loaded, plugins });
+    byPlugins.set(plugins, set);
+  }
+  return set;
+}
+
+/**
+ * Streamdown's plugins on rill once it loads, else `null` (spread it either way). Pass
+ * the `plugins` you give `<Streamdown>` (a stable object): math and CJK then render in
+ * rill too.
+ */
+export function useRill(plugins?: StreamdownPlugins): Plugins | null {
+  const loaded = useSyncExternalStore(
     subscribe,
-    () => plugins,
+    () => rill,
     () => null
   );
   useEffect(load, []);
-  return current;
+  return loaded === null ? null : pluginsFor(loaded, plugins);
 }

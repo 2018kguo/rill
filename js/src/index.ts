@@ -1,5 +1,6 @@
 // rill in JavaScript: the core (`createRill`) plus the prebuilt WebAssembly, which
-// renders Streamdown's pipeline with its default options.
+// renders Streamdown's pipeline with its default options, `plugins.math` and
+// `plugins.cjk`.
 import { createRill, type RenderedHast, type Rill } from "./core.ts";
 
 export * from "./core.ts";
@@ -7,7 +8,7 @@ export * from "./core.ts";
 type Glue = {
   default(options: { module_or_path: URL }): Promise<unknown>;
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
-  renderHast(source: string): RenderedHast;
+  renderHast(source: string, math: boolean, cjk: boolean): RenderedHast;
 };
 
 const glue = (): Promise<Glue> => import("../wasm/rill.js");
