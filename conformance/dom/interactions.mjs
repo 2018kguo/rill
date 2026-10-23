@@ -81,6 +81,17 @@ await check("the code block's download button saves its code", async (page) => {
   assert.equal(await readFile(await file.path(), "utf8"), "const answer = 42;\nconsole.log(answer);\n");
 });
 
+await check("Enter on the focused copy button copies, and the button keeps the focus", async (page) => {
+  await mount(page);
+  await page.focus('[data-streamdown="code-block-copy-button"]');
+  await page.keyboard.press("Enter");
+  await page.waitForSelector("output[aria-live]");
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "const answer = 42;\nconsole.log(answer);\n");
+  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute("data-streamdown")), "code-block-copy-button");
+  // The copied state shows the check icon, then the copy icon again.
+  await page.waitForFunction(() => !document.querySelector("output[aria-live]"), null, { timeout: 4000 });
+});
+
 await check("the table's copy menu copies it as CSV", async (page) => {
   await mount(page);
   await page.click('button[title="Copy table"]');

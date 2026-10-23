@@ -16,15 +16,17 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type MouseEvent,
   type ReactNode,
   type RefObject,
 } from "react";
+import { flushSync } from "react-dom";
 import {
   CodeBlock,
   CodeBlockContainer,
   CodeBlockCopyButton,
   CodeBlockDownloadButton,
-  CodeBlockHeader,
+  defaultTranslations,
   StreamdownContext,
   type ControlsConfig,
   type HighlightResult,
@@ -51,7 +53,71 @@ export type CodeSegmentProps = {
   components: Record<string, unknown>;
   cn: Cn;
   highlight: Highlighter | undefined;
+  /** The controls' labels when they may start as static markup. */
+  shell: ShellLabels | null;
 };
+
+/** What the code controls' markup depends on besides the prefix and controls. */
+export type ShellLabels = { copyCode: string; downloadFile: string };
+
+const labelsByKey = new Map<string, ShellLabels | null>();
+
+/** The copy and download labels of `translations` (given as its JSON, as Streamdown keys
+ * it), or `null` when they are not plain strings. */
+export function shellLabels(translationsKey: string): ShellLabels | null {
+  let labels = labelsByKey.get(translationsKey);
+  if (labels === undefined) {
+    const merged = {
+      ...defaultTranslations,
+      ...(translationsKey ? JSON.parse(translationsKey) : {}),
+    } as Record<string, unknown>;
+    const { copyCode, downloadFile } = merged;
+    labels =
+      typeof copyCode === "string" && typeof downloadFile === "string"
+        ? { copyCode, downloadFile }
+        : null;
+    labelsByKey.set(translationsKey, labels);
+  }
+  return labels;
+}
+
+// Streamdown's control markup (lib/code-block/{copy,download}-button.tsx, lib/icons.tsx;
+// Apache-2.0, Copyright 2023 Vercel, Inc.) as React writes it in the browser.
+const ACTIONS_OUTER = "pointer-events-none absolute top-2 right-2 z-10 flex items-center";
+const ACTIONS =
+  "pointer-events-auto flex shrink-0 items-center gap-2 rounded-md border border-sidebar bg-sidebar/80 px-1.5 py-1 supports-[backdrop-filter]:bg-sidebar/70 supports-[backdrop-filter]:backdrop-blur";
+const BUTTON =
+  "cursor-pointer p-1 text-muted-foreground transition-all hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50";
+const icon = (d: string) =>
+  `<svg aria-hidden="true" color="currentColor" height="16" stroke-linejoin="round" viewBox="0 0 16 16" width="16" size="14"><path clip-rule="evenodd" d="${d}" fill="currentColor" fill-rule="evenodd"></path></svg>`;
+const DOWNLOAD_ICON = icon(
+  "M8.75 1V1.75V8.68934L10.7197 6.71967L11.25 6.18934L12.3107 7.25L11.7803 7.78033L8.70711 10.8536C8.31658 11.2441 7.68342 11.2441 7.29289 10.8536L4.21967 7.78033L3.68934 7.25L4.75 6.18934L5.28033 6.71967L7.25 8.68934V1.75V1H8.75ZM13.5 9.25V13.5H2.5V9.25V8.5H1V9.25V14C1 14.5523 1.44771 15 2 15H14C14.5523 15 15 14.5523 15 14V9.25V8.5H13.5V9.25Z"
+);
+const COPY_ICON = icon(
+  "M2.75 0.5C1.7835 0.5 1 1.2835 1 2.25V9.75C1 10.7165 1.7835 11.5 2.75 11.5H3.75H4.5V10H3.75H2.75C2.61193 10 2.5 9.88807 2.5 9.75V2.25C2.5 2.11193 2.61193 2 2.75 2H8.25C8.38807 2 8.5 2.11193 8.5 2.25V3H10V2.25C10 1.2835 9.2165 0.5 8.25 0.5H2.75ZM7.75 4.5C6.7835 4.5 6 5.2835 6 6.25V13.75C6 14.7165 6.7835 15.5 7.75 15.5H13.25C14.2165 15.5 15 14.7165 15 13.75V6.25C15 5.2835 14.2165 4.5 13.25 4.5H7.75ZM7.5 6.25C7.5 6.11193 7.61193 6 7.75 6H13.25C13.3881 6 13.5 6.11193 13.5 6.25V13.75C13.5 13.8881 13.3881 14 13.25 14H7.75C7.61193 14 7.5 13.8881 7.5 13.75V6.25Z"
+);
+
+const actionsCache = new Map<string, string>();
+
+/** The markup inside the controls' outer div, as CodeBlockDownloadButton and
+ * CodeBlockCopyButton render it with the default icons, before either is pressed. */
+function actionsHtml(cn: Cn, labels: ShellLabels, shown: Shown, disabled: boolean): string {
+  const classes = cn(BUTTON);
+  // The classes carry cn's prefix.
+  const key = `${shown.download ? 1 : 0}${shown.copy ? 1 : 0}${disabled ? 1 : 0}${classes}\0${labels.copyCode}\0${labels.downloadFile}`;
+  const known = actionsCache.get(key);
+  if (known !== undefined) return known;
+  const button = (kind: string, label: string, svg: string) =>
+    `<button aria-label="${escapeHtml(label)}" class="${escapeHtml(classes)}" data-streamdown="${kind}"${disabled ? ' disabled=""' : ""} title="${escapeHtml(label)}" type="button">${svg}</button>`;
+  let html = `<div class="${escapeHtml(cn(ACTIONS))}" data-streamdown="code-block-actions">`;
+  if (shown.download) html += button("code-block-download-button", labels.downloadFile, DOWNLOAD_ICON);
+  if (shown.copy) html += button("code-block-copy-button", labels.copyCode, COPY_ICON);
+  html += "</div>";
+  actionsCache.set(key, html);
+  return html;
+}
+
+const CONTROL_BUTTON = "button[data-streamdown]";
 
 /** A fenced code block as Streamdown's `code` component renders it. */
 export function CodeSegment(props: CodeSegmentProps): ReactNode {
@@ -92,7 +158,13 @@ export function CodeSegment(props: CodeSegmentProps): ReactNode {
   const lineNumbers =
     !(metastring ? NO_LINE_NUMBERS.test(metastring) : false) &&
     context.lineNumbers !== false;
-  const controls = codeControls(context.controls, code, language);
+  const shown = shownControls(context.controls);
+  // The controls start as markup (no React elements for the buttons and their icons)
+  // and turn into Streamdown's own buttons when one is first pressed, which then gets
+  // the click (and the focus, if it had it).
+  const [active, setActive] = useState(false);
+  const shell = !ssr && !active && props.shell && shown ? props.shell : null;
+  const controls = shell ? null : codeControls(context.controls, code, language);
   if (ssr) {
     return createElement(
       CodeBlock,
@@ -108,31 +180,63 @@ export function CodeSegment(props: CodeSegmentProps): ReactNode {
       controls
     );
   }
+  const activate = (event: MouseEvent<HTMLDivElement>) => {
+    const button = (event.target as Element | null)?.closest?.(CONTROL_BUTTON) as
+      | HTMLButtonElement
+      | null
+      | undefined;
+    const scope = event.currentTarget;
+    if (!(button && scope.contains(button)) || button.disabled) return;
+    const kind = button.getAttribute("data-streamdown");
+    const focused = button.ownerDocument.activeElement === button;
+    const container = scope.parentElement;
+    event.stopPropagation();
+    flushSync(() => setActive(true));
+    const live = container?.querySelector<HTMLButtonElement>(
+      `button[data-streamdown="${kind}"]`
+    );
+    if (focused) live?.focus();
+    live?.click();
+  };
+  const outer = cn(ACTIONS_OUTER);
   return createElement(
     CodeBlockContainer,
     { dir: "ltr", isIncomplete, language },
-    createElement(CodeBlockHeader, { language }),
-    controls
-      ? createElement(
-          "div",
-          {
-            className: cn(
-              "pointer-events-none absolute top-2 right-2 z-10 flex items-center"
-            ),
+    // CodeBlockHeader's markup.
+    createElement("div", {
+      key: "header",
+      className: cn("flex h-8 items-center text-muted-foreground text-xs"),
+      "data-language": language,
+      "data-streamdown": "code-block-header",
+      dangerouslySetInnerHTML: {
+        __html: `<span class="${escapeHtml(cn("ml-1 font-mono lowercase"))}">${escapeHtml(language)}</span>`,
+      },
+    }),
+    shell
+      ? createElement("div", {
+          key: "controls:html",
+          className: outer,
+          onClick: activate,
+          dangerouslySetInnerHTML: {
+            __html: actionsHtml(cn, shell, shown!, Boolean(context.isAnimating)),
           },
-          createElement(
+        })
+      : controls
+        ? createElement(
             "div",
-            {
-              className: cn(
-                "pointer-events-auto flex shrink-0 items-center gap-2 rounded-md border border-sidebar bg-sidebar/80 px-1.5 py-1 supports-[backdrop-filter]:bg-sidebar/70 supports-[backdrop-filter]:backdrop-blur"
-              ),
-              "data-streamdown": "code-block-actions",
-            },
-            controls
+            { key: "controls", className: outer },
+            createElement(
+              "div",
+              {
+                className: cn(ACTIONS),
+                "data-streamdown": "code-block-actions",
+              },
+              controls
+            )
           )
-        )
-      : null,
+        : null,
     createElement(CodeBody, {
+      key: "body",
       className,
       code: trimTrailingNewlines(code),
       isIncomplete,
@@ -144,6 +248,18 @@ export function CodeSegment(props: CodeSegmentProps): ReactNode {
       highlight: props.highlight,
     })
   );
+}
+
+type Shown = { download: boolean; copy: boolean };
+
+/** lib/components.tsx: which of the download and copy buttons the code controls allow,
+ * or `null` for neither. */
+function shownControls(config: ControlsConfig): Shown | null {
+  if (typeof config === "boolean") return config ? { download: true, copy: true } : null;
+  const code = config.code;
+  if (code === false) return null;
+  if (code === true || code === undefined) return { download: true, copy: true };
+  return { download: code.download !== false, copy: code.copy !== false };
 }
 
 /** lib/components.tsx: the download and copy buttons the code controls allow. */

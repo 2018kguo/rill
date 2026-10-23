@@ -37,6 +37,10 @@ const plugins =
           ? { code, math, cjk }
           : undefined;
 
+function OwnCopyIcon(props: Record<string, unknown>) {
+  return createElement("svg", { ...props, "data-own": "copy" });
+}
+
 function CustomLink({ node: _node, children, ...props }: Record<string, unknown>) {
   return createElement("a", { "data-custom": "link", ...props }, children as ReactNode);
 }
@@ -64,6 +68,10 @@ const variants: Record<string, Record<string, unknown>> = {
   rtl: { dir: "rtl" },
   static: { mode: "static" },
   caret: { caret: "block" },
+  // The code controls' labels (escaped in their markup), and a copy icon of the page's
+  // own (the controls render through React from the start).
+  labels: { translations: { copyCode: 'Copier "le" <code>', downloadFile: "Télécharger & garder" } },
+  icons: { icons: { CopyIcon: OwnCopyIcon } },
 };
 const variantProps = variants[variant];
 if (!variantProps) throw new Error(`unknown variant ${variant}`);

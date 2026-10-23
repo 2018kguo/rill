@@ -49,7 +49,7 @@ import {
 import type { Pluggable } from "unified";
 
 import { parseMarkdownIntoBlocks, splitDefinitionBlock } from "./blocks.ts";
-import { CodeSegment } from "./code-block.ts";
+import { CodeSegment, shellLabels, type ShellLabels } from "./code-block.ts";
 import type { HastNode, HastReader, MarkupOptions, Rill } from "./core.ts";
 import { highlighterFor, type Highlighter } from "./highlight.ts";
 import { createCn, hastToHtml, type Cn } from "./html.ts";
@@ -85,6 +85,9 @@ type Settings = {
    * message that has not streamed: one component instead of one per block). */
   whole: boolean;
   highlight: Highlighter | undefined;
+  /** The code blocks' control labels, or `null` when the page gives its own copy or
+   * download icon (their controls then render through React from the start). */
+  shell: ShellLabels | null;
 };
 
 const RillContext = createContext<Settings | null>(null);
@@ -142,7 +145,7 @@ function sameRootAttributes(previous: object, next: object): boolean {
 
 /** Streamdown 2.7.1's `<Streamdown>`, rendering its blocks with rill. */
 export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
-  const { plugins, prefix, fallbackComponent } = props;
+  const { plugins, prefix, fallbackComponent, translations, icons } = props;
   // A message that has streamed keeps a Block per block (their state, as Streamdown
   // keeps it); one that has not renders its blocks from one Block. Per-block props
   // (`dir`, animation, a page's own splitter or Block) keep Streamdown's blocks.
@@ -155,6 +158,9 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
     !props.animated &&
     !props.BlockComponent &&
     !props.parseMarkdownIntoBlocksFn;
+  // Streamdown keys its translations by their JSON, so an inline object is the same.
+  const translationsKey = translations ? JSON.stringify(translations) : "";
+  const ownIcons = Boolean(icons?.CopyIcon || icons?.DownloadIcon);
   const settings = useMemo<Settings>(
     () => ({
       plugins,
@@ -163,8 +169,10 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
       fallback: fallbackComponent !== undefined,
       highlight: highlighterFor(plugins?.code),
       whole,
+      shell: ownIcons ? null : shellLabels(translationsKey),
     }),
-    [plugins, prefix, fallbackComponent, whole]
+    // biome-ignore lint/correctness/useExhaustiveDependencies: translations by value
+    [plugins, prefix, fallbackComponent, whole, ownIcons, translationsKey]
   );
   useEffect(load, []);
   // Streamdown repairs streaming Markdown with remend before splitting it into blocks;
@@ -1033,6 +1041,7 @@ function segments(
           components: env.components,
           cn: env.settings.cn,
           highlight: env.settings.highlight,
+          shell: env.settings.shell,
         });
       }
       case SEG_TABLE: {
