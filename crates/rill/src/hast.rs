@@ -628,6 +628,8 @@ impl<'s> ToHast<'_, 's> {
                         .split(js_whitespace)
                         .next()
                         .expect("split yields at least one piece");
+                    // rehype-katex renders ```math blocks too (`language-math`).
+                    self.math |= first == "math";
                     props.push((
                         "className",
                         Val::List(vec![Cow::Owned(format!("language-{first}"))]),
@@ -1571,11 +1573,8 @@ impl Default for Harden {
 
 struct Finisher<'a, 's> {
     tree: &'a mut HTree<'s>,
-    /// `false`: KaTeX runs first, so sanitize and harden wait for JavaScript too.
-    sanitize: bool,
     code_classes: &'static [&'static str],
-    /// `None` with math: KaTeX runs before sanitize and harden, in JavaScript.
-    harden: Option<&'a Harden>,
+    harden: &'a Harden,
     /// How many `table` elements enclose the current one.
     table_depth: usize,
 }
@@ -1661,9 +1660,7 @@ impl<'s> Finisher<'_, 's> {
     }
 
     fn text(&mut self, ix: Ix, out: &mut Chain) {
-        if self.sanitize {
-            self.tree.nodes[ix as usize].drop_partial_position();
-        }
+        self.tree.nodes[ix as usize].drop_partial_position();
         self.tree.append(out, ix);
     }
 
@@ -1681,11 +1678,6 @@ impl<'s> Finisher<'_, 's> {
         self.table_depth += table;
         self.children(ix);
         self.table_depth -= table;
-        if !self.sanitize {
-            // KaTeX first: sanitize and harden run in JavaScript after it.
-            self.tree.append(out, ix);
-            return;
-        }
         let mut safe = TAG_NAMES.contains(&tag);
         if safe && matches!(tag, "tbody" | "td" | "th" | "thead" | "tfoot" | "tr") {
             safe = self.table_depth > 0;
@@ -1700,10 +1692,7 @@ impl<'s> Finisher<'_, 's> {
         self.tree.nodes[ix as usize].drop_partial_position();
         let props = self.tree.properties_mut(ix).expect("an element");
         *props = sanitize_props(tag, std::mem::take(props), self.code_classes);
-        if self
-            .harden
-            .is_none_or(|harden| self.harden(ix, tag, harden))
-        {
+        if self.harden(ix, tag, self.harden) {
             self.tree.append(out, ix);
         }
     }
@@ -1957,9 +1946,6 @@ pub struct Sanitize {
 pub struct Options {
     pub harden: Harden,
     pub sanitize: Sanitize,
-    /// Run rehype-katex after rehype-sanitize instead of before it (Streamdown's order):
-    /// math documents then come back sanitized, with only KaTeX and harden left to run.
-    pub katex_after_sanitize: bool,
     pub plugins: Vec<Box<dyn Plugin>>,
 }
 
@@ -2005,8 +1991,10 @@ pub enum Kind {
     /// HAST before `rehype-raw`: raw HTML (or a link in a link) needs parse5. Run
     /// rehype-raw, rehype-katex, rehype-sanitize and rehype-harden on it in JavaScript.
     Raw,
-    /// HAST after `rehype-raw` with math: Streamdown runs KaTeX before sanitizing, so
-    /// rehype-katex, rehype-sanitize and rehype-harden run in JavaScript.
+    /// Final HAST except its math elements, left as sanitized `<code
+    /// class="language-math">` (in a `<pre>` for display math). Render each with
+    /// rehype-katex, rehype-sanitize and rehype-harden on its own in JavaScript; that
+    /// matches Streamdown running them on the whole tree.
     Math,
 }
 
@@ -2289,12 +2277,12 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
         tree.nodes[root as usize].end = Edge::None;
     }
     tree.quirks = true;
-    let sanitize = !math || options.katex_after_sanitize;
+    // With math, everything but the math elements is final here: they stay sanitized
+    // code, and the JavaScript tail renders each one (see js/src/math.ts).
     Finisher {
         tree: &mut tree,
-        sanitize,
         code_classes: options.sanitize.code_classes,
-        harden: (!math).then_some(&options.harden),
+        harden: &options.harden,
         table_depth: 0,
     }
     .children(root);

@@ -7,15 +7,25 @@
 import { readdirSync, readFileSync } from "node:fs";
 
 import { initRill } from "../js/src/index.ts";
-import { processor, tails } from "./pipeline.mjs";
+import { unified } from "unified";
+
+import { rehypeMathFragments } from "../js/src/math.ts";
+import { mathPlugins, processor, tails } from "./pipeline.mjs";
 
 const rill = await initRill(readFileSync(new URL("../js/wasm/rill_bg.wasm", import.meta.url)));
 
 const streamdown = (source) => processor.runSync(processor.parse(source), source);
-function viaRill(source) {
-  const { kind, tree } = rill.render(source);
-  const tail = tails[kind];
-  return tail ? tail.runSync(tree, source) : tree;
+
+/** rill's render with its own, empty KaTeX cache: every timed run starts cold, and a
+ * streamed answer shares one cache across its updates, as a chat would. */
+function freshRill() {
+  const mathTail = unified().use(rehypeMathFragments(mathPlugins));
+  return (source) => {
+    const { kind, tree } = rill.render(source);
+    if (kind === "math") return mathTail.runSync(tree, source);
+    const tail = tails[kind];
+    return tail ? tail.runSync(tree, source) : tree;
+  };
 }
 
 /** Median milliseconds of `run`, after warming up, over at least 200 ms or 15 runs. */
@@ -34,7 +44,7 @@ function time(run) {
 
 function row(label, source, run = (render) => render(source)) {
   const js = time(() => run(streamdown));
-  const rs = time(() => run(viaRill));
+  const rs = time(() => run(freshRill()));
   const kb = (source.length / 1024).toFixed(0).padStart(5);
   console.log(
     `${label.padEnd(34)} ${kb} KB  ${js.toFixed(2).padStart(9)} ms  ${rs.toFixed(2).padStart(8)} ms  ${(js / rs).toFixed(1).padStart(6)}×`,
@@ -52,7 +62,8 @@ const closed = examples.filter(([name]) => !name.includes("streaming"));
 const pure = closed.filter(([name]) => !name.includes("math") && !name.includes("html"));
 const join = (list) => list.map(([, source]) => source).join("\n\n");
 const answer = join(pure);
-const mixed = join(closed);
+const withMath = join(closed.filter(([name]) => !name.includes("html")));
+const withHtml = join(closed.filter(([name]) => !name.includes("math")));
 const repeat = (source) => source.repeat(Math.floor(100_000 / source.length));
 const links = Array.from(
   { length: 600 },
@@ -60,25 +71,40 @@ const links = Array.from(
     `See [source ${index}](https://example.com/docs/${index}?ref=chat#section) and ![figure](/img/${index}.png).`,
 ).join("\n\n");
 
-console.log(`Node ${process.versions.node}, ${process.arch}. Median per render.`);
+console.log(
+  `Node ${process.versions.node}, ${process.arch}. Median of runs, each with an empty KaTeX cache.`,
+);
 console.log(
   `${"".padEnd(34)} ${"size".padStart(8)}  ${"Streamdown".padStart(12)}  ${"rill".padStart(11)}  speedup`,
 );
 row("Answer, Markdown only", answer);
-row("Answer with math and raw HTML", mixed);
+row("Answer with math", withMath);
+row("Answer with raw HTML", withHtml);
 row("Long answer, Markdown only", repeat(answer));
-row("Long answer with math and raw HTML", repeat(mixed));
+row("Long answer with math", repeat(withMath));
+// Every formula distinct, so nothing is cached within the render either.
+const formulas = Array.from(
+  { length: 300 },
+  (_, index) =>
+    `Step ${index}: $$\\sum_{k=0}^{${index}} \\frac{x^k}{k!} \\approx e^{${index}}$$ holds.`,
+).join("\n\n");
+row("300 distinct formulas", formulas);
+row("Long answer with raw HTML", repeat(withHtml));
 row("Link-heavy answer (1,200 URLs)", links);
 
-// Streaming: a Markdown answer arrives 24 characters at a time and every prefix is
-// rendered, as a chat UI does on each update. Times are the total for the whole stream.
-const stream = answer.repeat(4);
-const prefixes = [];
-for (let end = 24; end < stream.length; end += 24) prefixes.push(stream.slice(0, end));
-prefixes.push(stream);
-row(`Streamed answer, ${prefixes.length} renders`, stream, (render) => {
-  for (const prefix of prefixes) render(prefix);
-});
+// Streaming: an answer arrives 24 characters at a time and every prefix is rendered,
+// as a chat UI does on each update. Times are the total for the whole stream.
+function streamed(label, source) {
+  const prefixes = [];
+  for (let end = 24; end < source.length; end += 24) prefixes.push(source.slice(0, end));
+  prefixes.push(source);
+  row(`${label}, ${prefixes.length} renders`, source, (render) => {
+    for (const prefix of prefixes) render(prefix);
+  });
+}
+streamed("Streamed answer", answer.repeat(4));
+streamed("Streamed answer with math", withMath.repeat(3));
+streamed("Streamed, 40 distinct formulas", formulas.split("\n\n").slice(0, 40).join("\n\n"));
 
 if (process.argv.includes("--real")) {
   const documents = readFileSync(new URL("real.jsonl", import.meta.url), "utf8")

@@ -9,6 +9,7 @@ import { unified } from "unified";
 import type { PluggableList, Processor } from "unified";
 
 import type { HastNode, Rill, RillKind } from "./core.ts";
+import { mathFragments } from "./math.ts";
 
 /** Which pipeline rendered a document; `javascript` is the fallback. */
 export type RenderKind = RillKind | "javascript";
@@ -28,8 +29,9 @@ type BaseOptions<A extends unknown[]> = {
   remarkPlugins?: PluggableList;
   rehypePlugins?: PluggableList;
   /**
-   * What still runs on a `math` tree: KaTeX and the plugins after it. Required with
-   * your own `rehypePlugins`; defaults to Streamdown's otherwise.
+   * What runs on each math element of a `math` tree: KaTeX and the plugins after it
+   * (the rest of the tree is already finished). Required with your own
+   * `rehypePlugins`; defaults to Streamdown's otherwise.
    */
   mathTail?: PluggableList;
   /** Rehype plugins of your own, run on the finished tree. */
@@ -86,11 +88,8 @@ export function rillPlugins<A extends unknown[]>(
 
   // Built on first use: most documents need neither.
   let javascript: Processor | undefined;
-  const tails: { raw?: Processor; math?: Processor } = {};
-  const tail = (kind: "raw" | "math") =>
-    (tails[kind] ??= unified().use(
-      kind === "raw" ? rehypePlugins : (mathTail ?? defaultMathTail())
-    ) as Processor);
+  let rawTail: Processor | undefined;
+  let renderMath: ReturnType<typeof mathFragments> | undefined;
 
   function render(source: string): { kind: RenderKind; tree: HastRoot } {
     if (source.length <= maxSourceLength) {
@@ -147,15 +146,23 @@ export function rillPlugins<A extends unknown[]>(
       // rill did not parse (its remark plugin was replaced): this is remark-rehype's
       // tree, so run the whole rehype chain on it, as the JavaScript pipeline would.
       const kind = isRillData(rillData) ? rillData.kind : "raw";
-      if (kind === "raw" || kind === "math") {
-        // A cached root shares its children with remark-rehype; KaTeX edits in place.
+      if (kind === "raw") {
+        // A cached root shares its children with remark-rehype; the tail edits in place.
         tree.children = structuredClone(tree.children);
+        rawTail ??= unified().use(rehypePlugins) as Processor;
         const finished = asHastRoot(
-          tail(kind).runSync(tree as never, String(file.value ?? ""))
+          rawTail.runSync(tree as never, String(file.value ?? ""))
         );
         tree.children = finished.children;
         tree.data = finished.data;
-      } else if (isRillData(rillData) && rillData.data !== undefined) {
+        return;
+      }
+      if (kind === "math") {
+        // Copies only what it changes, so a cached root stays as it was.
+        renderMath ??= mathFragments(mathTail ?? defaultMathTail());
+        tree.children = renderMath(tree.children as never);
+      }
+      if (isRillData(rillData) && rillData.data !== undefined) {
         tree.data = rillData.data;
       }
     };
@@ -178,7 +185,7 @@ function attacherOf(plugin: unknown): unknown {
   return Array.isArray(plugin) ? plugin[0] : plugin;
 }
 
-/** Streamdown's rehype chain from KaTeX on: what a `math` tree still needs. */
+/** Streamdown's rehype chain from KaTeX on: what each math element still needs. */
 function defaultMathTail(): PluggableList {
   const { katex, sanitize, harden } = defaultRehypePlugins;
   return [katex, sanitize, harden].filter((plugin) => plugin !== undefined);

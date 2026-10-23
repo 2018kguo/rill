@@ -185,7 +185,6 @@ webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
 
 - `harden`: link and image block policies, `Indicator` (default), `TextOnly` or `Remove`.
 - `sanitize.code_classes`: extra `className`s `<code>` may keep.
-- `katex_after_sanitize`: KaTeX runs after sanitizing instead of before it.
 - `plugins`: your transforms.
 
 A plugin implements up to three hooks, at the points where a remark or rehype plugin

@@ -30,6 +30,8 @@ const DOCUMENTS = [
   "```ts\nconst x: number = 1;\n```\n\n    indented code",
   "***a** b*  _c__d_ **e*f** ~~~not~~~",
   "Inline $$x^2$$ and a block:\n\n$$\n\\int_0^1 x\\,dx\n$$",
+  // Math with what sanitize and harden change elsewhere in the tree.
+  "$$\\frac{a}{b}$$ [bad](javascript:alert(1)) ![i](/x.png) <!-- c -->\n\n```math\na+b\n```",
   "<details><summary>raw</summary>\n\n**html** <b>bold</b>\n\n</details>",
   "[link](javascript:alert(1)) ![img](data:image/png;base64,AAAA) [ok](/a)",
   "日本語の**強調**です。中文**加粗**测试，~~删除~~线",
