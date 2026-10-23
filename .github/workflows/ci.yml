@@ -44,6 +44,9 @@ jobs:
           (cd rill-highlight/js && npm ci --no-audit --no-fund && npm run build)
           sh scripts/pack-highlight.sh rill-highlight
       - run: npm install --no-audit --no-fund
+      # Real-world Markdown at pinned commits (conformance/real.jsonl, not checked in),
+      # which remend.mjs, blocks.mjs and ssr.tsx read.
+      - run: node conformance/real.mjs
       - run: cargo test --workspace
       - name: Conformance against Streamdown's JavaScript pipeline
         run: |
