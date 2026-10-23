@@ -9,18 +9,19 @@ use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
 use crate::{
     linklabel::{normalize_label, scan_link_label_rest, LinkLabel},
-    HeadingLevel,
+    HeadingLevel, Syntax,
 };
 
 /// Runs the first pass, which resolves the block structure of the document,
 /// and returns the resulting tree.
-pub(crate) fn run_first_pass(text: &str) -> (Tree<Item>, Allocations<'_>) {
+pub(crate) fn run_first_pass(text: &str, syntax: Syntax) -> (Tree<Item>, Allocations<'_>) {
     // This is a very naive heuristic for the number of nodes
     // we'll need.
     let start_capacity = max(128, text.len() / 32);
     let lookup_table = &create_lut();
     let first_pass = FirstPass {
         text,
+        syntax,
         tree: Tree::with_capacity(start_capacity),
         begin_list_item: None,
         last_line_blank: false,
@@ -36,6 +37,7 @@ pub(crate) fn run_first_pass(text: &str) -> (Tree<Item>, Allocations<'_>) {
 /// State for the first parsing pass.
 struct FirstPass<'a, 'b> {
     text: &'a str,
+    syntax: Syntax,
     tree: Tree<Item>,
     begin_list_item: Option<usize>,
     last_line_blank: bool,
@@ -237,7 +239,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
             return self.parse_atx_heading(ix, atx_size);
         }
 
-        if let Some((n, fence_ch)) = scan_code_fence(&bytes[ix..]) {
+        if let Some((n, fence_ch)) = scan_code_fence(&bytes[ix..], self.syntax.math) {
             self.finish_list(start_ix);
             return self.parse_fenced_code_block(ix, indent, fence_ch, n);
         }
@@ -460,7 +462,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
         line_start.scan_all_space();
         ix += line_start.bytes_scanned();
-        if scan_paragraph_interrupt_no_table(&bytes[ix..], current_container, &self.tree) {
+        if scan_paragraph_interrupt_no_table(
+            &bytes[ix..],
+            current_container,
+            &self.tree,
+            self.syntax,
+        ) {
             return None;
         }
         // rill: a table is no paragraph (micromark's `_gfmTableDynamicInterruptHack`), so
@@ -518,7 +525,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     self.tree.append_text(pos, pos + 1, false);
                 }
                 self.pop(paragraph_end);
-                if starts_block(&bytes[ix..]) {
+                if starts_block(&bytes[ix..], self.syntax) {
                     return line_begin;
                 }
                 self.tree.append(Item {
@@ -844,7 +851,10 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         && !self.in_literal_path(start, ix)
                     {
                         self.tree.append_text(begin_text, ix, backslash_escaped);
-                        if bytes[ix + 1] == b'$' && bytes.get(ix + 2) == Some(&b'$') {
+                        if self.syntax.math
+                            && bytes[ix + 1] == b'$'
+                            && bytes.get(ix + 2) == Some(&b'$')
+                        {
                             let count = 1 + scan_ch_repeat(&bytes[(ix + 2)..], b'$');
                             self.tree.append(Item {
                                 start: ix + 1,
@@ -885,17 +895,37 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     }
                 }
                 c @ b'*' | c @ b'_' | c @ b'~' => {
-                    // rill: remark-cjk-friendly flanking (see `attention`).
+                    // rill: micromark's flanking, or remark-cjk-friendly's (see `attention`).
                     let string_suffix = &self.text[ix..];
                     let count = 1 + scan_ch_repeat(&string_suffix.as_bytes()[1..], c);
                     let mut before = self.text[start..ix].chars().rev();
                     let previous = before.next();
                     let two_previous = before.next();
+                    // GFM's email literal comes before attention for `_` (Streamdown attaches
+                    // remark-gfm after remark-cjk-friendly): the run is the literal's text.
+                    if c == b'_'
+                        && crate::autolink_literal::email(self.text, ix, previous).is_some()
+                        && !self.bracket_open(ix)
+                    {
+                        return LoopInstruction::ContinueAndSkip(count - 1);
+                    }
                     let next = string_suffix[count..].chars().next();
                     let flanking = if c == b'~' {
-                        crate::attention::strikethrough(count, two_previous, previous, next)
+                        crate::attention::strikethrough(
+                            self.syntax.cjk,
+                            count,
+                            two_previous,
+                            previous,
+                            next,
+                        )
                     } else {
-                        Some(crate::attention::emphasis(c, two_previous, previous, next))
+                        Some(crate::attention::emphasis(
+                            self.syntax.cjk,
+                            c,
+                            two_previous,
+                            previous,
+                            next,
+                        ))
                     };
                     // A run that can neither open nor close still orders the resolvers.
                     if let Some((can_open, can_close)) = flanking {
@@ -912,7 +942,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     }
                     LoopInstruction::ContinueAndSkip(count - 1)
                 }
-                b'$' => {
+                b'$' if self.syntax.math => {
                     // rill: micromark-extension-math text with `singleDollarTextMath: false`
                     // is a code span of `$$`+ runs; a lone `$` is text.
                     let count = 1 + scan_ch_repeat(&bytes[(ix + 1)..], b'$');
@@ -1680,7 +1710,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
     /// Checks whether we should break a paragraph on the given input.
     fn scan_paragraph_interrupt(&self, bytes: &[u8], current_container: bool) -> bool {
-        if scan_paragraph_interrupt_no_table(bytes, current_container, &self.tree) {
+        if scan_paragraph_interrupt_no_table(bytes, current_container, &self.tree, self.syntax) {
             return true;
         }
         // pulldown-cmark allows heavy tables, that have a `|` on the header row,
@@ -1797,14 +1827,14 @@ fn count_header_cols(
 
 /// rill: whether a block other than a paragraph or table starts at `bytes` (a line start
 /// past container prefixes).
-fn starts_block(bytes: &[u8]) -> bool {
+fn starts_block(bytes: &[u8], syntax: Syntax) -> bool {
     let indent = bytes.iter().take_while(|b| **b == b' ').count();
     if indent > 3 {
         return false;
     }
     let line = &bytes[indent..];
     scan_atx_heading(line).is_some()
-        || scan_code_fence(line).is_some()
+        || scan_code_fence(line, syntax.math).is_some()
         || scan_hrule(line).is_ok()
         || line.strip_prefix(b"<").is_some_and(|tag| {
             get_html_end_tag(tag).is_some()
@@ -1821,11 +1851,12 @@ fn scan_paragraph_interrupt_no_table(
     bytes: &[u8],
     current_container: bool,
     tree: &Tree<Item>,
+    syntax: Syntax,
 ) -> bool {
     scan_eol(bytes).is_some()
         || scan_hrule(bytes).is_ok()
         || scan_atx_heading(bytes).is_some()
-        || scan_code_fence(bytes).is_some()
+        || scan_code_fence(bytes, syntax.math).is_some()
         || scan_blockquote_start(bytes).is_some()
         || scan_listitem(bytes).map_or(false, |(ix, delim, index, _)| {
             ! current_container ||

@@ -19,8 +19,9 @@
 // THE SOFTWARE.
 
 //! rill-cmark: a fork of [pulldown-cmark](https://github.com/pulldown-cmark/pulldown-cmark)
-//! 0.13.4 whose grammar follows micromark as remark configures it for Streamdown
-//! (remark-gfm, remark-math with `singleDollarTextMath: false`, remark-cjk-friendly).
+//! 0.13.4 whose grammar follows micromark as remark configures it for Streamdown: remark-gfm,
+//! plus remark-math with `singleDollarTextMath: false` and remark-cjk-friendly when
+//! [`Syntax`] turns them on.
 //! Changes from upstream are marked `rill:`. The `rill` crate builds MDAST and HAST from
 //! its events; use it rather than this crate directly.
 
@@ -41,6 +42,18 @@ mod unicode_tables;
 pub use crate::parse::{OffsetIter, Parser};
 pub use crate::scanners::decode_string;
 pub use crate::strings::{CowStr, InlineStr};
+
+/// The micromark extensions beyond GFM, as Streamdown's `plugins` add them. The default is
+/// Streamdown's: neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Syntax {
+    /// `plugins.math`: remark-math with `singleDollarTextMath: false` (`$$` text and
+    /// flow).
+    pub math: bool,
+    /// `plugins.cjk`: remark-cjk-friendly and remark-cjk-friendly-gfm-strikethrough
+    /// flanking.
+    pub cjk: bool,
+}
 
 /// Codeblock kind.
 #[derive(Clone, Debug, PartialEq)]

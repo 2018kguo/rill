@@ -31,7 +31,7 @@ use crate::linklabel::{
 use crate::scanners::*;
 use crate::strings::CowStr;
 use crate::tree::{Tree, TreeIndex};
-use crate::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Tag, TagEnd};
+use crate::{Alignment, CodeBlockKind, Event, HeadingLevel, LinkType, Syntax, Tag, TagEnd};
 
 // Allowing arbitrary depth nested parentheses inside link destinations
 // can create denial of service vulnerabilities if we're not careful.
@@ -200,9 +200,16 @@ impl<'input> std::fmt::Debug for Parser<'input> {
 }
 
 impl<'input> Parser<'input> {
-    /// Creates a new event iterator for a markdown string, with rill's grammar.
+    /// Creates a new event iterator for a markdown string, with Streamdown's default
+    /// grammar.
     pub fn new(text: &'input str) -> Self {
-        let (mut tree, allocs) = run_first_pass(text);
+        Self::with_syntax(text, Syntax::default())
+    }
+
+    /// Creates a new event iterator for a markdown string, with the extensions `syntax`
+    /// turns on.
+    pub fn with_syntax(text: &'input str, syntax: Syntax) -> Self {
+        let (mut tree, allocs) = run_first_pass(text, syntax);
         tree.reset();
         let inline_stack = Default::default();
         let link_stack = Default::default();
@@ -753,8 +760,8 @@ impl<'input> Parser<'input> {
                 p += c.len_utf8();
                 continue;
             }
-            // micromark's attention construct claims every `_`, so no literal starts there.
-            let atext = c == '+' || c == '-' || c == '.' || c.is_ascii_alphanumeric();
+            // An email literal may start at `_` (GFM's construct comes before attention).
+            let atext = c == '+' || c == '-' || c == '.' || c == '_' || c.is_ascii_alphanumeric();
             if atext {
                 let previous = if p == item.start && line_start {
                     None

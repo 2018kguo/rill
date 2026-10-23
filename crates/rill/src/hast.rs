@@ -12,7 +12,8 @@ use std::fmt::Write as _;
 
 use crate::json::{json_string, json_u32};
 use crate::mdast::{
-    self, AlignKind, At, Error, NIL, NodeId, Point, Points, Reference, ReferenceKind, push_cow,
+    self, AlignKind, At, Error, NIL, NodeId, Point, Points, Reference, ReferenceKind, Syntax,
+    push_cow,
 };
 use crate::url::Url;
 
@@ -517,6 +518,9 @@ struct ToHast<'t, 's> {
     /// Raw HTML that `pair_simple_raw` can turn into elements instead.
     simple_raw: bool,
     link_depth: usize,
+    /// rehype-katex runs (`plugins.math`), so ```math blocks are math too.
+    katex: bool,
+    /// The tree holds math for rehype-katex.
     math: bool,
 }
 
@@ -649,17 +653,18 @@ impl<'s> ToHast<'_, 's> {
                         .next()
                         .expect("split yields at least one piece");
                     // rehype-katex renders ```math blocks too (`language-math`).
-                    self.math |= first == "math";
+                    self.math |= self.katex && first == "math";
                     props.push((
                         "className",
                         Value::List(vec![Cow::Owned(format!("language-{first}"))]),
                     ));
                 }
-                let data = code
-                    .meta
-                    .clone()
-                    .filter(|meta| !meta.is_empty())
-                    .map(|meta| Box::new(Data { meta }));
+                let meta = code.meta.clone().filter(|meta| !meta.is_empty());
+                if let Some(meta) = &meta {
+                    // Streamdown's remarkCodeMeta: the meta string as a `metastring` property.
+                    props.push(("metastring", Value::Str(Cow::Owned(meta.to_string()))));
+                }
+                let data = meta.map(|meta| Box::new(Data { meta }));
                 let text = self.hast.text(value);
                 let code = self.hast.parent(
                     NodeKind::Element {
@@ -1150,7 +1155,8 @@ pub struct Converted<'s> {
     pub math: bool,
 }
 
-pub fn to_hast<'s>(mdast: &mdast::Tree<'s>) -> Converted<'s> {
+/// mdast-util-to-hast. `katex`: rehype-katex runs later, so ```math blocks count as math.
+pub fn to_hast<'s>(mdast: &mdast::Tree<'s>, katex: bool) -> Converted<'s> {
     let mut state = ToHast {
         mdast,
         hast: Tree {
@@ -1164,6 +1170,7 @@ pub fn to_hast<'s>(mdast: &mdast::Tree<'s>) -> Converted<'s> {
         raw_boundary: false,
         simple_raw: false,
         link_depth: 0,
+        katex,
         math: false,
     };
     state.collect(mdast::Tree::ROOT);
@@ -1382,7 +1389,9 @@ fn round_trip<'s>(key: &str, value: Value<'s>) -> Option<Value<'s>> {
 }
 
 // ---------------------------------------------------------------------------
-// rehype-sanitize 6.0.0 (hast-util-sanitize 5.0.2) with the default schema
+// rehype-sanitize 6.0.0 (hast-util-sanitize 5.0.2) with Streamdown's schema: the default
+// with no `clobberPrefix`, `tel:` and `streamdown:` links, `streamdown:` sources (remend's
+// sentinels for incomplete links and images), and `metastring` on `<code>`.
 // ---------------------------------------------------------------------------
 
 enum Allowed {
@@ -1526,6 +1535,7 @@ fn specific(tag: &str, key: &str) -> Option<Allowed> {
         ("a", "className") => Allowed::Values(&["data-footnote-backref"]),
         ("blockquote" | "del" | "ins" | "q", "cite") => Allowed::Any,
         ("code", "className") => Allowed::Language(&[]),
+        ("code", "metastring") => Allowed::Any,
         ("div", "itemScope" | "itemType") => Allowed::Any,
         ("dl" | "summary" | "table", _) if aria => Allowed::Any,
         ("h2", "className") => Allowed::Values(&["sr-only"]),
@@ -1545,8 +1555,18 @@ fn specific(tag: &str, key: &str) -> Option<Allowed> {
 
 fn safe_protocol(key: &str, url: &str) -> bool {
     let protocols: &[&str] = match key {
-        "cite" | "longDesc" | "src" => &["http", "https"],
-        "href" => &["http", "https", "irc", "ircs", "mailto", "xmpp"],
+        "cite" | "longDesc" => &["http", "https"],
+        "src" => &["http", "https", "streamdown"],
+        "href" => &[
+            "http",
+            "https",
+            "irc",
+            "ircs",
+            "mailto",
+            "xmpp",
+            "tel",
+            "streamdown",
+        ],
         _ => return true,
     };
     // JavaScript indices are UTF-16, but only their order and the ASCII prefix matter.
@@ -1585,24 +1605,6 @@ fn primitive_ok(allowed: &Allowed, key: &str, value: &Value<'_>) -> bool {
                 .is_some_and(|first| !matches!(first, '\n' | '\r' | '\u{2028}' | '\u{2029}'));
             language || matches!(value, Value::Str(string) if values.contains(&string.as_ref()))
         }
-    }
-}
-
-fn clobbered(key: &str) -> bool {
-    matches!(key, "ariaDescribedBy" | "ariaLabelledBy" | "id" | "name")
-}
-
-fn clobber(value: Value<'_>) -> Value<'_> {
-    match value {
-        Value::Str(string) => Value::Str(Cow::Owned(format!("user-content-{string}"))),
-        Value::Num(number) => Value::Str(Cow::Owned(format!("user-content-{number}"))),
-        Value::Bool(boolean) => Value::Str(Cow::Owned(format!("user-content-{boolean}"))),
-        Value::List(list) => Value::List(
-            list.into_iter()
-                .map(|item| Cow::Owned(format!("user-content-{item}")))
-                .collect(),
-        ),
-        Value::Class(name) => Value::List(vec![Cow::Owned(format!("user-content-{name}"))]),
     }
 }
 
@@ -1656,7 +1658,7 @@ fn sanitize_props<'s>(
                 }
                 Err(_) => return None,
             };
-            Some((key, if clobbered(key) { clobber(safe) } else { safe }))
+            Some((key, safe))
         })
         .collect();
     if tag == "input" {
@@ -2149,12 +2151,29 @@ pub struct Sanitize {
     pub code_classes: &'static [&'static str],
 }
 
-/// The pipeline's settings. The default is Streamdown's.
+/// The pipeline's settings. The default is Streamdown's, with no `plugins` prop.
 #[derive(Default)]
 pub struct Options {
+    /// Streamdown's `plugins.math` (`@streamdown/math` with `singleDollarTextMath:
+    /// false`): `$$` math, and rehype-katex after the chain (see [`Kind::Math`]).
+    pub math: bool,
+    /// Streamdown's `plugins.cjk` (`@streamdown/cjk`): CJK-friendly emphasis and
+    /// strikethrough, and autolink literals that end at CJK punctuation.
+    pub cjk: bool,
     pub harden: Harden,
     pub sanitize: Sanitize,
     pub plugins: Vec<Box<dyn Plugin>>,
+}
+
+impl Options {
+    /// The micromark extensions these options turn on.
+    #[must_use]
+    pub fn syntax(&self) -> Syntax {
+        Syntax {
+            math: self.math,
+            cjk: self.cjk,
+        }
+    }
 }
 
 /// What a [`Plugin`] may read besides the tree.
@@ -2452,7 +2471,10 @@ impl Built<'_> {
 }
 
 fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
-    let mut mdast = mdast::parse_arena(source)?;
+    let mut mdast = mdast::parse_arena(source, options.syntax())?;
+    if options.cjk {
+        mdast::cjk_autolink_boundary(&mut mdast, mdast::Tree::ROOT);
+    }
     for plugin in &options.plugins {
         plugin.mdast(&mut mdast)?;
     }
@@ -2461,7 +2483,7 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
         root,
         raw_boundary,
         math,
-    } = to_hast(&mdast);
+    } = to_hast(&mdast, options.math);
     // HAST owns or borrows the source for every string, so only the positions stay.
     let mdast::Tree { points, .. } = mdast;
     if raw_boundary {

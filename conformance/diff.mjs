@@ -5,16 +5,19 @@
 //   node diff.mjs --pieces '["- ","> ","```"]' --length 4
 //   node diff.mjs --fuzz 2000 --seed 7               seeded random concatenations
 //   node diff.mjs --file cases.jsonl                 one JSON string per line
+//   node diff.mjs --config math                      a Streamdown `plugins` configuration
+//                                                    (default, math, cjk, math+cjk)
 import { spawnSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 
-import { processor, tails } from "./pipeline.mjs";
+import { pipeline } from "./pipeline.mjs";
 
 const args = process.argv.slice(2);
 const option = (name) => {
   const index = args.indexOf(name);
   return index >= 0 ? args[index + 1] : undefined;
 };
+const { processor, tails, flags } = pipeline(option("--config") ?? "default");
 
 function* exhaustive(pieces, length) {
   let layer = [""];
@@ -74,7 +77,7 @@ function rill(cases) {
     return Buffer.concat([Buffer.from(`${bytes.length}\n`), bytes]);
   });
   const binary = new URL("../target/release/examples/stdio", import.meta.url).pathname;
-  const run = spawnSync(binary, { input: Buffer.concat(chunks), maxBuffer: 1 << 30 });
+  const run = spawnSync(binary, flags, { input: Buffer.concat(chunks), maxBuffer: 1 << 30 });
   if (run.status !== 0) throw new Error(`stdio failed: ${run.stderr}`);
   return run.stdout.toString().trimEnd().split("\n").map((line) => JSON.parse(line));
 }
@@ -104,7 +107,9 @@ function compare(cases) {
     if (result.error) return `rill error: ${result.error}`;
     const mdast = processor.parse(source);
     const expectedHast = processor.runSync(processor.parse(source), source);
-    const tail = tails[result.hast.kind];
+    const kind = result.hast.kind;
+    if (!(kind in tails)) return `rill kind ${kind}`;
+    const tail = tails[kind];
     const actualHast = tail ? tail.runSync(result.hast.tree, source) : result.hast.tree;
     return (
       firstDifference(plain(mdast), result.mdast, "mdast") ??

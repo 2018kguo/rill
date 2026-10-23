@@ -17,7 +17,7 @@ pub use hast::{
     BlockPolicy, Context, Harden, Kind, Options, Plugin, Rendered, Sanitize, render, render_json,
     render_ops,
 };
-pub use mdast::{Error, parse_json};
+pub use mdast::{Error, Syntax, parse_json};
 
 /// The WebAssembly boundary the `@2018kguo/rill` JavaScript package reads: a rendered
 /// document as HAST opcodes. A build with its own [`Plugin`]s exports one function that

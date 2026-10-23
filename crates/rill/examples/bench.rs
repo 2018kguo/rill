@@ -45,10 +45,10 @@ fn main() {
     };
     println!("{} KB of Markdown", source.len() / 1024);
     time("MDAST (arena)", &|| {
-        rill::mdast::parse_arena(&source).expect("parse");
+        rill::mdast::parse_arena(&source, options.syntax()).expect("parse");
     });
     time("MDAST JSON", &|| {
-        rill::parse_json(&source).expect("parse");
+        rill::parse_json(&source, options.syntax()).expect("parse");
     });
     time("HAST opcodes", &|| {
         rill::render_ops(&source, &options).expect("render");

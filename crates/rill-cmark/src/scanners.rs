@@ -638,9 +638,10 @@ fn alignment(left: bool, right: bool) -> Alignment {
 /// Scan code fence.
 ///
 /// Returns number of bytes scanned and the char that is repeated to make the code fence.
-pub(crate) fn scan_code_fence(data: &[u8]) -> Option<(usize, u8)> {
+/// rill: with `math`, `$$` math flow fences too.
+pub(crate) fn scan_code_fence(data: &[u8], math: bool) -> Option<(usize, u8)> {
     let c = *data.first()?;
-    if !(c == b'`' || c == b'~' || c == b'$') {
+    if !(c == b'`' || c == b'~' || math && c == b'$') {
         return None;
     }
     let i = 1 + scan_ch_repeat(&data[1..], c);

@@ -10,21 +10,16 @@
     "demo:build": "sh scripts/build-wasm.sh && bun build demo/main.js --outdir demo/dist --target browser && mkdir -p demo/dist/katex && cp js/wasm/rill_bg.wasm demo/dist/ && cp -R node_modules/katex/dist/katex.min.css node_modules/katex/dist/fonts demo/dist/katex/"
   },
   "dependencies": {
-    "get-east-asian-width": "1.5.0",
+    "@streamdown/cjk": "1.0.4",
+    "@streamdown/math": "1.0.3",
     "hast-util-to-html": "9.0.5",
     "katex": "0.16.47",
-    "micromark-extension-cjk-friendly-util": "2.1.1",
-    "rehype-harden": "1.1.8",
-    "rehype-katex": "7.0.1",
-    "rehype-raw": "7.0.0",
-    "rehype-sanitize": "6.0.0",
-    "remark-cjk-friendly": "1.2.3",
-    "remark-cjk-friendly-gfm-strikethrough": "1.2.3",
-    "remark-gfm": "4.0.1",
-    "remark-math": "6.0.0",
     "remark-parse": "11.0.0",
     "remark-rehype": "11.1.2",
-    "unified": "11.0.5"
+    "streamdown": "2.7.1",
+    "unified": "11.0.5",
+    "micromark-extension-cjk-friendly-util": "3.0.1",
+    "get-east-asian-width": "1.5.0"
   },
   "workspaces": [
     "js"

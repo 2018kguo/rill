@@ -169,7 +169,7 @@ fn path(mut cursor: Cursor<'_>) -> usize {
     }
 }
 
-fn email(text: &str, at: usize, previous: Option<char>) -> Option<usize> {
+pub(crate) fn email(text: &str, at: usize, previous: Option<char>) -> Option<usize> {
     let mut cursor = Cursor { text, at };
     if !gfm_atext(cursor.peek()) || !previous_email(previous) {
         return None;

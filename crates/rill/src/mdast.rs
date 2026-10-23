@@ -1,10 +1,11 @@
 //! MDAST: rill-cmark's events become the tree remark builds (remark-parse with remark-gfm,
-//! remark-math and remark-cjk-friendly), in an arena. Nodes link by index, text borrows the
+//! plus remark-math and remark-cjk-friendly as [`Syntax`] selects), in an arena. Nodes link by index, text borrows the
 //! source where it can, and positions stay byte offsets until serialization, where they
 //! become JavaScript's UTF-16 units.
 
 use std::borrow::Cow;
 
+pub use rill_cmark::Syntax;
 use rill_cmark::{Alignment, Event, LinkType, Parser, Tag, TagEnd};
 
 use crate::autolink::{self, Finder, Piece};
@@ -641,6 +642,7 @@ struct TaskCheck {
 
 struct Builder<'s> {
     tree: Tree<'s>,
+    syntax: Syntax,
     stack: Vec<Frame>,
     text: Option<PendingText<'s>>,
     /// Plain text collected for the open image's alt; nested images only add text.
@@ -658,7 +660,8 @@ struct Builder<'s> {
 impl<'s> Builder<'s> {
     /// Notes the code runs in plain text: micromark tried each as code and gave up.
     fn note_failed_run(&mut self, start: usize, end: usize) {
-        let runs = code_runs(&self.tree.source[start..end]).map(|at| (start + at) as u32);
+        let runs = code_runs(&self.tree.source[start..end], self.syntax.math)
+            .map(|at| (start + at) as u32);
         self.failed_runs.extend(runs);
     }
 
@@ -1396,9 +1399,14 @@ impl<'s> Builder<'s> {
                     .last()
                     .and_then(|frame| self.tree.bytes(self.tree.nodes[frame.node as usize].last))
                     .map_or(0, |(_, end)| end as usize);
+                // An odd run of backslashes: the last one escapes this text's first byte.
+                let backslashes = bytes[previous_end.min(start)..start]
+                    .iter()
+                    .rev()
+                    .take_while(|b| **b == b'\\')
+                    .count();
                 let escaped = self.text.is_none()
-                    && start > previous_end
-                    && bytes[start - 1] == b'\\'
+                    && backslashes % 2 == 1
                     && bytes.get(start).is_some_and(u8::is_ascii_punctuation);
                 self.note_failed_run(start - usize::from(escaped), end);
                 self.push_text(Cow::from(text), start - usize::from(escaped), end);
@@ -1650,9 +1658,9 @@ fn reference_kind(link_type: LinkType) -> Option<ReferenceKind> {
     }
 }
 
-/// Parses `source` (NUL-free; see [`without_nul`]) into an arena MDAST, including
-/// mdast-util-gfm-autolink-literal's text transform.
-pub fn parse_arena(source: &str) -> Result<Tree<'_>, Error> {
+/// Parses `source` (NUL-free; see [`without_nul`]) with `syntax` into an arena MDAST,
+/// including mdast-util-gfm-autolink-literal's text transform.
+pub fn parse_arena(source: &str, syntax: Syntax) -> Result<Tree<'_>, Error> {
     if source.contains('\0') {
         return Err(Error::Nul);
     }
@@ -1665,6 +1673,7 @@ pub fn parse_arena(source: &str) -> Result<Tree<'_>, Error> {
     tree.push(NodeKind::Root, bytes(0, source.len()));
     let mut builder = Builder {
         tree,
+        syntax,
         stack: vec![Frame {
             node: Tree::ROOT,
             start: 0,
@@ -1679,7 +1688,7 @@ pub fn parse_arena(source: &str) -> Result<Tree<'_>, Error> {
         exits: Vec::new(),
         failed_runs: Vec::new(),
     };
-    let events = Parser::new(source).into_offset_iter();
+    let events = Parser::with_syntax(source, syntax).into_offset_iter();
     for (event, range) in events {
         builder.event(event, range.start, range.end)?;
     }
@@ -1785,11 +1794,12 @@ fn crossed_in_paragraph(
     }
 }
 
-/// Where `text` (source) holds a `` ` `` or `$$` that no backslash escapes.
-fn code_runs(text: &str) -> impl Iterator<Item = usize> + '_ {
+/// Where `text` (source) holds a `` ` `` (or, with `math`, `$$`) that no backslash escapes.
+fn code_runs(text: &str, math: bool) -> impl Iterator<Item = usize> + '_ {
     let bytes = text.as_bytes();
     (0..bytes.len()).filter(move |&at| {
-        let run = bytes[at] == b'`' || bytes[at] == b'$' && bytes.get(at + 1) == Some(&b'$');
+        let run =
+            bytes[at] == b'`' || math && bytes[at] == b'$' && bytes.get(at + 1) == Some(&b'$');
         run && bytes[..at]
             .iter()
             .rev()
@@ -1800,10 +1810,10 @@ fn code_runs(text: &str) -> impl Iterator<Item = usize> + '_ {
     })
 }
 
-/// Parses `source` into remark's MDAST JSON.
-pub fn parse_json(source: &str) -> Result<String, Error> {
+/// Parses `source` with `syntax` into remark's MDAST JSON.
+pub fn parse_json(source: &str, syntax: Syntax) -> Result<String, Error> {
     let source = without_nul(source);
-    Ok(parse_arena(&source)?.to_json())
+    Ok(parse_arena(&source, syntax)?.to_json())
 }
 
 fn write_point(out: &mut String, point: Point) {
@@ -1882,6 +1892,128 @@ fn transform_children(tree: &mut Tree<'_>, parent: NodeId, finder: Finder) {
             _ => transform_children(tree, cursor, finder),
         }
         previous = cursor;
+        cursor = next;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// @streamdown/cjk 1.0.4 `remarkCjkAutolinkBoundary`
+// ---------------------------------------------------------------------------
+
+/// CJK punctuation that ends an autolink literal.
+const CJK_AUTOLINK_BOUNDARY: [char; 20] = [
+    '。', '．', '，', '、', '？', '！', '：', '；', '（', '）', '【', '】', '「', '」', '『', '』',
+    '〈', '〉', '《', '》',
+];
+
+fn autolink_prefix(value: &str) -> Option<usize> {
+    let lower = |prefix: &str| {
+        value
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+            .then_some(prefix.len())
+    };
+    lower("https://")
+        .or_else(|| lower("http://"))
+        .or_else(|| lower("mailto:"))
+        .or_else(|| lower("www."))
+}
+
+/// Streamdown's `plugins.cjk` transform: a link whose only child is text equal to its
+/// URL (an autolink literal, or anything that looks like one) ends before the first CJK
+/// boundary punctuation; the rest becomes text, relinked by GFM's literal transform. The
+/// shortened link keeps its position; every new node has none.
+pub fn cjk_autolink_boundary(tree: &mut Tree<'_>, parent: NodeId) {
+    let mut cursor = tree.nodes[parent as usize].first;
+    while cursor != NIL {
+        let next = tree.nodes[cursor as usize].next;
+        let Some(boundary) = autolink_boundary(tree, cursor) else {
+            cjk_autolink_boundary(tree, cursor);
+            cursor = next;
+            continue;
+        };
+        let NodeKind::Link(resource) = &mut tree.nodes[cursor as usize].kind else {
+            unreachable!("autolink_boundary only accepts links");
+        };
+        let rest = resource.url[boundary..].to_owned();
+        let head = resource.url[..boundary].to_owned();
+        resource.url = Cow::Owned(head.clone());
+        let text = tree.push(NodeKind::Text(Cow::Owned(head)), At::None);
+        tree.nodes[cursor as usize].first = text;
+        tree.nodes[cursor as usize].last = text;
+        // The trailing pieces, relinked in a scratch paragraph, follow the link.
+        let scratch = tree.push(NodeKind::Paragraph, At::None);
+        let mut segment_start = 0;
+        for (at, c) in rest.char_indices() {
+            if CJK_AUTOLINK_BOUNDARY.contains(&c) {
+                relinkified(tree, scratch, &rest[segment_start..at]);
+                relinkified(tree, scratch, &rest[at..at + c.len_utf8()]);
+                segment_start = at + c.len_utf8();
+            }
+        }
+        relinkified(tree, scratch, &rest[segment_start..]);
+        let (first, last) = (
+            tree.nodes[scratch as usize].first,
+            tree.nodes[scratch as usize].last,
+        );
+        let mut tail = cursor;
+        if first != NIL {
+            tree.nodes[cursor as usize].next = first;
+            tree.nodes[last as usize].next = next;
+            tail = last;
+        }
+        if next == NIL {
+            tree.nodes[parent as usize].last = tail;
+        }
+        cursor = next;
+    }
+}
+
+/// Where `link`'s URL meets CJK boundary punctuation, if it is an autolink literal that
+/// `remarkCjkAutolinkBoundary` splits there (never at its first character).
+fn autolink_boundary(tree: &Tree<'_>, link: NodeId) -> Option<usize> {
+    let node = &tree.nodes[link as usize];
+    let NodeKind::Link(resource) = &node.kind else {
+        return None;
+    };
+    let child = node.first;
+    if child == NIL || child != node.last {
+        return None;
+    }
+    let NodeKind::Text(text) = &tree.nodes[child as usize].kind else {
+        return None;
+    };
+    if text.as_ref() != resource.url.as_ref() {
+        return None;
+    }
+    autolink_prefix(&resource.url)?;
+    resource
+        .url
+        .char_indices()
+        .find(|(_, c)| CJK_AUTOLINK_BOUNDARY.contains(c))
+        .map(|(at, _)| at)
+        .filter(|at| *at > 0)
+}
+
+/// `relinkifyTrailingText`'s `append`: `text` as a text node in `scratch`, through GFM's
+/// literal transform unless it is a bare prefix such as `www.`.
+fn relinkified(tree: &mut Tree<'_>, scratch: NodeId, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let paragraph = tree.push(NodeKind::Paragraph, At::None);
+    let node = tree.push(NodeKind::Text(Cow::Owned(text.to_owned())), At::None);
+    tree.append(paragraph, node);
+    if autolink_prefix(text) != Some(text.len()) {
+        for finder in [autolink::find_url as Finder, autolink::find_email] {
+            transform_children(tree, paragraph, finder);
+        }
+    }
+    let mut cursor = tree.nodes[paragraph as usize].first;
+    while cursor != NIL {
+        let next = tree.nodes[cursor as usize].next;
+        tree.nodes[cursor as usize].next = NIL;
+        tree.append(scratch, cursor);
         cursor = next;
     }
 }

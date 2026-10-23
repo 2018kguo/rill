@@ -7,7 +7,7 @@ fn readme() -> Result<(), rill::Error> {
     let rendered = rill::render("# Hello *world*", &Options::default())?;
     assert_eq!(rendered.kind, Kind::Complete);
     assert!(rendered.tree.contains(r#""tagName":"em""#));
-    let mdast_json = rill::parse_json("- [x] done")?;
+    let mdast_json = rill::parse_json("- [x] done", rill::Syntax::default())?;
     assert!(mdast_json.contains(r#""checked":true"#));
     Ok(())
 }
@@ -17,8 +17,15 @@ fn examples_render() -> Result<(), rill::Error> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
     for entry in std::fs::read_dir(dir).expect("examples") {
         let source = std::fs::read_to_string(entry.expect("entry").path()).expect("read");
-        rill::render(&source, &Options::default())?;
-        rill::parse_json(&source)?;
+        for (math, cjk) in [(false, false), (true, false), (false, true), (true, true)] {
+            let options = Options {
+                math,
+                cjk,
+                ..Options::default()
+            };
+            rill::render(&source, &options)?;
+            rill::parse_json(&source, options.syntax())?;
+        }
     }
     Ok(())
 }

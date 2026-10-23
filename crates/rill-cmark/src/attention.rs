@@ -1,9 +1,12 @@
-//! rill: delimiter-run flanking as remark-cjk-friendly 1.2.3 and
-//! remark-cjk-friendly-gfm-strikethrough 1.2.3 decide it (micromark-extension-cjk-friendly
-//! `tokenizeAttention`, micromark-extension-cjk-friendly-util `classifyCharacter`). Streamdown
-//! installs both, so these replace micromark's attention and strikethrough rules for all text.
-//! Characters are code points: the extensions recover surrogate pairs.
+//! rill: delimiter-run flanking. By default micromark's (micromark-core-commonmark
+//! `tokenizeAttention`, micromark-extension-gfm-strikethrough), over UTF-16 code units; with
+//! `cjk`, as remark-cjk-friendly 2.3 and remark-cjk-friendly-gfm-strikethrough 2.3 decide it
+//! (micromark-extension-cjk-friendly 2.0.2 `tokenizeAttention`,
+//! micromark-extension-cjk-friendly-util 3.0.1 `classifyCharacter`), over code points: those
+//! extensions recover surrogate pairs. Streamdown's `plugins.cjk` installs both, and they
+//! replace micromark's rules for all text.
 
+use crate::autolink_literal::{unicode_punctuation, unicode_whitespace};
 use crate::unicode_tables::{in_table, CJK, IVS, PUNCTUATION_OR_SYMBOL, WHITESPACE};
 
 const SPACE: u32 = 1;
@@ -74,29 +77,53 @@ fn cjk(class: u32) -> bool {
     class & CJK_BIT != 0
 }
 
-fn marker(code: Option<char>) -> bool {
-    matches!(code, Some('*' | '_' | '~'))
+/// micromark-util-classify-character over one UTF-16 code unit: `SPACE`, `PUNCTUATION`,
+/// or 0. A supplementary character's surrogate halves are neither.
+fn classify_core(code: Option<char>) -> u32 {
+    match code {
+        None => SPACE,
+        Some(c) if unicode_whitespace(c) => SPACE,
+        Some(c) if unicode_punctuation(c) => PUNCTUATION,
+        Some(_) => 0,
+    }
 }
 
 /// `(can_open, can_close)` for an `*` or `_` run between `previous` and `next`.
 pub(crate) fn emphasis(
+    cjk_friendly: bool,
     delimiter: u8,
     two_previous: Option<char>,
     previous: Option<char>,
     next: Option<char>,
 ) -> (bool, bool) {
+    if !cjk_friendly {
+        let before = classify_core(previous);
+        let after = classify_core(next);
+        // `~` is in `attentionMarkers` through GFM strikethrough; `*` and `_` are excluded.
+        let open = after == 0 || after == PUNCTUATION && before != 0 || next == Some('~');
+        let close = before == 0 || before == PUNCTUATION && after != 0 || previous == Some('~');
+        return if delimiter == b'*' {
+            (open, close)
+        } else {
+            (
+                open && (before != 0 || !close),
+                close && (after != 0 || !open),
+            )
+        };
+    }
     let before = classify_preceding(classify(previous), two_previous, previous);
     let after = classify(next);
+    let core_marker = |code: Option<char>| matches!(code, Some('*' | '_'));
     let before_punctuation = non_cjk_punctuation(before);
-    let before_space_or_punctuation = before_punctuation || space(before);
+    let before_space_or_punctuation = before_punctuation || space(before) || core_marker(previous);
     let after_punctuation = non_cjk_punctuation(after);
-    let after_space_or_punctuation = after_punctuation || space(after);
+    let after_space_or_punctuation = after_punctuation || space(after) || core_marker(next);
     let open = !after_space_or_punctuation
         || after_punctuation && (before_space_or_punctuation || before & CJK_OR_IVS != 0)
-        || marker(next);
+        || next == Some('~');
     let close = !before_space_or_punctuation
         || before_punctuation && (after_space_or_punctuation || cjk(after))
-        || marker(previous);
+        || previous == Some('~');
     if delimiter == b'*' {
         (open, close)
     } else {
@@ -109,6 +136,7 @@ pub(crate) fn emphasis(
 
 /// `(can_open, can_close)` for a `~` or `~~` run; longer runs are text.
 pub(crate) fn strikethrough(
+    cjk_friendly: bool,
     run_length: usize,
     two_previous: Option<char>,
     previous: Option<char>,
@@ -116,6 +144,14 @@ pub(crate) fn strikethrough(
 ) -> Option<(bool, bool)> {
     if run_length > 2 {
         return None;
+    }
+    if !cjk_friendly {
+        let before = classify_core(previous);
+        let after = classify_core(next);
+        return Some((
+            after == 0 || after == PUNCTUATION && before != 0,
+            before == 0 || before == PUNCTUATION && after != 0,
+        ));
     }
     let raw_before = classify(previous);
     let before = classify_preceding(raw_before, two_previous, previous);
@@ -137,7 +173,26 @@ mod tests {
     #[test]
     fn cjk_punctuation_closes_strong() {
         // `**粗体**中文`: CJK after the closer still closes.
-        assert_eq!(emphasis(b'*', None, Some('体'), Some('中')), (true, true));
-        assert_eq!(emphasis(b'_', None, Some(' '), Some('a')), (true, false));
+        assert_eq!(
+            emphasis(true, b'*', None, Some('体'), Some('中')),
+            (true, true)
+        );
+        assert_eq!(
+            emphasis(true, b'_', None, Some(' '), Some('a')),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn core_flanking_needs_punctuation_or_space_beside_cjk() {
+        // `**「括号」**也`: micromark's rules alone do not close after `」`.
+        assert_eq!(
+            emphasis(false, b'*', None, Some('」'), Some('也')),
+            (true, false)
+        );
+        assert_eq!(
+            emphasis(true, b'*', None, Some('」'), Some('也')),
+            (true, true)
+        );
     }
 }

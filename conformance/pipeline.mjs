@@ -1,55 +1,65 @@
-// Streamdown 1.6.11's default pipeline, which rill reproduces.
-import { harden } from "rehype-harden";
-import rehypeKatex from "rehype-katex";
-import rehypeRaw from "rehype-raw";
-import rehypeSanitize from "rehype-sanitize";
-import remarkCjkFriendly from "remark-cjk-friendly";
-import remarkCjkFriendlyGfmStrikethrough from "remark-cjk-friendly-gfm-strikethrough";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
+// Streamdown 2.7.1's pipeline, which rill reproduces, built from the published packages
+// in the order streamdown/index.tsx merges them (`mergedRemarkPlugins`,
+// `mergedRehypePlugins`) for each plugin configuration:
+//
+//   remark: cjk.remarkPluginsBefore, gfm, codeMeta, cjk.remarkPluginsAfter, math.remarkPlugin
+//   rehype: raw, sanitize, harden, math.rehypePlugin
+import { cjk } from "@streamdown/cjk";
+import { math } from "@streamdown/math";
 import remarkParse from "remark-parse";
 import remarkRehype from "remark-rehype";
+import { defaultRehypePlugins, defaultRemarkPlugins } from "streamdown";
 import { unified } from "unified";
 
 import { rehypeMathFragments } from "../js/src/math.ts";
 
-export const remarkPlugins = [
-  remarkGfm,
-  [remarkMath, { singleDollarTextMath: false }],
-  remarkCjkFriendly,
-  remarkCjkFriendlyGfmStrikethrough,
-];
-
-const katex = [rehypeKatex, { errorColor: "var(--color-muted-foreground)" }];
-const hardenOptions = [
-  harden,
-  {
-    allowedImagePrefixes: ["*"],
-    allowedLinkPrefixes: ["*"],
-    allowedProtocols: ["*"],
-    defaultOrigin: undefined,
-    allowDataImages: true,
-  },
-];
-
-export const rehypePlugins = [rehypeRaw, katex, rehypeSanitize, hardenOptions];
-
-/** What runs on each math element of a `math` tree. */
-export const mathPlugins = [katex, rehypeSanitize, hardenOptions];
-
-export const processor = unified()
-  .use(remarkParse)
-  .use(remarkPlugins)
-  .use(remarkRehype, { allowDangerousHtml: true })
-  .use(rehypePlugins)
-  .freeze();
-
-/** What JavaScript still runs on rill's tree for each `kind`. */
-export const tails = {
-  complete: null,
-  raw: unified().use(rehypePlugins).freeze(),
-  // Everything but the math elements is final: render each one on its own.
-  math: unified()
-    .use(rehypeMathFragments(mathPlugins))
-    .freeze(),
+/** Streamdown's `plugins` prop for each configuration the harness checks. */
+export const CONFIGS = {
+  default: {},
+  math: { math },
+  cjk: { cjk },
+  "math+cjk": { math, cjk },
 };
+
+/** The remark and rehype plugin lists `<Streamdown plugins={plugins}>` runs. */
+export function streamdownPlugins(plugins = {}) {
+  return {
+    remarkPlugins: [
+      ...(plugins.cjk?.remarkPluginsBefore ?? []),
+      ...Object.values(defaultRemarkPlugins),
+      ...(plugins.cjk?.remarkPluginsAfter ?? []),
+      ...(plugins.math ? [plugins.math.remarkPlugin] : []),
+    ],
+    rehypePlugins: [
+      ...Object.values(defaultRehypePlugins),
+      ...(plugins.math ? [plugins.math.rehypePlugin] : []),
+    ],
+  };
+}
+
+/** Streamdown's processor and rill's JavaScript tails for configuration `name`. */
+export function pipeline(name = "default") {
+  const plugins = CONFIGS[name];
+  if (!plugins) throw new Error(`Unknown configuration ${name}: ${Object.keys(CONFIGS)}`);
+  const { remarkPlugins, rehypePlugins } = streamdownPlugins(plugins);
+  const processor = unified()
+    .use(remarkParse)
+    .use(remarkPlugins)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(rehypePlugins)
+    .freeze();
+  /** What rill reports for this configuration's syntax (`stdio` flags). */
+  const flags = [...(plugins.math ? ["--math"] : []), ...(plugins.cjk ? ["--cjk"] : [])];
+  /** What JavaScript still runs on rill's tree for each `kind`. */
+  const tails = {
+    complete: null,
+    raw: unified().use(rehypePlugins).freeze(),
+    // Everything but the math elements is final: KaTeX renders each one on its own.
+    ...(plugins.math && {
+      math: unified().use(rehypeMathFragments([plugins.math.rehypePlugin])).freeze(),
+    }),
+  };
+  return { plugins, processor, tails, flags, mathPlugins: plugins.math ? [plugins.math.rehypePlugin] : [] };
+}
+
+export const { processor, tails } = pipeline("default");
