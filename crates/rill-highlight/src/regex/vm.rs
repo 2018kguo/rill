@@ -72,6 +72,23 @@ fn step(input: &[u16], pos: usize, back: bool) -> Option<(u32, usize)> {
     if back { prev_char(input, pos) } else { next_char(input, pos) }
 }
 
+fn contains_literal(haystack: &[u16], literal: &[(u16, u16)]) -> bool {
+    let Some(&(a, b)) = literal.first() else { return true };
+    if haystack.len() < literal.len() {
+        return false;
+    }
+    let last_start = haystack.len() - literal.len();
+    let mut i = 0;
+    while i <= last_start {
+        let unit = haystack[i];
+        if (unit == a || unit == b) && literal[1..].iter().zip(&haystack[i + 1..]).all(|(&(x, y), &u)| u == x || u == y) {
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Whether the code unit at `pos` can start what follows a repeat.
 #[inline]
 fn may_follow(follow: &super::compile::FirstUnits, input: &[u16], pos: usize) -> bool {
@@ -105,6 +122,11 @@ impl Matcher {
         // A start inside a surrogate pair moves back to the pair, as V8 does.
         if pos > 0 && pos < len && is_trail(input[pos]) && is_lead(input[pos - 1]) {
             pos -= 1;
+        }
+        if let Some(literal) = &program.required_literal {
+            if !contains_literal(&input[pos..], literal) {
+                return false;
+            }
         }
         if sticky {
             return self.attempt(program, input, pos, captures);

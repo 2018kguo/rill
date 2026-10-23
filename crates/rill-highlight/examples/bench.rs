@@ -25,12 +25,12 @@ fn main() {
     let execs_before = highlighter.regex_execs();
     highlighter.tokenize(&code, None).unwrap();
     let execs = highlighter.regex_execs() - execs_before;
-    let bench = Instant::now();
-    let mut runs = 0;
-    while bench.elapsed().as_millis() < 500 || runs < 3 {
+    // The minimum of several runs: the machine may be shared.
+    let mut warm_ms = f64::MAX;
+    for _ in 0..9 {
+        let bench = Instant::now();
         std::hint::black_box(highlighter.tokenize(&code, None).unwrap());
-        runs += 1;
+        warm_ms = warm_ms.min(bench.elapsed().as_secs_f64() * 1000.0);
     }
-    let warm_ms = bench.elapsed().as_secs_f64() * 1000.0 / f64::from(runs);
     println!("{}", json!({ "lang": lang, "loadMs": load_ms, "coldMs": cold_ms, "warmMs": warm_ms, "execs": execs }));
 }

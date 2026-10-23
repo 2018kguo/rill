@@ -101,13 +101,13 @@ fn main() {
                 println!("  {:8.2} ms {:7} calls  #{i} {:.160}", per_regex[i].0, per_regex[i].1 / 3, trace["regexes"][i]["pattern"].as_str().unwrap());
             }
         }
-        let start = Instant::now();
-        let mut iterations = 0;
-        while start.elapsed().as_millis() < 300 || iterations < 2 {
+        // The minimum of several runs: the machine may be shared.
+        let mut ms = f64::MAX;
+        for _ in 0..7 {
+            let start = Instant::now();
             run(false);
-            iterations += 1;
+            ms = ms.min(start.elapsed().as_secs_f64() * 1000.0);
         }
-        let ms = start.elapsed().as_secs_f64() * 1000.0 / f64::from(iterations);
         total_ms += ms;
         total_bad += bad;
         total_calls += calls.len() / 3;

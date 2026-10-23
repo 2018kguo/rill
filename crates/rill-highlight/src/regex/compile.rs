@@ -71,6 +71,9 @@ pub struct Program {
     pub group_count: u32,
     /// Code units that can begin a match, when the pattern cannot match empty.
     pub first_units: Option<FirstUnits>,
+    /// Code units every match must contain at or after its start (each element
+    /// one of two units), checked before searching.
+    pub required_literal: Option<Vec<(u16, u16)>>,
     /// Every match starts at input start.
     pub anchored_start: bool,
 }
@@ -157,6 +160,7 @@ pub fn compile(node: Node, group_count: u32) -> Program {
         loop_count: compiler.loop_count,
         group_count,
         first_units,
+        required_literal: required_literals(node).into_iter().max_by_key(Vec::len),
         anchored_start: anchored_start(node),
     }
 }
@@ -510,6 +514,56 @@ fn continuation(items: &[Node], outer: Option<FirstUnits>) -> Option<FirstUnits>
             first.union(&continuation(rest, outer)?);
             Some(first)
         }
+    }
+}
+
+/// A character node as a literal element: one BMP unit, or two (case variants).
+fn literal_element(node: &Node) -> Option<(u16, u16)> {
+    let Node::Set(set) = node else { return None };
+    let is_unit = |c: u32| c < 0xD800 || (0xE000..0x10000).contains(&c);
+    if let Some(c) = set.as_single() {
+        return is_unit(c).then_some((c as u16, c as u16));
+    }
+    if set.len() == 2 {
+        let members: Vec<u32> = set.ranges().iter().flat_map(|&(lo, hi)| lo..=hi).collect();
+        if members.iter().all(|&c| is_unit(c)) {
+            return Some((members[0] as u16, members[1] as u16));
+        }
+    }
+    None
+}
+
+/// Literal runs that every match must contain at or after the match start
+/// (lookahead text included, lookbehinds and alternations ignored).
+fn required_literals(node: &Node) -> Vec<Vec<(u16, u16)>> {
+    match node {
+        Node::Seq(items) => {
+            let mut literals = Vec::new();
+            let mut run = Vec::new();
+            for item in items {
+                if let Some(element) = literal_element(item) {
+                    run.push(element);
+                    continue;
+                }
+                if matches!(item, Node::Assert(_)) {
+                    continue;
+                }
+                if !run.is_empty() {
+                    literals.push(std::mem::take(&mut run));
+                }
+                literals.extend(required_literals(item));
+            }
+            if !run.is_empty() {
+                literals.push(run);
+            }
+            literals
+        }
+        Node::Set(_) => literal_element(node).map(|e| vec![vec![e]]).unwrap_or_default(),
+        Node::Capture { body, .. } | Node::Atomic(body) => required_literals(body),
+        Node::Repeat { min, body, .. } if *min > 0 => required_literals(body),
+        Node::Look { behind: false, negate: false, body } => required_literals(body),
+        Node::Alt(items) if items.len() == 1 => required_literals(&items[0]),
+        _ => Vec::new(),
     }
 }
 
