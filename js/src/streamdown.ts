@@ -48,6 +48,7 @@ import {
 } from "streamdown";
 import type { Pluggable } from "unified";
 
+import { parseMarkdownIntoBlocks } from "./blocks.ts";
 import { CodeSegment } from "./code-block.ts";
 import type { HastNode, HastReader, Rill } from "./core.ts";
 import { highlighterFor, type Highlighter } from "./highlight.ts";
@@ -64,6 +65,8 @@ export {
   type RillPluginsOptions,
 } from "./plugins.ts";
 export { useRill } from "./react.ts";
+// Streamdown's block splitter, without its whole-text tests on every streaming update.
+export { parseMarkdownIntoBlocks } from "./blocks.ts";
 export {
   highlightCounts,
   pendingHighlights,
@@ -168,6 +171,8 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
       ...props,
       ...(plugins ? { plugins: streamdownPlugins(plugins, settings.highlight) } : {}),
       ...(healed === null ? {} : { children: healed, parseIncompleteMarkdown: false }),
+      // The same blocks, without Streamdown's whole-text tests on every update.
+      parseMarkdownIntoBlocksFn: props.parseMarkdownIntoBlocksFn ?? parseMarkdownIntoBlocks,
       BlockComponent: props.BlockComponent
         ? healed === null
           ? props.BlockComponent

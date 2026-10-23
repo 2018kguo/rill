@@ -4,6 +4,8 @@
 // with linkSafety off. Run after dom-diff.mjs --build (it serves conformance/dom/dist).
 //
 //   node conformance/dom/interactions.mjs [--candidate rill|self]
+//
+// `--candidate self` runs the same checks on Streamdown itself, which must pass too.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -66,7 +68,8 @@ await check("the code block's copy button copies its code", async (page) => {
   await mount(page);
   await page.click('[data-streamdown="code-block-copy-button"]');
   await page.waitForSelector("output[aria-live]");
-  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "const answer = 42;\nconsole.log(answer);");
+  // The fence's text, with its final newline, as Streamdown's button copies it.
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "const answer = 42;\nconsole.log(answer);\n");
 });
 
 await check("the code block's download button saves its code", async (page) => {
@@ -75,7 +78,7 @@ await check("the code block's download button saves its code", async (page) => {
   await page.click('[data-streamdown="code-block-download-button"]');
   const file = await download;
   assert.match(file.suggestedFilename(), /\.js$/);
-  assert.equal(await readFile(await file.path(), "utf8"), "const answer = 42;\nconsole.log(answer);");
+  assert.equal(await readFile(await file.path(), "utf8"), "const answer = 42;\nconsole.log(answer);\n");
 });
 
 await check("the table's copy menu copies it as CSV", async (page) => {

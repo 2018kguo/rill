@@ -89,4 +89,6 @@ jobs:
           node conformance/dom/dom-diff.mjs --config code --stream every=60,short=1
           bun conformance/dom/ssr.tsx --config default
           bun conformance/dom/ssr.tsx --config code
+          node conformance/dom/interactions.mjs --candidate self
           node conformance/dom/interactions.mjs
+          node conformance/blocks.mjs --fuzz 3000
