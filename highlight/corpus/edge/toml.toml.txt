@@ -1,0 +1,10 @@
+[package]
+name = "x"
+version = "0.1.0"
+[[bin]]
+path = "src/main.rs"
+dates = 1979-05-27T07:32:00Z
+inline = { a = 1, "b.c" = 'd' }
+multi = """
+lines
+"""

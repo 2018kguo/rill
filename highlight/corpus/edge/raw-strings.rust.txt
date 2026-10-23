@@ -1,0 +1,7 @@
+let s = r#"raw "quoted" string"#;
+let b = br"bytes";
+let c = 'c'; let lt: &'static str = "x";
+#[derive(Debug, Clone)]
+struct S<'a, T: Trait + 'a> { r: &'a T }
+macro_rules! m { ($x:expr) => { $x + 1 }; }
+fn f() -> impl Fn(u32) -> u32 { |x| x << 2 }

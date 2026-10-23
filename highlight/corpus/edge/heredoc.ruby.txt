@@ -1,0 +1,10 @@
+sql = <<~SQL
+  SELECT * FROM users WHERE id = #{id}
+SQL
+text = <<-EOS
+  indented
+  EOS
+plain = <<EOF
+raw #{not_interpolated}
+EOF
+puts %w[a b c].map(&:upcase)

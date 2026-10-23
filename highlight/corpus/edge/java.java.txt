@@ -1,0 +1,7 @@
+@Override
+public <T extends Comparable<T>> T max(List<? extends T> xs) {
+    var text = """
+        text block
+        """;
+    return xs.stream().max(Comparator.naturalOrder()).orElseThrow();
+}

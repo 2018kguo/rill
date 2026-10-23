@@ -7,3 +7,6 @@ pub mod shiki;
 pub mod textmate;
 
 pub use shiki::{Highlighter, Token, Tokenized};
+
+#[cfg(feature = "wasm-exports")]
+pub mod wasm;

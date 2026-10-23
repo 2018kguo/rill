@@ -1,0 +1,5 @@
+type Query { user(id: ID!): User @deprecated(reason: "no") }
+fragment F on User { id ...on Admin { level } }
+query Q($id: ID! = "1") { user(id: $id) { ...F } }
+"""block description"""
+scalar Date

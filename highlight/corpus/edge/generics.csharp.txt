@@ -1,0 +1,5 @@
+public async Task<Dictionary<string, List<int>>> GetAsync<T>(T input) where T : class
+{
+    var x = input is string s ? $"interp {s} {{x}}" : @"verbatim \ path";
+    return await Task.FromResult(new Dictionary<string, List<int>>());
+}

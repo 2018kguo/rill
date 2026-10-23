@@ -1,0 +1,11 @@
+name = "x"
+print(f"{name!r:>10} {value:.2f} {{literal}} {obj['key']}")
+print(rf"\d+{name}", b"bytes", u"unicode")
+async def main():
+    async with session.get(url) as r:
+        data = await r.json()
+    return [x async for x in gen() if x]
+@decorator(arg=1)
+class C(Base, metaclass=Meta):
+    x: int = 0
+    def __init__(self): ...

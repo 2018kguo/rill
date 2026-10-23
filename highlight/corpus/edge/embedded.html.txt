@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <style>
+    body { color: #333; margin: 0 auto; }
+    .card > h1::before { content: "★"; }
+  </style>
+  <script type="module">
+    import { x } from './x.js';
+    const el = document.querySelector('#app');
+    el.innerHTML = `<p class="${x}">hi</p>`;
+  </script>
+</head>
+<body onload="init()">
+  <!-- comment -->
+  <a href="https://example.com?a=1&amp;b=2">link</a>
+  <svg viewBox="0 0 10 10"><path d="M0 0L10 10"/></svg>
+</body>
+</html>

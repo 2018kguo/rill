@@ -1,0 +1,10 @@
+diff --git a/x.py b/x.py
+index 83db48f..bf269f4 100644
+--- a/x.py
++++ b/x.py
+@@ -1,3 +1,4 @@
+ import os
+-print("old")
++print("new")
++print("added")
+\ No newline at end of file

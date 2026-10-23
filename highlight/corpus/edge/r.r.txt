@@ -1,0 +1,4 @@
+library(dplyr)
+df %>% filter(x > 1) |> mutate(y = x * 2)
+f <- function(x, ...) { if (is.na(x)) NA_real_ else x^2 }
+`weird name` <- 1L; s <- r"(raw)"

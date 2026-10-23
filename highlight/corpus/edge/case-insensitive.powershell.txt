@@ -1,0 +1,5 @@
+$True; $FALSE; $null
+FUNCTION Get-Thing { PARAM([string]$Name) Write-Host "Hi $Name" }
+<# .SYNOPSIS
+   block comment #>
+if ($x -EQ 1 -and $y -ne 2) { 'ok' } ELSE { "no" }
