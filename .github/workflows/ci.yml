@@ -38,6 +38,8 @@ jobs:
           node conformance/diff.mjs
           # Footnotes cited from inside other footnotes, every order up to five pieces.
           node conformance/diff.mjs --pieces '["[^a]","[^b]","[^c]","\n\n[^a]: ","\n\n[^b]: ","\n\n[^c]: ","x"]' --length 5
+          # Line endings after a failed code run, inside containers: only plain text holds one.
+          node conformance/diff.mjs --pieces '["1. ","> ","[`a`][r]","![`a`](y)","<a b=\"`\">","<http://a`b>","www.a.com/`x","`","x\n   ","\n> x\n> ","[x](y)","\n\n[r]: /u"]' --length 4
       - name: JavaScript package
         working-directory: js
         run: |
