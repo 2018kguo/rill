@@ -50,7 +50,15 @@ pub enum Error {
     LeafParent,
     /// NUL must be replaced (see [`without_nul`]) before parsing.
     Nul,
+    /// Nodes nested deeper than [`MAX_DEPTH`]: the stages after parsing recurse once
+    /// per level, and WebAssembly's stack is small (and a trap leaves the instance
+    /// unusable), so such a document is left to JavaScript.
+    TooDeep,
 }
+
+/// How deep [`parse_arena`] nests nodes. Markdown people write nests a dozen levels at
+/// most; 3,000 nested quotes overflow the WebAssembly stack.
+pub const MAX_DEPTH: usize = 256;
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -58,6 +66,7 @@ impl std::fmt::Display for Error {
             Error::Unbalanced => "unbalanced parser events",
             Error::LeafParent => "child event inside a leaf node",
             Error::Nul => "source contains NUL",
+            Error::TooDeep => "nodes nested too deep",
         })
     }
 }
@@ -727,6 +736,9 @@ impl<'s> Builder<'s> {
     fn open(&mut self, kind: NodeKind<'s>, start: usize, end: usize) -> Result<(), Error> {
         self.flush_text()?;
         let parent = self.parent()?;
+        if self.stack.len() > MAX_DEPTH {
+            return Err(Error::TooDeep);
+        }
         let ix = self.tree.push(kind, At::None);
         self.tree.append(parent, ix);
         self.stack.push(Frame {

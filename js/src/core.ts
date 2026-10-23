@@ -115,6 +115,31 @@ export function createRill<A extends unknown[]>(
     middle(): string;
   }
 ): Rill<A> {
+  // A trap (a stack overflow, a bug) leaves the instance unusable: its stack pointer
+  // and allocator stay wherever the trap left them. From then on nothing calls into it,
+  // and Streamdown renders everything in JavaScript.
+  let trapped = false;
+  const guard = <F extends (...args: never[]) => unknown>(run: F): F =>
+    ((...args: never[]) => {
+      if (trapped) throw new Error("rill: the WebAssembly trapped");
+      try {
+        return run(...args);
+      } catch (error) {
+        if (error instanceof WebAssembly.RuntimeError || error instanceof RangeError) {
+          trapped = true;
+        }
+        throw error;
+      }
+    }) as F;
+  renderHast = guard(renderHast);
+  if (renderMarkup) renderMarkup = guard(renderMarkup);
+  if (definitions) {
+    definitions = {
+      ranges: guard(definitions.ranges),
+      splitsAt: guard(definitions.splitsAt),
+    };
+  }
+  if (remend) remend = { stream: guard(remend.stream), middle: guard(remend.middle) };
   // The text remend last healed in Rust, which keeps it (a text that extends it sends
   // only what was appended), and what it healed it into (an update sends only the
   // healed text that changed).
@@ -204,7 +229,12 @@ export function createRill<A extends unknown[]>(
       ? {
           definitions: (source: string, syntax: Syntax) => {
             if (!source.isWellFormed() || source.includes("\0")) return null;
-            const flat = definitions.ranges(source, syntax.math === true, syntax.cjk === true);
+            let flat: Uint32Array;
+            try {
+              flat = definitions.ranges(source, syntax.math === true, syntax.cjk === true);
+            } catch {
+              return null;
+            }
             if (flat.length === 1) return null;
             const ranges: [number, number][] = [];
             for (let index = 0; index < flat.length; index += 2) {
@@ -212,10 +242,14 @@ export function createRill<A extends unknown[]>(
             }
             return ranges;
           },
-          splitsAt: (source: string, syntax: Syntax, at: number) =>
-            source.isWellFormed() &&
-            !source.includes("\0") &&
-            definitions.splitsAt(source, syntax.math === true, syntax.cjk === true, at),
+          splitsAt: (source: string, syntax: Syntax, at: number) => {
+            if (!source.isWellFormed() || source.includes("\0")) return false;
+            try {
+              return definitions.splitsAt(source, syntax.math === true, syntax.cjk === true, at);
+            } catch {
+              return false;
+            }
+          },
         }
       : {}),
     ...(heal

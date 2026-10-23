@@ -862,15 +862,20 @@ impl<'input> Parser<'input> {
     }
 
     /// The first `*`, `_`, or `~` delimiter run under `node` and its siblings, in source order.
-    fn first_delimiter(&self, mut node: Option<TreeIndex>) -> Option<u8> {
-        while let Some(ix) = node {
+    fn first_delimiter(&self, node: Option<TreeIndex>) -> Option<u8> {
+        // Depth first with a stack of the siblings still to visit: links and images
+        // nest as deep as the text's brackets.
+        let mut pending = vec![node];
+        while let Some(next) = pending.last_mut() {
+            let Some(ix) = *next else {
+                pending.pop();
+                continue;
+            };
             if let ItemBody::MaybeEmphasis(..) = self.tree[ix].item.body {
                 return Some(self.text.as_bytes()[self.tree[ix].item.start]);
             }
-            if let Some(c) = self.first_delimiter(self.tree[ix].child) {
-                return Some(c);
-            }
-            node = self.tree[ix].next;
+            *next = self.tree[ix].next;
+            pending.push(self.tree[ix].child);
         }
         None
     }

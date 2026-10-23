@@ -3057,6 +3057,28 @@ impl Built<'_> {
     }
 }
 
+/// Whether elements under `root` nest more than `limit` deep (see
+/// [`mdast::MAX_DEPTH`]: the stages after this one recurse per level).
+fn nested_deeper(tree: &Tree<'_>, root: NodeId, limit: usize) -> bool {
+    // The next sibling to visit at each level.
+    let mut pending = vec![tree.nodes[root as usize].first];
+    while let Some(&next) = pending.last() {
+        if next == NIL {
+            pending.pop();
+            continue;
+        }
+        let node = &tree.nodes[next as usize];
+        *pending.last_mut().expect("a level") = node.next;
+        if node.first != NIL {
+            if pending.len() >= limit {
+                return true;
+            }
+            pending.push(node.first);
+        }
+    }
+    false
+}
+
 pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
     let mut mdast = mdast::parse_arena(source, options.syntax())?;
     if options.cjk {
@@ -3071,6 +3093,10 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         raw_boundary,
         math,
     } = convert(&mdast, options.math, options.close_open_raw);
+    // Raw tags paired into elements nest as deep as the text has them.
+    if nested_deeper(&tree, root, mdast::MAX_DEPTH) {
+        return Err(Error::TooDeep);
+    }
     // HAST owns or borrows the source for every string, so only the positions stay.
     let mdast::Tree { points, .. } = mdast;
     if raw_boundary {
