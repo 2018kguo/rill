@@ -1,0 +1,5 @@
+//! Shiki's syntax highlighting in Rust: TextMate grammars run the way
+//! `@shikijs/vscode-textmate` runs them on Shiki's JavaScript regex engine, with
+//! the patterns oniguruma-to-es translates, so the tokens are identical.
+
+pub mod regex;

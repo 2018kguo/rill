@@ -1,0 +1,9 @@
+{
+  "name": "rill-highlight-harness",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@streamdown/code": "2.0.0",
+    "shiki": "4.5.0"
+  }
+}
