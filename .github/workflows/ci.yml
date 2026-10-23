@@ -37,6 +37,8 @@ jobs:
         with:
           repository: 2018kguo/rill-highlight
           path: rill-highlight
+          # rill-highlight is private until its first release; drop the secret then.
+          token: ${{ secrets.RILL_HIGHLIGHT_TOKEN || github.token }}
       - name: rill-highlight
         run: |
           (cd rill-highlight/js && npm ci --no-audit --no-fund && npm run build)
