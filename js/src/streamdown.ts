@@ -70,6 +70,7 @@ export { parseMarkdownIntoBlocks } from "./blocks.ts";
 export {
   highlightCounts,
   pendingHighlights,
+  preloadHighlighting,
   setHighlightWasm,
   setRillHighlight,
 } from "./highlight.ts";
@@ -91,6 +92,7 @@ type Settings = {
 };
 
 const RillContext = createContext<Settings | null>(null);
+
 
 /** How many block renders rill took and how many went to Streamdown's own Block
  * (diagnostics, for tests and benchmarks). */
@@ -726,13 +728,20 @@ function renderChunks(
     // The root's children join with a line ending, which merges with text beside it
     // (parse5 merges adjacent text: newlines it moves out of a table), but not across a
     // removed node (it was still there when parse5 ran).
+    // At the root, text is only the line endings between nodes; one that a piece starts
+    // (or ends) with sits after (or before) a node of its own that sanitize removed (an
+    // HTML comment, a wrapper tag's start or end), which keeps it apart.
+    const opens = /^\s*</.test(chunk);
     let first = 0;
     if (slots > 0) {
       const previous = out.length - 1;
       const head = piece.nodes[0];
-      if (typeof head === "string") {
+      if (typeof head === "string" && !opens) {
         out.push(`\n${head}`);
         first = 1;
+      } else if (typeof head === "string") {
+        if (!barrier && typeof out[previous] === "string") out[previous] = `${out[previous]}\n`;
+        else out.push("\n");
       } else if (!barrier && typeof out[previous] === "string") {
         out[previous] = `${out[previous]}\n`;
       } else {
@@ -740,7 +749,9 @@ function renderChunks(
       }
     }
     slots += 1;
-    barrier = piece.nodes.length === 0;
+    barrier =
+      piece.nodes.length === 0 ||
+      (typeof piece.nodes.at(-1) === "string" && />\s*$/.test(chunk));
     for (let node = first; node < piece.nodes.length; node += 1) out.push(piece.nodes[node]);
   }
   pieces.rendered = rendered;
