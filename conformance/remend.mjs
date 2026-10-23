@@ -8,10 +8,13 @@ import { join } from "node:path";
 
 import remend from "remend";
 
-import { remend as rillRemend, initSync } from "../js/wasm/rill.js";
+import { initRill } from "../js/src/index.ts";
 
 const repo = new URL("..", import.meta.url).pathname;
-initSync({ module: readFileSync(join(repo, "js/wasm/rill_bg.wasm")) });
+// The package's remend: Rust keeps the text, so a stream of prefixes sends only what
+// each one appends.
+const rill = await initRill(readFileSync(join(repo, "js/wasm/rill_bg.wasm")));
+const rillRemend = (text) => rill.remend(text);
 const args = process.argv.slice(2);
 const option = (name) => {
   const index = args.indexOf(name);
@@ -70,7 +73,8 @@ const check = (text) => {
 
 for (const document of documents) {
   check(document);
-  // A streamed answer: every prefix (about 1500 per document for the long ones).
+  // A streamed answer: prefixes in order, as the package sees them (about 1500 per
+  // document for the long ones).
   const step = Math.max(1, Math.floor(document.length / 1500));
   for (let end = 1; end < document.length; end += step) check(document.slice(0, end));
 }

@@ -166,6 +166,7 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
     { value: settings },
     createElement(StreamdownComponent, {
       ...props,
+      ...(plugins ? { plugins: streamdownPlugins(plugins, settings.highlight) } : {}),
       ...(healed === null ? {} : { children: healed, parseIncompleteMarkdown: false }),
       BlockComponent: props.BlockComponent
         ? healed === null
@@ -176,6 +177,30 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
   );
 }, sameStreamdownProps as never);
 (Streamdown as { displayName?: string }).displayName = "Streamdown";
+
+const codePlugins = new WeakMap<object, PluginConfig>();
+
+/**
+ * `plugins` with rill's highlighting in its code plugin, so the blocks Streamdown's own
+ * Block renders (raw HTML) highlight as rill's do: the same tokens, off the main thread.
+ * Its other plugins stay the same objects (rill compares them).
+ */
+function streamdownPlugins(
+  plugins: PluginConfig,
+  highlighter: Highlighter | undefined
+): PluginConfig {
+  const code = plugins.code;
+  if (!(code && highlighter)) return plugins;
+  let wrapped = codePlugins.get(plugins);
+  if (!wrapped) {
+    wrapped = {
+      ...plugins,
+      code: { ...code, highlight: (options, callback) => highlighter.highlight(options, callback ?? (() => {})) },
+    };
+    codePlugins.set(plugins, wrapped);
+  }
+  return wrapped;
+}
 
 const healingBlocks = new WeakMap<object, ComponentType<BlockProps>>();
 

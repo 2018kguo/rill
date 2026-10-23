@@ -15,7 +15,8 @@ type Glue = {
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
   renderHast(source: string, math: boolean, cjk: boolean): RenderedHast;
   renderMarkup: RenderMarkup;
-  remend(text: string): string;
+  remendStream(appended: string, reset: boolean): Uint32Array;
+  remendMiddle(): string;
 };
 
 const glue = (): Promise<Glue> => import("../wasm/rill.js");
@@ -30,7 +31,10 @@ export function loadedRill(): Rill | null {
 
 function ready(bindings: Glue): Rill {
   if (!loaded) {
-    loaded = createRill(bindings.renderHast, bindings.renderMarkup, bindings.remend);
+    loaded = createRill(bindings.renderHast, bindings.renderMarkup, {
+      stream: bindings.remendStream,
+      middle: bindings.remendMiddle,
+    });
     warmUp(loaded);
   }
   return loaded;

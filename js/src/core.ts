@@ -92,8 +92,32 @@ export function createRill<A extends unknown[]>(
     ...args: A
   ) => RenderedHast,
   renderMarkup?: RenderMarkup,
-  remend?: (text: string) => string
+  remend?: {
+    stream(appended: string, reset: boolean): Uint32Array;
+    middle(): string;
+  }
 ): Rill<A> {
+  // The text remend last healed in Rust, which keeps it: a text that extends it sends
+  // only what was appended.
+  let last: string | null = null;
+  const heal = remend
+    ? (text: string) => {
+        const appended =
+          last !== null && text.startsWith(last) ? text.slice(last.length) : null;
+        // Unknown until this call returns (it may throw).
+        last = null;
+        const [prefix = 0, suffix = 0, middle = 0] = remend.stream(
+          appended ?? text,
+          appended === null
+        );
+        last = text;
+        return (
+          text.slice(0, prefix) +
+          (middle > 0 ? remend.middle() : "") +
+          text.slice(text.length - suffix)
+        );
+      }
+    : undefined;
   const markup = renderMarkup
     ? (source: string, syntax: Syntax, options: MarkupOptions) => {
         // Lone surrogates and NUL take the exact path (Streamdown's own Block).
@@ -120,8 +144,21 @@ export function createRill<A extends unknown[]>(
     : undefined;
   return {
     ...(markup ? { markup } : {}),
-    ...(remend
-      ? { remend: (text: string) => (text.isWellFormed() ? remend(text) : null) }
+    ...(heal
+      ? {
+          remend: (text: string) => {
+            if (!text.isWellFormed()) {
+              last = null;
+              return null;
+            }
+            try {
+              return heal(text);
+            } catch {
+              last = null;
+              return null;
+            }
+          },
+        }
       : {}),
     render(raw, syntax = {}, ...args) {
       const encoded = encodeLoneSurrogates(raw);

@@ -16,6 +16,7 @@ import {
   highlightCounts,
   pendingHighlights,
   setHighlightWasm,
+  setRillHighlight,
   Streamdown as RillStreamdown,
 } from "../../js/src/streamdown.ts";
 import { initRill } from "../../js/src/index.ts";
@@ -73,6 +74,8 @@ const sideProps = (component: unknown): Record<string, unknown> =>
 
 await initRill(await (await fetch("rill_bg.wasm")).arrayBuffer());
 setHighlightWasm(new URL("rill_highlight.wasm", location.href));
+// `?shiki`: the stock plugin highlights (Shiki on the main thread), for comparisons.
+if (params.has("shiki")) setRillHighlight(false);
 
 type Component = ComponentType<Record<string, unknown>>;
 const candidates: Record<string, Component> = {

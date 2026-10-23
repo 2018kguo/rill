@@ -34,11 +34,15 @@ export function decodeHast(
  * embeds HAST in its own program) the strings and numbers around one. */
 export class HastReader {
   at = 0;
-  constructor(
-    readonly ops: Uint32Array,
-    readonly table: string,
-    readonly source: string
-  ) {}
+  readonly ops: Uint32Array;
+  readonly table: string;
+  readonly source: string;
+
+  constructor(ops: Uint32Array, table: string, source: string) {
+    this.ops = ops;
+    this.table = table;
+    this.source = source;
+  }
 
   next(): number {
     const op = this.ops[this.at];

@@ -109,6 +109,34 @@ pub mod wasm {
             crate::remend::remend(text)
         }
 
+        thread_local! {
+            static STREAM: std::cell::RefCell<crate::remend::Stream> =
+                std::cell::RefCell::default();
+        }
+
+        /// remend on a streaming text (see [`crate::remend::Stream`]): `appended` is what
+        /// was added since the last call (or the whole text, with `reset`). Returns
+        /// `[prefix, suffix, middle length]` and keeps the middle for [`remend_middle`].
+        #[wasm_bindgen(js_name = remendStream)]
+        pub fn remend_stream(appended: &str, reset: bool) -> Vec<u32> {
+            STREAM.with_borrow_mut(|stream| {
+                let healing = stream.heal(appended, reset);
+                let middle = healing.middle.len() as u32;
+                MIDDLE.set(healing.middle);
+                vec![healing.prefix as u32, healing.suffix as u32, middle]
+            })
+        }
+
+        thread_local! {
+            static MIDDLE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+        }
+
+        /// The middle of the last [`remend_stream`] edit.
+        #[wasm_bindgen(js_name = remendMiddle)]
+        pub fn remend_middle() -> String {
+            MIDDLE.take()
+        }
+
         /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
         /// `linkSafety.enabled`, bit 1 server rendering, bit 2 the streaming spine;
         /// `overrides`: the tag names with components of the page's own,

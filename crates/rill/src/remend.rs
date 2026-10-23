@@ -4,7 +4,8 @@
 //! index, slice and comparison is the same; `conformance/remend.mjs` checks the output
 //! against the package.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
 type Units = Vec<u16>;
 
@@ -41,6 +42,52 @@ pub fn remend(text: &str) -> String {
     String::from_utf16_lossy(&remend_units(units))
 }
 
+/// A healed text as an edit of its input: the input's first `prefix` units, then
+/// `middle`, then its last `suffix` units.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Healing {
+    pub prefix: usize,
+    pub suffix: usize,
+    pub middle: String,
+}
+
+/// remend over a text that streams: it keeps the text, takes what was appended, and
+/// answers with the edit, so only the changes cross a language boundary.
+#[derive(Debug, Default)]
+pub struct Stream {
+    input: Units,
+}
+
+impl Stream {
+    /// Heals the text so far plus `appended` (or, with `reset`, just `appended`).
+    pub fn heal(&mut self, appended: &str, reset: bool) -> Healing {
+        if reset {
+            self.input.clear();
+        }
+        self.input.extend(appended.encode_utf16());
+        let healed = remend_units(self.input.clone());
+        let input = &self.input;
+        let prefix = input
+            .iter()
+            .zip(&healed)
+            .take_while(|(left, right)| left == right)
+            .count();
+        let room = input.len().min(healed.len()) - prefix;
+        let suffix = input
+            .iter()
+            .rev()
+            .zip(healed.iter().rev())
+            .take(room)
+            .take_while(|(left, right)| left == right)
+            .count();
+        Healing {
+            prefix,
+            suffix,
+            middle: String::from_utf16_lossy(&healed[prefix..healed.len() - suffix]),
+        }
+    }
+}
+
 /// [`remend`] on UTF-16 code units.
 pub fn remend_units(text: Units) -> Units {
     if text.is_empty() {
@@ -68,9 +115,12 @@ pub fn remend_units(text: Units) -> Units {
         if index == 4
             && (ends_with(&result, INCOMPLETE_LINK) || ends_with(&result, INCOMPLETE_IMAGE))
         {
+            LAST_SCAN.set(None);
             return result;
         }
     }
+    // `clearScanCache`: no text stays alive between calls.
+    LAST_SCAN.set(None);
     strip_single_trailing_space(result)
 }
 
@@ -103,32 +153,121 @@ fn ends_with(text: &[u16], suffix: &str) -> bool {
 
 /// `text.indexOf(pattern, from)`.
 fn index_of(text: &[u16], pattern: &[u16], from: usize) -> Option<usize> {
+    let (&first, rest) = pattern.split_first()?;
     if pattern.len() > text.len() {
         return None;
     }
-    (from..=text.len() - pattern.len()).find(|&index| text[index..].starts_with(pattern))
+    let last_start = text.len() - pattern.len();
+    let mut at = from;
+    while at <= last_start {
+        let found = find_unit(&text[at..=last_start], first)? + at;
+        if text[found + 1..found + pattern.len()] == *rest {
+            return Some(found);
+        }
+        at = found + 1;
+    }
+    None
 }
 
 fn index_of_unit(text: &[u16], unit: u16, from: usize) -> Option<usize> {
-    text.get(from..)?
-        .iter()
-        .position(|&candidate| candidate == unit)
-        .map(|offset| offset + from)
+    find_unit(text.get(from..)?, unit).map(|offset| offset + from)
+}
+
+/// `text` as its in-memory bytes, for memchr: an ASCII unit `u` is the byte pair
+/// `[u, 0]` at an even offset on little-endian targets.
+#[cfg(target_endian = "little")]
+fn unit_bytes(text: &[u16]) -> &[u8] {
+    // SAFETY: a `u16` slice is `2 * len` initialized bytes, and `u8` has no alignment.
+    unsafe { std::slice::from_raw_parts(text.as_ptr().cast::<u8>(), text.len() * 2) }
+}
+
+/// The first index of `unit` in `text`.
+fn find_unit(text: &[u16], unit: u16) -> Option<usize> {
+    #[cfg(target_endian = "little")]
+    if unit < 0x80 {
+        let bytes = unit_bytes(text);
+        let mut at = 0;
+        while let Some(offset) = memchr::memchr(unit as u8, &bytes[at..]) {
+            let index = at + offset;
+            if index % 2 == 0 && bytes[index + 1] == 0 {
+                return Some(index / 2);
+            }
+            at = index + 1;
+        }
+        return None;
+    }
+    text.iter().position(|&candidate| candidate == unit)
+}
+
+/// The first index of the ASCII unit `first` or `second` in `text`.
+fn find_unit2(text: &[u16], first: u16, second: u16) -> Option<usize> {
+    #[cfg(target_endian = "little")]
+    {
+        let bytes = unit_bytes(text);
+        memchr::memchr2_iter(first as u8, second as u8, bytes)
+            .find(|&index| index % 2 == 0 && bytes[index + 1] == 0)
+            .map(|index| index / 2)
+    }
+    #[cfg(not(target_endian = "little"))]
+    text.iter()
+        .position(|&unit| unit == first || unit == second)
+}
+
+/// Calls `visit` with each index of the ASCII units `first` or `second`, in order.
+fn for_each_unit2(text: &[u16], first: u16, second: u16, mut visit: impl FnMut(usize)) {
+    #[cfg(target_endian = "little")]
+    {
+        let bytes = unit_bytes(text);
+        for index in memchr::memchr2_iter(first as u8, second as u8, bytes) {
+            if index % 2 == 0 && bytes[index + 1] == 0 {
+                visit(index / 2);
+            }
+        }
+    }
+    #[cfg(not(target_endian = "little"))]
+    for (index, &unit) in text.iter().enumerate() {
+        if unit == first || unit == second {
+            visit(index);
+        }
+    }
+}
+
+/// The last index of `unit` in `text`.
+fn rfind_unit(text: &[u16], unit: u16) -> Option<usize> {
+    #[cfg(target_endian = "little")]
+    if unit < 0x80 {
+        let bytes = unit_bytes(text);
+        let mut end = bytes.len();
+        while let Some(index) = memchr::memrchr(unit as u8, &bytes[..end]) {
+            if index % 2 == 0 && bytes[index + 1] == 0 {
+                return Some(index / 2);
+            }
+            end = index;
+        }
+        return None;
+    }
+    text.iter().rposition(|&candidate| candidate == unit)
 }
 
 /// `text.lastIndexOf(pattern, from)`, `from` defaulting to the end.
 fn last_index_of(text: &[u16], pattern: &[u16], from: Option<isize>) -> Option<usize> {
+    let (&first, rest) = pattern.split_first()?;
     if pattern.len() > text.len() {
         return None;
     }
     let limit = text.len() - pattern.len();
-    let from = match from {
+    let mut end = match from {
         Some(from) => usize::try_from(from.max(0)).unwrap_or(0).min(limit),
         None => limit,
-    };
-    (0..=from)
-        .rev()
-        .find(|&index| text[index..].starts_with(pattern))
+    } + 1;
+    while end > 0 {
+        let found = rfind_unit(&text[..end], first)?;
+        if text[found + 1..found + pattern.len()] == *rest {
+            return Some(found);
+        }
+        end = found;
+    }
+    None
 }
 
 /// JavaScript's `\s` (and what `trim` removes).
@@ -259,14 +398,33 @@ struct OpenSpan {
     start: usize,
 }
 
-struct Scan<'t> {
-    text: &'t [u16],
+/// A text's regions (`TextScan` without the text).
+struct ScanData {
     regions: Vec<u8>,
     open_fence: Option<OpenFence>,
     open_span: Option<OpenSpan>,
     math: OnceCell<Vec<u8>>,
-    link_url: OnceCell<Vec<u8>>,
-    html_tag: OnceCell<Vec<u8>>,
+    has_link: OnceCell<bool>,
+    has_less: OnceCell<bool>,
+}
+
+struct Scan<'t> {
+    text: &'t [u16],
+    data: Rc<ScanData>,
+}
+
+impl std::ops::Deref for Scan<'_> {
+    type Target = ScanData;
+
+    fn deref(&self) -> &ScanData {
+        &self.data
+    }
+}
+
+thread_local! {
+    /// scan.ts `getScan`'s single-entry memo: handlers mostly pass the text on as they
+    /// got it, so one scan serves several of them.
+    static LAST_SCAN: RefCell<Option<(Units, Rc<ScanData>)>> = const { RefCell::new(None) };
 }
 
 fn digit(unit: Option<u16>) -> bool {
@@ -542,18 +700,27 @@ fn paint_spans(text: &[u16], regions: &mut [u8]) -> Option<OpenSpan> {
 
 impl<'t> Scan<'t> {
     fn new(text: &'t [u16]) -> Self {
+        let cached = LAST_SCAN.with_borrow(|last| {
+            last.as_ref()
+                .filter(|(units, _)| units.as_slice() == text)
+                .map(|(_, data)| Rc::clone(data))
+        });
+        if let Some(data) = cached {
+            return Scan { text, data };
+        }
         let mut regions = vec![PROSE; text.len()];
         let open_fence = paint_fences(text, &mut regions);
         let open_span = paint_spans(text, &mut regions);
-        Scan {
-            text,
+        let data = Rc::new(ScanData {
             regions,
             open_fence,
             open_span,
             math: OnceCell::new(),
-            link_url: OnceCell::new(),
-            html_tag: OnceCell::new(),
-        }
+            has_link: OnceCell::new(),
+            has_less: OnceCell::new(),
+        });
+        LAST_SCAN.set(Some((text.to_vec(), Rc::clone(&data))));
+        Scan { text, data }
     }
 
     fn region(&self, position: isize) -> Option<u8> {
@@ -596,30 +763,67 @@ impl<'t> Scan<'t> {
         Self::mask_at(mask, self.text, position)
     }
 
+    /// The link URL mask at `position` (`inLinkUrlAt`), replaying the position's line:
+    /// inside a `](` URL with a `)` still to come on the line.
     fn in_link_url(&self, position: isize) -> bool {
-        let mask = self.link_url.get_or_init(|| {
-            let has = self
-                .text
-                .windows(2)
-                .any(|pair| pair[0] == CLOSE_BRACKET && pair[1] == OPEN_PAREN);
-            if has {
-                self.link_url_mask()
-            } else {
-                Vec::new()
+        let text = self.text;
+        let Ok(position) = usize::try_from(position) else {
+            return false;
+        };
+        if position >= text.len()
+            || text[position] == NEWLINE
+            || !*self
+                .has_link
+                .get_or_init(|| index_of(text, &[CLOSE_BRACKET, OPEN_PAREN], 0).is_some())
+        {
+            return false;
+        }
+        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
+        let line_end = index_of_unit(text, NEWLINE, position).unwrap_or(text.len());
+        let mut in_url = false;
+        for i in line_start..position {
+            if self.regions[i] != PROSE {
+                continue;
             }
-        });
-        Self::mask_at(mask, self.text, position)
+            if text[i] == CLOSE_PAREN {
+                in_url = false;
+            } else if text[i] == OPEN_PAREN {
+                in_url = i > 0 && text[i - 1] == CLOSE_BRACKET;
+            }
+        }
+        in_url && (position..line_end).any(|i| text[i] == CLOSE_PAREN && self.regions[i] == PROSE)
     }
 
+    /// The HTML tag mask at `position` (`inHtmlTagAt`). The mask is line by line, so this
+    /// replays the position's line instead of building it.
     fn in_html_tag(&self, position: isize) -> bool {
-        let mask = self.html_tag.get_or_init(|| {
-            if self.text.contains(&LESS) {
-                self.html_tag_mask()
-            } else {
-                Vec::new()
+        let text = self.text;
+        let Ok(position) = usize::try_from(position) else {
+            return false;
+        };
+        if position >= text.len()
+            || text[position] == NEWLINE
+            || !*self
+                .has_less
+                .get_or_init(|| find_unit(text, LESS).is_some())
+        {
+            return false;
+        }
+        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
+        let mut in_tag = false;
+        for i in line_start..position {
+            if self.regions[i] != PROSE {
+                continue;
             }
-        });
-        Self::mask_at(mask, self.text, position)
+            if text[i] == GREATER {
+                in_tag = false;
+            } else if text[i] == LESS {
+                in_tag = text.get(i + 1).is_some_and(|&next| {
+                    (next < 0x80 && (next as u8).is_ascii_alphabetic()) || next == SLASH
+                });
+            }
+        }
+        in_tag
     }
 
     fn math_mask(&self) -> Vec<u8> {
@@ -690,65 +894,6 @@ impl<'t> Scan<'t> {
         mask
     }
 
-    fn link_url_mask(&self) -> Vec<u8> {
-        let text = self.text;
-        let n = text.len();
-        let mut mask = vec![0; n];
-        let mut line_start = 0;
-        while line_start < n {
-            let line_end = index_of_unit(text, NEWLINE, line_start).unwrap_or(n);
-            let mut closer_follows = vec![false; line_end - line_start];
-            let mut seen = false;
-            for i in (line_start..line_end).rev() {
-                if text[i] == CLOSE_PAREN && self.regions[i] == PROSE {
-                    seen = true;
-                }
-                closer_follows[i - line_start] = seen;
-            }
-            let mut in_url = false;
-            for i in line_start..line_end {
-                if in_url && closer_follows[i - line_start] {
-                    mask[i] = 1;
-                }
-                if self.regions[i] != PROSE {
-                    continue;
-                }
-                if text[i] == CLOSE_PAREN {
-                    in_url = false;
-                } else if text[i] == OPEN_PAREN {
-                    in_url = i > 0 && text[i - 1] == CLOSE_BRACKET;
-                }
-            }
-            line_start = line_end + 1;
-        }
-        mask
-    }
-
-    fn html_tag_mask(&self) -> Vec<u8> {
-        let text = self.text;
-        let mut mask = vec![0; text.len()];
-        let mut in_tag = false;
-        for i in 0..text.len() {
-            if text[i] == NEWLINE {
-                in_tag = false;
-                continue;
-            }
-            mask[i] = u8::from(in_tag);
-            if self.regions[i] != PROSE {
-                continue;
-            }
-            if text[i] == GREATER {
-                in_tag = false;
-            } else if text[i] == LESS {
-                in_tag = text.get(i + 1).is_some_and(|&next| {
-                    (next as u8 as u16 == next && (next as u8).is_ascii_alphabetic())
-                        || next == SLASH
-                });
-            }
-        }
-        mask
-    }
-
     /// `countDoublePairs`: `**`, `~~` or `$$` in prose.
     fn count_double_pairs(&self, unit: u16) -> usize {
         let text = self.text;
@@ -788,28 +933,40 @@ fn match_trailing(text: &[u16], delimiter: u16, marker_length: usize, tail: Tail
     let marker_end = last.map_or(text.len() as isize - 1, |last| last as isize);
     let start = usize::try_from((marker_end - marker_length as isize + 1).max(0)).unwrap_or(0);
     let slice = text.get(start..).unwrap_or(&[]);
-    let marker = vec![delimiter; marker_length];
-    for p in 0..slice.len() {
-        if !slice[p..].starts_with(&marker) {
+    let n = slice.len();
+    // `last` is the slice's last delimiter before its final unit, so a match's rest
+    // holds a delimiter only as that final unit: the tests below need no scan. A marker
+    // ending before `last` leaves it in the rest, so the search starts just past it.
+    let before_final = last.map(|last| last - start);
+    let final_delimiter = slice.last() == Some(&delimiter);
+    let first = before_final.map_or(0, |at| (at + 1).saturating_sub(marker_length));
+    for p in first..n {
+        if !slice[p..]
+            .iter()
+            .take(marker_length)
+            .eq(std::iter::repeat_n(&delimiter, marker_length))
+            || p + marker_length > n
+        {
             continue;
         }
-        let rest = &slice[p + marker_length..];
+        let rest_start = p + marker_length;
+        if before_final.is_some_and(|at| at >= rest_start) {
+            continue;
+        }
+        // The rest is `slice[rest_start..]`, with no delimiter except perhaps the final.
+        let rest_len = n - rest_start;
+        let rest_has_final = final_delimiter && rest_len > 0;
         let matched = match tail {
-            Tail::Plain => !rest.contains(&delimiter),
-            Tail::OptionalStar => {
-                let body = rest.strip_suffix(&[STAR]).unwrap_or(rest);
-                !body.contains(&STAR)
-            }
-            Tail::HalfComplete => rest
-                .strip_suffix(&[delimiter])
-                .is_some_and(|body| !body.is_empty() && !body.contains(&delimiter)),
+            Tail::Plain => !rest_has_final,
+            Tail::OptionalStar => true,
+            Tail::HalfComplete => rest_has_final && rest_len >= 2,
         };
         if matched {
-            let content = match tail {
-                Tail::HalfComplete => &rest[..rest.len() - 1],
-                _ => rest,
+            let content_end = match tail {
+                Tail::HalfComplete => n - 1,
+                _ => n,
             };
-            return Some(content.to_vec());
+            return Some(slice[rest_start..content_end].to_vec());
         }
     }
     None
@@ -952,6 +1109,8 @@ fn comparison_operators(text: Units) -> Units {
     };
     let mut scan: Option<Scan<'_>> = None;
     let mut escapes = Vec::new();
+    // Without U+2028 or U+2029, lines end only at `\n` or `\r`, which memchr finds.
+    let separators = text.iter().any(|&unit| matches!(unit, 0x2028 | 0x2029));
     let mut p = 0;
     while p <= text.len() {
         let line_start = p == 0 || line_terminator(text[p - 1]);
@@ -961,8 +1120,17 @@ fn comparison_operators(text: Units) -> Units {
                 escapes.push(greater);
             }
             p = end;
+            continue;
+        }
+        // `^` only matches at line starts: go to the next one.
+        let next = if separators {
+            text[p..].iter().position(|&unit| line_terminator(unit))
         } else {
-            p += 1;
+            find_unit2(&text[p..], NEWLINE, CR)
+        };
+        match next {
+            Some(offset) => p += offset + 1,
+            None => break,
         }
     }
     if escapes.is_empty() {
@@ -1068,18 +1236,22 @@ fn heal_trailing_link_or_image(text: &[u16]) -> Units {
     {
         return result;
     }
-    let mut cursor = last_index_of(text, &[OPEN_BRACKET], None);
-    while let Some(i) = cursor {
+    // The last `[` outside code with no matching `]` (`findMatchingClosingBracket`, which
+    // counts every bracket): one pass pairs them all, instead of a scan per `[`.
+    let mut open = Vec::new();
+    for_each_unit2(text, OPEN_BRACKET, CLOSE_BRACKET, |index| {
+        if text[index] == OPEN_BRACKET {
+            open.push(index);
+        } else {
+            open.pop();
+        }
+    });
+    for &i in open.iter().rev() {
         if !scan.code_at(i as isize)
             && let Some(result) = incomplete_link_text(text, i)
         {
             return result;
         }
-        cursor = if i == 0 {
-            None
-        } else {
-            last_index_of(text, &[OPEN_BRACKET], Some(i as isize - 1))
-        };
     }
     text.to_vec()
 }
@@ -1130,26 +1302,25 @@ fn incomplete_link_text(text: &[u16], i: usize) -> Option<Units> {
 
 /// emphasis-handlers.ts `shouldSkipAsterisk`.
 fn skip_asterisk(scan: &Scan<'_>, index: usize, previous: Option<u16>, next: Option<u16>) -> bool {
-    if previous == Some(BACKSLASH) {
-        return true;
-    }
-    if scan.in_math(index as isize) {
-        return true;
-    }
-    if previous != Some(STAR) && next == Some(STAR) {
+    // `shouldSkipAsterisk` is an or of its tests; the math test, which needs the math
+    // mask, goes last.
+    let skip = if previous == Some(BACKSLASH) {
+        true
+    } else if previous != Some(STAR) && next == Some(STAR) {
         let after = if index + 2 < scan.text.len() {
             Some(scan.text[index + 2])
         } else {
             None
         };
-        return after != Some(STAR);
-    }
-    if previous == Some(STAR) {
-        return true;
-    }
-    let previous_space = previous.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
-    let next_space = next.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
-    previous_space && next_space
+        after != Some(STAR)
+    } else if previous == Some(STAR) {
+        true
+    } else {
+        let previous_space = previous.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
+        let next_space = next.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
+        previous_space && next_space
+    };
+    skip || scan.in_math(index as isize)
 }
 
 fn whitespace_unit(unit: u16) -> bool {
@@ -1193,8 +1364,10 @@ fn count_single_asterisks(scan: &Scan<'_>) -> usize {
 fn count_single_underscores(scan: &Scan<'_>) -> usize {
     let text = scan.text;
     let mut count = 0;
-    for index in 0..text.len() {
-        if text[index] != UNDERSCORE || scan.regions[index] != PROSE {
+    let mut cursor = index_of_unit(text, UNDERSCORE, 0);
+    while let Some(index) = cursor {
+        cursor = index_of_unit(text, UNDERSCORE, index + 1);
+        if scan.regions[index] != PROSE {
             continue;
         }
         let previous = if index > 0 {
@@ -1203,13 +1376,14 @@ fn count_single_underscores(scan: &Scan<'_>) -> usize {
             None
         };
         let next = text.get(index + 1).copied();
+        // An or of `shouldSkipUnderscore`'s tests, the ones needing masks last.
         let skip = previous == Some(BACKSLASH)
-            || scan.in_math(index as isize)
-            || scan.in_link_url(index as isize)
-            || scan.in_html_tag(index as isize)
             || previous == Some(UNDERSCORE)
             || next == Some(UNDERSCORE)
-            || (word_unit(previous) && word_unit(next));
+            || (word_unit(previous) && word_unit(next))
+            || scan.in_math(index as isize)
+            || scan.in_link_url(index as isize)
+            || scan.in_html_tag(index as isize);
         if !skip {
             count += 1;
         }
@@ -1376,8 +1550,7 @@ fn first_single_asterisk(scan: &Scan<'_>) -> Option<usize> {
         let lone = scan.regions[i] == PROSE
             && previous != Some(STAR)
             && next != Some(STAR)
-            && previous != Some(BACKSLASH)
-            && !scan.in_math(i as isize);
+            && previous != Some(BACKSLASH);
         if !lone {
             continue;
         }
@@ -1390,6 +1563,10 @@ fn first_single_asterisk(scan: &Scan<'_>) -> Option<usize> {
             continue;
         }
         if next_space {
+            continue;
+        }
+        // The last of `isLoneProseAsterisk`'s tests, which needs the math mask.
+        if scan.in_math(i as isize) {
             continue;
         }
         return Some(i);
@@ -1427,16 +1604,16 @@ fn first_single_underscore(scan: &Scan<'_>) -> Option<usize> {
         cursor = index_of_unit(text, UNDERSCORE, i + 1);
         let previous = at(text, i as isize - 1);
         let next = text.get(i + 1).copied();
+        // Word-internal underscores are skipped either way; testing them first spares
+        // the masks.
         if scan.regions[i] == PROSE
             && previous != Some(UNDERSCORE)
             && next != Some(UNDERSCORE)
             && previous != Some(BACKSLASH)
+            && !(previous.is_some() && next.is_some() && word_unit(previous) && word_unit(next))
             && !scan.in_math(i as isize)
             && !scan.in_link_url(i as isize)
         {
-            if previous.is_some() && next.is_some() && word_unit(previous) && word_unit(next) {
-                continue;
-            }
             return Some(i);
         }
     }
@@ -1581,4 +1758,25 @@ fn incomplete_block_katex(text: Units) -> Units {
         return appended(text, "\n$$");
     }
     appended(text, "$$")
+}
+
+#[cfg(test)]
+mod whole_timing {
+    #[test]
+    #[ignore = "timing, run by hand: REMEND_DOC=file cargo test --release -p rill remend_time -- --ignored --nocapture"]
+    fn remend_time() {
+        let path = std::env::var("REMEND_DOC").expect("REMEND_DOC");
+        let text: super::Units = std::fs::read_to_string(path)
+            .unwrap()
+            .encode_utf16()
+            .collect();
+        let start = std::time::Instant::now();
+        for _ in 0..std::env::var("REMEND_ROUNDS").map_or(500, |r| r.parse().unwrap()) {
+            super::remend_units(text.clone());
+        }
+        println!(
+            "remend {:>7.1} µs",
+            start.elapsed().as_secs_f64() * 1e6 / 500.0
+        );
+    }
 }
