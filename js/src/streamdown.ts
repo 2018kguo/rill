@@ -518,7 +518,10 @@ export const Block = memo(function Block(props: BlockProps) {
       }
       return reader ? segments(reader, env) : null;
     };
-    const chunks = rill.definitions && rill.splitsAt ? splitDefinitionBlock(content) : null;
+    // A text with link definitions is one block, which a message that streams renders as
+    // pieces (an update renders the last one); one that does not renders it in one call.
+    const chunks =
+      !settings.whole && rill.definitions && rill.splitsAt ? splitDefinitionBlock(content) : null;
     if (chunks) {
       tables.current = null;
       const markupOptions = {
