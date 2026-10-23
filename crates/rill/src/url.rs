@@ -56,94 +56,78 @@ compile_error!("WebAssembly builds parse URLs with JavaScript's `URL`: enable th
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 mod js {
-    use wasm_bindgen::JsValue;
     use wasm_bindgen::prelude::wasm_bindgen;
 
-    #[wasm_bindgen]
+    // One call per URL: the fields come back in one string, newline-separated, which no
+    // field can contain (the URL parser strips tabs and newlines from its input).
+    #[wasm_bindgen(inline_js = "
+// URL.parse returns null where the constructor throws, and throwing is slow.
+const parse = URL.parse ?? ((input, base) => {
+  try {
+    return new URL(input, base);
+  } catch {
+    return null;
+  }
+});
+export function urlFields(input, base) {
+  const url = parse(input, base);
+  return url === null
+    ? undefined
+    : [url.protocol, url.pathname, url.search, url.hash, url.href].join('\\n');
+}")]
     extern "C" {
-        #[wasm_bindgen(js_name = URL)]
-        pub type JsUrl;
-
-        #[wasm_bindgen(constructor, js_class = "URL", catch)]
-        pub fn new(input: &str) -> Result<JsUrl, JsValue>;
-
-        #[wasm_bindgen(constructor, js_class = "URL", catch)]
-        pub fn new_with_base(input: &str, base: &str) -> Result<JsUrl, JsValue>;
-
-        #[wasm_bindgen(method, getter)]
-        pub fn href(this: &JsUrl) -> String;
-
-        #[wasm_bindgen(method, getter)]
-        pub fn protocol(this: &JsUrl) -> String;
-
-        #[wasm_bindgen(method, getter)]
-        pub fn pathname(this: &JsUrl) -> String;
-
-        #[wasm_bindgen(method, getter)]
-        pub fn search(this: &JsUrl) -> String;
-
-        #[wasm_bindgen(method, getter)]
-        pub fn hash(this: &JsUrl) -> String;
+        #[wasm_bindgen(js_name = urlFields)]
+        pub fn url_fields(input: &str, base: Option<&str>) -> Option<String>;
     }
 }
 
-/// A parsed URL, with each field as JavaScript's `URL` reports it.
+/// A parsed URL: JavaScript's `protocol`, `pathname`, `search`, `hash` and `href`, one
+/// per line.
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 pub struct Url {
-    scheme: String,
-    href: String,
-    pathname: String,
-    search: String,
-    hash: String,
+    fields: String,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wasm"))]
 impl Url {
+    fn field(&self, index: usize) -> &str {
+        self.fields
+            .split('\n')
+            .nth(index)
+            .expect("urlFields returns five fields")
+    }
+
     /// The scheme, lowercase and without the trailing `:`.
     pub fn scheme(&self) -> &str {
-        &self.scheme
+        let protocol = self.field(0);
+        &protocol[..protocol.len() - 1]
     }
 
     pub fn pathname(&self) -> &str {
-        &self.pathname
+        self.field(1)
     }
 
     /// `?query`, or empty when the query is missing or empty.
     pub fn search(&self) -> &str {
-        &self.search
+        self.field(2)
     }
 
     /// `#fragment`, or empty when the fragment is missing or empty.
     pub fn hash(&self) -> &str {
-        &self.hash
+        self.field(3)
     }
 
     pub fn into_href(self) -> String {
-        self.href
+        self.field(4).to_owned()
     }
 
     /// `new URL(input)`, or `None` where it throws.
     pub fn parse(input: &str) -> Option<Url> {
-        js::JsUrl::new(input).ok().map(Url::from)
+        js::url_fields(input, None).map(|fields| Url { fields })
     }
 
     /// `new URL(input, base)`, or `None` where it throws.
     pub fn parse_with_base(input: &str, base: &str) -> Option<Url> {
-        js::JsUrl::new_with_base(input, base).ok().map(Url::from)
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "wasm"))]
-impl From<js::JsUrl> for Url {
-    fn from(parsed: js::JsUrl) -> Url {
-        let mut scheme = parsed.protocol();
-        scheme.pop(); // The trailing `:`.
-        Url {
-            scheme,
-            href: parsed.href(),
-            pathname: parsed.pathname(),
-            search: parsed.search(),
-            hash: parsed.hash(),
-        }
+        js::url_fields(input, Some(base)).map(|fields| Url { fields })
     }
 }

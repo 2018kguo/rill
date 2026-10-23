@@ -1512,10 +1512,12 @@ fn transform_url(url: &str, resource: Resource) -> Result<Option<String>, Blocke
             Err(Blocked)
         };
     }
-    let parsed = match Url::parse(url) {
-        Some(parsed) => parsed,
-        None if path_relative(url) => Url::parse_with_base(url, HARDEN_BASE).ok_or(Blocked)?,
-        None => return Err(Blocked),
+    // A path-relative URL has no scheme, so only the base can parse it; skipping the
+    // absolute attempt matters in WebAssembly, where a failed `new URL` throws.
+    let parsed = if path_relative(url) {
+        Url::parse_with_base(url, HARDEN_BASE).ok_or(Blocked)?
+    } else {
+        Url::parse(url).ok_or(Blocked)?
     };
     if matches!(parsed.scheme(), "javascript" | "data" | "file" | "vbscript") {
         return Err(Blocked);
