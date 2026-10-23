@@ -453,7 +453,7 @@ pub fn normalize_uri(value: Cow<'_, str>) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-fn js_whitespace(c: char) -> bool {
+pub(crate) fn js_whitespace(c: char) -> bool {
     rill_cmark::autolink_literal::unicode_whitespace(c)
 }
 
@@ -2092,7 +2092,7 @@ impl Json<'_, '_> {
         }
     }
 
-    fn node(&mut self, ix: NodeId) {
+    pub(crate) fn node(&mut self, ix: NodeId) {
         let tree = self.tree;
         let node = &tree.nodes[ix as usize];
         match &node.kind {
@@ -2304,7 +2304,7 @@ pub struct Encoded {
     pub strings: String,
 }
 
-struct Encoder<'a, 's> {
+pub(crate) struct Encoder<'a, 's> {
     tree: &'a Tree<'s>,
     points: &'a Points,
     source: &'s str,
@@ -2314,7 +2314,39 @@ struct Encoder<'a, 's> {
     interned: HashMap<&'static str, (u32, u32)>,
 }
 
-impl Encoder<'_, '_> {
+impl<'a, 's> Encoder<'a, 's> {
+    pub(crate) fn new(tree: &'a Tree<'s>, points: &'a Points, source: &'s str) -> Self {
+        Encoder {
+            tree,
+            points,
+            source,
+            // 7 to 12 opcodes per node, about 10 typically.
+            ops: Vec::with_capacity(tree.nodes.len() * 11),
+            // Generated strings run to about half the source.
+            strings: String::with_capacity(source.len() / 2),
+            units: 0,
+            interned: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn push(&mut self, op: u32) {
+        self.ops.push(op);
+    }
+
+    /// The opcode count so far, for a count patched in later with [`Encoder::patch`].
+    pub(crate) fn slot(&mut self) -> usize {
+        self.ops.push(0);
+        self.ops.len() - 1
+    }
+
+    pub(crate) fn patch(&mut self, slot: usize, value: u32) {
+        self.ops[slot] = value;
+    }
+
+    pub(crate) fn finish(self) -> (Vec<u32>, String) {
+        (self.ops, self.strings)
+    }
+
     fn table(&mut self, value: &str) -> (u32, u32) {
         let start = self.units;
         self.strings.push_str(value);
@@ -2326,7 +2358,7 @@ impl Encoder<'_, '_> {
         (start, self.units)
     }
 
-    fn string(&mut self, value: &str) {
+    pub(crate) fn string(&mut self, value: &str) {
         let offset = (value.as_ptr() as usize).checked_sub(self.source.as_ptr() as usize);
         if let Some(start) = offset.filter(|start| start + value.len() <= self.source.len()) {
             self.ops.push(op::SOURCE);
@@ -2339,7 +2371,7 @@ impl Encoder<'_, '_> {
         self.ops.extend([op::TABLE, start, end]);
     }
 
-    fn name(&mut self, value: &'static str) {
+    pub(crate) fn name(&mut self, value: &'static str) {
         let (start, end) = match self.interned.get(value) {
             Some(range) => *range,
             None => {
@@ -2400,7 +2432,7 @@ impl Encoder<'_, '_> {
         }
     }
 
-    fn node(&mut self, ix: NodeId) {
+    pub(crate) fn node(&mut self, ix: NodeId) {
         let tree = self.tree;
         let node = &tree.nodes[ix as usize];
         match &node.kind {
@@ -2445,11 +2477,11 @@ impl Encoder<'_, '_> {
 }
 
 /// A rendered document before serialization, with the MDAST's `points` for its positions.
-struct Built<'s> {
-    kind: Kind,
-    points: Points,
-    tree: Tree<'s>,
-    root: NodeId,
+pub(crate) struct Built<'s> {
+    pub(crate) kind: Kind,
+    pub(crate) points: Points,
+    pub(crate) tree: Tree<'s>,
+    pub(crate) root: NodeId,
 }
 
 impl Built<'_> {
@@ -2471,7 +2503,7 @@ impl Built<'_> {
     }
 }
 
-fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
+pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
     let mut mdast = mdast::parse_arena(source, options.syntax())?;
     if options.cjk {
         mdast::cjk_autolink_boundary(&mut mdast, mdast::Tree::ROOT);
@@ -2539,23 +2571,10 @@ pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
         tree,
         root,
     } = build(source, options)?;
-    let mut encoder = Encoder {
-        tree: &tree,
-        points: &points,
-        source,
-        // 7 to 12 opcodes per node, about 10 typically.
-        ops: Vec::with_capacity(tree.nodes.len() * 11),
-        // Generated strings run to about half the source.
-        strings: String::with_capacity(source.len() / 2),
-        units: 0,
-        interned: HashMap::new(),
-    };
+    let mut encoder = Encoder::new(&tree, &points, source);
     encoder.node(root);
-    Ok(Encoded {
-        kind,
-        ops: encoder.ops,
-        strings: encoder.strings,
-    })
+    let (ops, strings) = encoder.finish();
+    Ok(Encoded { kind, ops, strings })
 }
 
 #[cfg(test)]

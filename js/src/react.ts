@@ -5,8 +5,8 @@ import { useEffect, useSyncExternalStore } from "react";
 import type { PluginConfig } from "streamdown";
 
 import type { Rill } from "./core.ts";
-import { loadRill } from "./index.ts";
-import { rillPlugins } from "./streamdown.ts";
+import { loadedRill, loadRill } from "./index.ts";
+import { rillPlugins } from "./plugins.ts";
 
 type Plugins = ReturnType<typeof rillPlugins>;
 type StreamdownPlugins = Pick<PluginConfig, "math" | "cjk">;
@@ -19,7 +19,7 @@ const byPlugins = new WeakMap<StreamdownPlugins, Plugins>();
 let attempted = false;
 const listeners = new Set<() => void>();
 
-function load() {
+export function load() {
   // One attempt per page: a failure (no WebAssembly, a missing asset) would repeat.
   if (attempted) {
     return;
@@ -42,14 +42,22 @@ function load() {
     });
 }
 
-function subscribe(listener: () => void) {
+export function subscribe(listener: () => void) {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 }
 
-function pluginsFor(loaded: Rill, plugins: StreamdownPlugins | undefined) {
+/** rill once loaded (here, or by `initRill`), else `null`. */
+export function snapshot(): Rill | null {
+  return rill ?? loadedRill();
+}
+
+export function pluginsFor(
+  loaded: Rill,
+  plugins: StreamdownPlugins | undefined
+) {
   if (plugins === undefined) {
     withoutPlugins ??= rillPlugins({ rill: loaded });
     return withoutPlugins;
@@ -68,11 +76,7 @@ function pluginsFor(loaded: Rill, plugins: StreamdownPlugins | undefined) {
  * rill too.
  */
 export function useRill(plugins?: StreamdownPlugins): Plugins | null {
-  const loaded = useSyncExternalStore(
-    subscribe,
-    () => rill,
-    () => null
-  );
+  const loaded = useSyncExternalStore(subscribe, snapshot, () => null);
   useEffect(load, []);
   return loaded === null ? null : pluginsFor(loaded, plugins);
 }

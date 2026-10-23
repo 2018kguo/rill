@@ -8,6 +8,7 @@
 //! that against remark itself.
 
 pub mod hast;
+pub mod markup;
 pub mod mdast;
 
 mod autolink;
@@ -18,6 +19,7 @@ pub use hast::{
     BlockPolicy, Context, Harden, Kind, Options, Plugin, Rendered, Sanitize, render, render_json,
     render_ops,
 };
+pub use markup::{MarkupOptions, render_markup};
 pub use mdast::{Error, Syntax, parse_json};
 
 /// The WebAssembly boundary the `@2018kguo/rill` JavaScript package reads: a rendered
@@ -69,12 +71,63 @@ pub mod wasm {
         })
     }
 
+    /// Renders `source` to the segments of Streamdown's DOM (see [`crate::markup`]);
+    /// kind `"markup"`, or `"fallback"` with no segments where only Streamdown renders
+    /// it exactly.
+    pub fn render_markup(
+        source: &str,
+        options: &Options,
+        markup: &crate::MarkupOptions,
+    ) -> Result<RenderedHast, JsError> {
+        let encoded = crate::render_markup(source, options, markup)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+        Ok(match encoded {
+            Some(encoded) => RenderedHast {
+                kind: "markup",
+                ops: encoded.ops,
+                strings: encoded.strings,
+            },
+            None => RenderedHast {
+                kind: "fallback",
+                ops: Vec::new(),
+                strings: String::new(),
+            },
+        })
+    }
+
     #[cfg(feature = "wasm-exports")]
     mod exports {
         use wasm_bindgen::prelude::*;
 
         use super::RenderedHast;
-        use crate::Options;
+        use crate::{MarkupOptions, Options};
+
+        /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
+        /// `linkSafety.enabled`, bit 1 server rendering; `overrides`: the tag names
+        /// with components of the page's own, space-separated.
+        #[wasm_bindgen(js_name = renderMarkup)]
+        pub fn render_markup(
+            source: &str,
+            math: bool,
+            cjk: bool,
+            prefix: String,
+            flags: u32,
+            overrides: &str,
+        ) -> Result<RenderedHast, JsError> {
+            let options = Options {
+                math,
+                cjk,
+                ..Options::default()
+            };
+            let markup = MarkupOptions {
+                prefix,
+                link_safety: flags & 1 != 0,
+                ssr: flags & 2 != 0,
+                overrides: overrides.split_whitespace().map(str::to_owned).collect(),
+                math: false,
+            };
+            super::render_markup(source, &options, &markup)
+        }
 
         /// Streamdown's pipeline, with `plugins.math` and `plugins.cjk` as given.
         #[wasm_bindgen(js_name = renderHast)]

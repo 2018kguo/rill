@@ -12,19 +12,21 @@
   "dependencies": {
     "@streamdown/cjk": "1.0.4",
     "@streamdown/math": "1.0.3",
+    "get-east-asian-width": "1.5.0",
     "hast-util-to-html": "9.0.5",
     "katex": "0.16.47",
+    "micromark-extension-cjk-friendly-util": "3.0.1",
     "remark-parse": "11.0.0",
     "remark-rehype": "11.1.2",
     "streamdown": "2.7.1",
-    "unified": "11.0.5",
-    "micromark-extension-cjk-friendly-util": "3.0.1",
-    "get-east-asian-width": "1.5.0"
+    "unified": "11.0.5"
   },
   "workspaces": [
     "js"
   ],
   "devDependencies": {
-    "binaryen": "132.0.0"
+    "@streamdown/code": "^2.0.0",
+    "binaryen": "132.0.0",
+    "playwright": "^1.64.1"
   }
 }

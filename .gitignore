@@ -7,3 +7,4 @@ js/dist/
 *.tgz
 conformance/real/
 conformance/real.jsonl
+conformance/dom/dist/

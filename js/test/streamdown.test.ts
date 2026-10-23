@@ -18,7 +18,7 @@ import {
 import { unified, type PluggableList } from "unified";
 
 import { createRill, initRill, type Rill } from "../src/index.ts";
-import { rillPlugins, type RenderKind } from "../src/streamdown.ts";
+import { rillPlugins, type RenderKind } from "../src/plugins.ts";
 
 const rill = await initRill(
   readFileSync(new URL("../wasm/rill_bg.wasm", import.meta.url))
