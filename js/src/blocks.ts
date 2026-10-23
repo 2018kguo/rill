@@ -104,7 +104,8 @@ type Lexed = { blocks: string[]; definitions: boolean[] };
 let lexDepth = 0;
 const lists: number[] = [];
 
-/** marked's tokenizer, noting where each list is lexed. */
+/** marked's tokenizer, noting where each list is lexed, and lexing a table's rows no
+ * further than to know where it ends. */
 class ListTokenizer extends Tokenizer {
   override list(src: string) {
     lists.push(lexDepth);
@@ -114,7 +115,29 @@ class ListTokenizer extends Tokenizer {
       lists.pop();
     }
   }
+
+  /**
+   * marked's table, without its rows' cells: only `raw` decides the blocks, and the
+   * header and delimiter rows alone decide whether it is a table (their cell counts
+   * must match). Splitting and queueing every row's cells made each update of a table
+   * that streams cost its whole length again.
+   */
+  override table(src: string) {
+    const rules = (this as unknown as { rules: TokenizerRules }).rules;
+    const match = rules.block.table.exec(src);
+    if (!match || !rules.other.tableDelimiter.test(match[2]!)) return undefined;
+    const head = super.table(`${match[1]}\n${match[2]}\n`);
+    if (!head) return undefined;
+    let end = match[0].length;
+    while (end > 0 && match[0][end - 1] === "\n") end -= 1;
+    return { ...head, raw: match[0].slice(0, end), rows: [] };
+  }
 }
+
+type TokenizerRules = {
+  block: { table: RegExp };
+  other: { tableDelimiter: RegExp };
+};
 
 /**
  * marked's lexer, without the tokens of list items that cannot hold a link definition.
