@@ -6,14 +6,19 @@
 // rill-highlight runs on the main thread; with any other code plugin, that plugin.
 import type { PluginConfig } from "streamdown";
 
-import {
-  highlightCounts as mainCounts,
-  setRillHighlightWasm,
-  withRill,
-  type Callback,
-  type Options,
-  type Result,
-} from "./rill-highlight.ts";
+import type { Callback, Options, Result } from "./rill-highlight.ts";
+
+// rill-highlight on the main thread (no workers: the server, tests, old browsers) is
+// loaded when first needed, so the page's bundle does not carry it.
+type RillModule = typeof import("./rill-highlight.ts");
+let rillModule: RillModule | undefined;
+let loadingModule: Promise<RillModule> | undefined;
+const loadRillModule = () =>
+  (loadingModule ??= import("./rill-highlight.ts").then((module) => {
+    if (wasmUrl) module.setRillHighlightWasm(wasmUrl);
+    rillModule = module;
+    return module;
+  }));
 
 type CodePlugin = NonNullable<PluginConfig["code"]>;
 
@@ -39,7 +44,7 @@ export function setRillHighlight(value: boolean) {
  * block: the highlighting worker starts then, and loads it and the default themes. */
 export function setHighlightWasm(url: URL) {
   wasmUrl = url;
-  setRillHighlightWasm(url);
+  rillModule?.setRillHighlightWasm(url);
   preloadHighlighting();
 }
 
@@ -49,8 +54,8 @@ const workerCounts = { rill: 0, shiki: 0 };
  * (diagnostics, for tests and benchmarks). */
 export function highlightCounts() {
   return {
-    rill: mainCounts.rill + workerCounts.rill,
-    shiki: mainCounts.shiki + workerCounts.shiki,
+    rill: (rillModule?.highlightCounts.rill ?? 0) + workerCounts.rill,
+    shiki: (rillModule?.highlightCounts.shiki ?? 0) + workerCounts.shiki,
   };
 }
 
@@ -82,8 +87,26 @@ const onMainThread = new WeakMap<CodePlugin, Highlighter>();
 function mainThread(plugin: CodePlugin): Highlighter {
   let highlighter = onMainThread.get(plugin);
   if (!highlighter) {
-    const rill = withRill(plugin);
-    highlighter = { highlight: rill.highlight, cancel: () => {} };
+    let rill: ReturnType<RillModule["withRill"]> | undefined;
+    highlighter = {
+      highlight(options, callback) {
+        if (!rill && rillModule) rill = rillModule.withRill(plugin);
+        if (rill) return rill.highlight(options, callback);
+        loadRillModule().then(
+          (module) => {
+            rill ??= module.withRill(plugin);
+            const result = rill.highlight(options, callback);
+            if (result) callback(result);
+          },
+          () => {
+            const result = plugin.highlight(options, callback);
+            if (result) callback(result);
+          }
+        );
+        return null;
+      },
+      cancel: () => {},
+    };
     onMainThread.set(plugin, highlighter);
   }
   return highlighter;
