@@ -50,6 +50,12 @@ struct Modes {
 }
 
 pub fn parse(pattern: &str, flags: &str) -> Result<Parsed, String> {
+    parse_with_placeholders(pattern, flags, None)
+}
+
+/// Parses a back-reference template: the placeholder U+E000+N stands for the text
+/// `values[N]` (empty when absent), spliced in as literal characters.
+pub fn parse_with_placeholders(pattern: &str, flags: &str, values: Option<&[Vec<u16>]>) -> Result<Parsed, String> {
     let mut modes = Modes::default();
     let mut unicode_sets = false;
     let mut unicode = false;
@@ -76,6 +82,7 @@ pub fn parse(pattern: &str, flags: &str) -> Result<Parsed, String> {
         unicode_sets,
         next_group: 1,
         group_names: names,
+        placeholder_values: values,
     };
     let node = parser.parse_disjunction()?;
     if parser.pos != parser.chars.len() {
@@ -115,7 +122,8 @@ fn scan_groups(chars: &[char]) -> Vec<Option<String>> {
     names
 }
 
-struct Parser {
+struct Parser<'v> {
+    placeholder_values: Option<&'v [Vec<u16>]>,
     chars: Vec<char>,
     pos: usize,
     modes: Modes,
@@ -124,7 +132,7 @@ struct Parser {
     group_names: Vec<Option<String>>,
 }
 
-impl Parser {
+impl Parser<'_> {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
@@ -217,8 +225,34 @@ impl Parser {
             }
             _ => {}
         }
+        if let Some(literal) = self.try_placeholder() {
+            // A quantifier after the spliced text applies to its last character, as
+            // it does in the Oniguruma source the text was substituted into.
+            let mut chars = literal;
+            if matches!(self.peek(), Some('*' | '+' | '?' | '{')) {
+                let last = chars.pop().ok_or("quantifier after empty back-reference")?;
+                let quantified = self.parse_quantifier(last)?;
+                chars.push(quantified);
+            }
+            return Ok(Node::Seq(chars));
+        }
         let atom = self.parse_atom()?;
         self.parse_quantifier(atom)
+    }
+
+    fn try_placeholder(&mut self) -> Option<Vec<Node>> {
+        let values = self.placeholder_values?;
+        let c = self.peek()? as u32;
+        if !(0xE000..=0xE8FF).contains(&c) {
+            return None;
+        }
+        self.pos += 1;
+        let text = values.get((c - 0xE000) as usize).map_or(&[][..], |v| v.as_slice());
+        let chars = char::decode_utf16(text.iter().copied())
+            .map(|r| r.map_or_else(|e| u32::from(e.unpaired_surrogate()), u32::from))
+            .map(|c| Node::Set(self.char_set(c)))
+            .collect();
+        Some(chars)
     }
 
     fn parse_quantifier(&mut self, atom: Node) -> Result<Node, String> {

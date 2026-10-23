@@ -3,3 +3,7 @@
 //! the patterns oniguruma-to-es translates, so the tokens are identical.
 
 pub mod regex;
+pub mod shiki;
+pub mod textmate;
+
+pub use shiki::{Highlighter, Token, Tokenized};

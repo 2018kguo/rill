@@ -34,7 +34,15 @@ pub struct EmulationOptions {
 
 impl JsRegExp {
     pub fn new(pattern: &str, flags: &str, options: &EmulationOptions) -> Result<Self, String> {
-        let parsed = parse::parse(pattern, flags)?;
+        Self::build(parse::parse(pattern, flags)?, flags, options)
+    }
+
+    /// Compiles a back-reference template (see `parse::parse_with_placeholders`).
+    pub fn with_placeholders(pattern: &str, flags: &str, options: &EmulationOptions, values: &[Vec<u16>]) -> Result<Self, String> {
+        Self::build(parse::parse_with_placeholders(pattern, flags, Some(values))?, flags, options)
+    }
+
+    fn build(parsed: parse::Parsed, flags: &str, options: &EmulationOptions) -> Result<Self, String> {
         let program = compile::compile(parsed.node, parsed.group_count);
         let groups = parsed.group_count as usize + 1;
         let mut hidden = vec![false; groups];

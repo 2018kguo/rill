@@ -12,7 +12,7 @@ categories = ["text-processing", "wasm"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-serde_json = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
 
 [features]
 # The C-ABI exports the JavaScript package loads (`rill_highlight_*`).
