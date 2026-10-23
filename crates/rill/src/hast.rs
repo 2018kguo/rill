@@ -729,7 +729,9 @@ impl<'s> ToHast<'_, 's> {
                         | mdast::NodeKind::ListItem { .. }
                         | mdast::NodeKind::FootnoteDefinition(_)
                 );
-                if !flow && SimpleRaw::parse(value).is_some() {
+                // A comment ends where micromark's does and restructures nothing.
+                let simple = SimpleRaw::parse(value);
+                if simple.is_some() && (!flow || simple == Some(SimpleRaw::Comment)) {
                     self.simple_raw = true;
                 } else {
                     self.raw_boundary = true;
@@ -1220,9 +1222,9 @@ const PAIRED_TAGS: [&str; 24] = [
 /// One inline raw HTML node parse5 turns into something plain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SimpleRaw {
-    /// `<br>`, `<br/>` or `<br />`, in any case and without attributes.
-    Break,
-    /// A start tag of a [`PAIRED_TAGS`] element, without attributes.
+    /// A start tag of `br` or `img` (void: parse5 opens and closes it at once).
+    Void(&'static str),
+    /// A start tag of a [`PAIRED_TAGS`] element.
     Open(&'static str),
     /// Its end tag.
     Close(&'static str),
@@ -1247,20 +1249,298 @@ impl SimpleRaw {
         if let Some(name) = inner.strip_prefix('/') {
             return paired_tag(name).map(SimpleRaw::Close);
         }
-        let void = inner.strip_suffix('/').map_or(inner, |name| {
-            name.trim_end_matches([' ', '\t', '\n', '\r', '\x0c'])
-        });
-        if void.eq_ignore_ascii_case("br") {
-            return Some(SimpleRaw::Break);
+        let tag = StartTag::parse(inner)?;
+        raw_props(value)?;
+        if let Some(void) = ["br", "img"]
+            .into_iter()
+            .find(|known| known.eq_ignore_ascii_case(tag.name))
+        {
+            return Some(SimpleRaw::Void(void));
         }
-        paired_tag(inner).map(SimpleRaw::Open)
+        // parse5 ignores `/>` on other elements: the element stays open.
+        if tag.self_closing {
+            return None;
+        }
+        paired_tag(tag.name).map(SimpleRaw::Open)
     }
+}
+
+/// parse5's whitespace in tags.
+fn tag_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c')
+}
+
+/// A start tag micromark accepted as HTML (`<` and `>` stripped), read as parse5's
+/// tokenizer does when nothing in it is unusual: no carriage returns, attribute names of
+/// letters, digits, `-`, `_`, `.` and `:`, each name once, and character references only
+/// ones that end with `;` (see [`attribute_value`]). Anything else is `None` and stays
+/// raw.
+struct StartTag<'v> {
+    name: &'v str,
+    attributes: Vec<(&'v str, &'v str)>,
+    self_closing: bool,
+}
+
+impl<'v> StartTag<'v> {
+    fn parse(inner: &'v str) -> Option<StartTag<'v>> {
+        if inner.contains(['\r', '\0']) {
+            return None;
+        }
+        let bytes = inner.as_bytes();
+        let name_end = bytes
+            .iter()
+            .position(|&byte| tag_space(byte) || byte == b'/')
+            .unwrap_or(bytes.len());
+        let name = &inner[..name_end];
+        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            return None;
+        }
+        let mut tag = StartTag {
+            name,
+            attributes: Vec::new(),
+            self_closing: false,
+        };
+        let mut i = name_end;
+        loop {
+            while i < bytes.len() && tag_space(bytes[i]) {
+                i += 1;
+            }
+            if i == bytes.len() {
+                return Some(tag);
+            }
+            if bytes[i] == b'/' {
+                // micromark allows `/` only right before `>`.
+                tag.self_closing = true;
+                return (i + 1 == bytes.len()).then_some(tag);
+            }
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric()
+                    || matches!(bytes[i], b'-' | b'_' | b'.' | b':'))
+            {
+                i += 1;
+            }
+            let attribute = &inner[start..i];
+            if attribute.is_empty()
+                || attribute.bytes().any(|byte| byte.is_ascii_uppercase())
+                || tag.attributes.iter().any(|(known, _)| *known == attribute)
+            {
+                return None;
+            }
+            let mut j = i;
+            while j < bytes.len() && tag_space(bytes[j]) {
+                j += 1;
+            }
+            if bytes.get(j) != Some(&b'=') {
+                tag.attributes.push((attribute, ""));
+                continue;
+            }
+            j += 1;
+            while j < bytes.len() && tag_space(bytes[j]) {
+                j += 1;
+            }
+            let value = match bytes.get(j) {
+                Some(&quote @ (b'"' | b'\'')) => {
+                    let close = j + 1 + bytes[j + 1..].iter().position(|&byte| byte == quote)?;
+                    let value = &inner[j + 1..close];
+                    i = close + 1;
+                    // parse5 wants whitespace, `/` or `>` after a quoted value.
+                    if i < bytes.len() && !tag_space(bytes[i]) && bytes[i] != b'/' {
+                        return None;
+                    }
+                    value
+                }
+                Some(_) => {
+                    let end = bytes[j..]
+                        .iter()
+                        .position(|&byte| tag_space(byte))
+                        .map_or(bytes.len(), |offset| j + offset);
+                    let value = &inner[j..end];
+                    if value.contains(['"', '\'', '<', '=', '`', '/']) {
+                        return None;
+                    }
+                    i = end;
+                    value
+                }
+                None => return None,
+            };
+            tag.attributes.push((attribute, value));
+        }
+    }
+}
+
+/// An attribute value as parse5 decodes its character references, for the ones that end
+/// with `;` and name a character (numeric ones outside controls and surrogates); `None`
+/// for any other `&`, whose decoding in attributes has rules of its own.
+fn attribute_value(value: &str) -> Option<Cow<'_, str>> {
+    if !value.contains('&') {
+        return Some(Cow::Borrowed(value));
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let end = after.find(';')?;
+        let name = &after[..end];
+        if let Some(number) = name.strip_prefix('#') {
+            let (digits, radix) = match number.strip_prefix(['x', 'X']) {
+                Some(hex) => (hex, 16),
+                None => (number, 10),
+            };
+            if digits.is_empty() || digits.len() > 7 || !digits.chars().all(|c| c.is_digit(radix)) {
+                return None;
+            }
+            let code = u32::from_str_radix(digits, radix).ok()?;
+            if !matches!(code, 0x09 | 0x0a | 0x20..=0x7e | 0xa0..=0xd7ff | 0xe000..=0x10ffff) {
+                return None;
+            }
+            out.push(char::from_u32(code)?);
+        } else {
+            if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+                return None;
+            }
+            out.push_str(rill_cmark::named_entity(name)?);
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    Some(Cow::Owned(out))
+}
+
+/// The HAST property hastscript makes of attribute `name` on an element rehype-raw
+/// creates, for the attributes rehype-sanitize can keep; `Some(None)` for one it drops
+/// whatever the value, `None` for one this does not model (the tag then stays raw).
+fn raw_property(name: &str) -> Option<Option<&'static str>> {
+    Some(Some(match name {
+        "class" => "className",
+        "alt" => "alt",
+        "src" => "src",
+        "href" => "href",
+        "id" => "id",
+        "title" => "title",
+        "lang" => "lang",
+        "dir" => "dir",
+        "align" => "align",
+        "name" => "name",
+        "cite" => "cite",
+        "longdesc" => "longDesc",
+        "abbr" => "abbr",
+        "axis" => "axis",
+        "label" => "label",
+        "summary" => "summary",
+        "scope" => "scope",
+        "shape" => "shape",
+        "rules" => "rules",
+        "rev" => "rev",
+        "prompt" => "prompt",
+        "media" => "media",
+        "method" => "method",
+        "action" => "action",
+        "frame" => "frame",
+        "clear" => "clear",
+        "color" => "color",
+        "char" => "char",
+        "charoff" => "charOff",
+        "charset" => "charSet",
+        "cellpadding" => "cellPadding",
+        "cellspacing" => "cellSpacing",
+        "datetime" => "dateTime",
+        "enctype" => "encType",
+        "hreflang" => "hrefLang",
+        "usemap" => "useMap",
+        "valign" => "vAlign",
+        "type" => "type",
+        "metastring" => "metastring",
+        "srcset" => "srcSet",
+        "aria-label" => "ariaLabel",
+        "data-footnote-ref" => "dataFootnoteRef",
+        "data-footnote-backref" => "dataFootnoteBackref",
+        "data-footnotes" => "dataFootnotes",
+        // Numbers (when JavaScript's `Number` reads one).
+        "width" => "width",
+        "height" => "height",
+        "border" => "border",
+        "colspan" => "colSpan",
+        "rowspan" => "rowSpan",
+        "cols" => "cols",
+        "rows" => "rows",
+        "size" => "size",
+        "span" => "span",
+        "start" => "start",
+        "tabindex" => "tabIndex",
+        "maxlength" => "maxLength",
+        "hspace" => "hSpace",
+        // Booleans, comma-separated lists and the like.
+        "checked" | "compact" | "ismap" | "multiple" | "nohref" | "noshade" | "nowrap" | "open"
+        | "readonly" | "selected" | "itemscope" | "disabled" | "value" | "accept"
+        | "accept-charset" | "accesskey" | "coords" | "for" | "headers" | "itemprop"
+        | "itemtype" | "aria-describedby" | "aria-labelledby" => return None,
+        _ if name.starts_with("aria-") || name.starts_with("data-") => return None,
+        _ => return Some(None),
+    }))
+}
+
+/// Properties hastscript reads as numbers.
+fn numeric_property(key: &str) -> bool {
+    matches!(
+        key,
+        "width"
+            | "height"
+            | "border"
+            | "colSpan"
+            | "rowSpan"
+            | "cols"
+            | "rows"
+            | "size"
+            | "span"
+            | "start"
+            | "tabIndex"
+            | "maxLength"
+            | "hSpace"
+    )
+}
+
+/// The properties of a raw start tag's element, as strings for [`round_trip`] (which
+/// reads them as hastscript does), or `None` for one this does not model.
+fn raw_props<'s>(value: &str) -> Option<Props<'s>> {
+    let inner = value.strip_prefix('<')?.strip_suffix('>')?;
+    let tag = StartTag::parse(inner)?;
+    let mut props = Vec::new();
+    for (name, value) in tag.attributes {
+        let Some(key) = raw_property(name)? else {
+            continue;
+        };
+        let value = attribute_value(value)?;
+        // `Number(value)`: digits are a number, a value that can be no number is a
+        // string; anything between (signs, dots, exponents, hex) stays raw.
+        if numeric_property(key)
+            && !value.is_empty()
+            && !(value.len() <= 15 && value.bytes().all(|byte| byte.is_ascii_digit()))
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'+' | b'-' | b'.' | b' ' | b'\t' | b'\n' | b'\x0c')
+            })
+        {
+            return None;
+        }
+        props.push((key, Value::Str(Cow::Owned(value.into_owned()))));
+    }
+    Some(props)
 }
 
 fn paired_tag(name: &str) -> Option<&'static str> {
     PAIRED_TAGS
         .into_iter()
         .find(|known| known.eq_ignore_ascii_case(name))
+}
+
+/// The properties of the start tag at raw node `ix`, which [`SimpleRaw::parse`] read.
+fn raw_node_props<'s>(tree: &Tree<'s>, ix: NodeId) -> Props<'s> {
+    match &tree.nodes[ix as usize].kind {
+        NodeKind::Raw(value) => raw_props(value).expect("SimpleRaw::parse read the tag"),
+        _ => unreachable!("a raw node"),
+    }
 }
 
 /// The simple raw node at `ix`, if it is one.
@@ -1328,7 +1608,7 @@ fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId, close_open: bool) -> bool {
                     return false;
                 }
             }
-            Some(SimpleRaw::Break | SimpleRaw::Comment) => {}
+            Some(SimpleRaw::Void(_) | SimpleRaw::Comment) => {}
             None => {
                 if !raw_tags_pair(tree, child, close_open) {
                     return false;
@@ -1352,7 +1632,7 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
         let mut keep = Some(cursor);
         match simple_raw_at(tree, cursor) {
             Some(SimpleRaw::Open(tag)) => {
-                let element = tree.element(tag, Vec::new(), At::None);
+                let element = tree.element(tag, raw_node_props(tree, cursor), At::None);
                 tree.nodes[element as usize].start = tree.nodes[cursor as usize].start;
                 levels.push((element, EMPTY));
                 keep = None;
@@ -1363,10 +1643,11 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
                 tree.nodes[element as usize].end = tree.nodes[cursor as usize].end;
                 keep = Some(element);
             }
-            Some(SimpleRaw::Break) => {
+            Some(SimpleRaw::Void(tag)) => {
+                let props = raw_node_props(tree, cursor);
                 tree.nodes[cursor as usize].kind = NodeKind::Element {
-                    tag: "br",
-                    props: Vec::new(),
+                    tag,
+                    props,
                     data: None,
                 };
             }
@@ -1420,7 +1701,7 @@ fn round_trip<'s>(key: &str, value: Value<'s>) -> Option<Value<'s>> {
     };
     Some(match key {
         "checked" | "disabled" => Value::Bool(true),
-        "start" => match attribute.trim().parse::<i64>() {
+        _ if numeric_property(key) => match attribute.trim().parse::<i64>() {
             Ok(number) => Value::Num(number),
             Err(_) => Value::Str(attribute),
         },

@@ -47,6 +47,12 @@ pub fn letter_or_number(c: char) -> bool {
     unicode_tables::in_table(unicode_tables::LETTER_OR_NUMBER, c)
 }
 pub use crate::scanners::decode_string;
+
+/// The value of the HTML named character reference `&name;`.
+#[must_use]
+pub fn named_entity(name: &str) -> Option<&'static str> {
+    entities::get_entity(name.as_bytes())
+}
 pub use crate::strings::{CowStr, InlineStr};
 
 /// The micromark extensions beyond GFM, as Streamdown's `plugins` add them. The default is
