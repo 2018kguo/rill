@@ -56,4 +56,11 @@ fn main() {
     time("HAST JSON", &|| {
         rill::render_json(&source, &options).expect("render");
     });
+    let markup = rill::MarkupOptions {
+        link_safety: true,
+        ..rill::MarkupOptions::default()
+    };
+    time("Streamdown DOM markup", &|| {
+        rill::render_markup(&source, &options, &markup).expect("render");
+    });
 }

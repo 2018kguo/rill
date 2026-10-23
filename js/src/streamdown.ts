@@ -48,8 +48,9 @@ import {
 } from "streamdown";
 import type { Pluggable } from "unified";
 
-import { CodeSegment, type Highlight } from "./code-block.ts";
+import { CodeSegment } from "./code-block.ts";
 import type { HastNode, HastReader, Rill } from "./core.ts";
+import { highlighterFor, type Highlighter } from "./highlight.ts";
 import { createCn, hastToHtml, type Cn } from "./html.ts";
 import { mathFragments } from "./math.ts";
 import { DEFAULT_MAX_SOURCE_LENGTH, optionsOf } from "./plugins.ts";
@@ -63,6 +64,7 @@ export {
   type RillPluginsOptions,
 } from "./plugins.ts";
 export { useRill } from "./react.ts";
+export { setHighlightWorker } from "./highlight.ts";
 
 /** What `Block` needs from `<Streamdown>`'s props that its own props lack. */
 type Settings = {
@@ -71,7 +73,7 @@ type Settings = {
   prefix: string;
   /** `fallbackComponent` is set: every element renders through Streamdown. */
   fallback: boolean;
-  highlight: Highlight | undefined;
+  highlight: Highlighter | undefined;
 };
 
 const RillContext = createContext<Settings | null>(null);
@@ -127,19 +129,6 @@ function sameRootAttributes(previous: object, next: object): boolean {
   );
 }
 
-const highlighters = new WeakMap<object, Highlight>();
-
-function highlighterFor(plugins: PluginConfig | undefined): Highlight | undefined {
-  const code = plugins?.code;
-  if (!code) return undefined;
-  let highlight = highlighters.get(code);
-  if (!highlight) {
-    highlight = (options, callback) => code.highlight(options, callback);
-    highlighters.set(code, highlight);
-  }
-  return highlight;
-}
-
 /** Streamdown 2.7.1's `<Streamdown>`, rendering its blocks with rill. */
 export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
   const { plugins, prefix, fallbackComponent } = props;
@@ -149,7 +138,7 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
       cn: createCn(prefix),
       prefix: prefix ?? "",
       fallback: fallbackComponent !== undefined,
-      highlight: highlighterFor(plugins),
+      highlight: highlighterFor(plugins?.code),
     }),
     [plugins, prefix, fallbackComponent]
   );

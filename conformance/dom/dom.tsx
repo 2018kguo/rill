@@ -3,14 +3,18 @@
 // included), and reports both containers' HTML. Driven by dom-diff.mjs.
 //
 //   dom.html?config=default|code|math|cjk|all&variant=<name>&candidate=self|rill
-import { createElement, type ComponentType, type ReactNode } from "react";
+import { createContext, createElement, memo, type ComponentType, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { Streamdown } from "streamdown";
+import { Block as StreamdownBlock, Streamdown } from "streamdown";
 import { cjk } from "@streamdown/cjk";
 import { code } from "@streamdown/code";
 import { math } from "@streamdown/math";
 
-import { blockRenders, Streamdown as RillStreamdown } from "../../js/src/streamdown.ts";
+import {
+  Block as RillBlock,
+  blockRenders,
+  Streamdown as RillStreamdown,
+} from "../../js/src/streamdown.ts";
 import { initRill } from "../../js/src/index.ts";
 
 const params = new URLSearchParams(location.search);
@@ -33,8 +37,20 @@ function CustomLink({ node: _node, children, ...props }: Record<string, unknown>
   return createElement("a", { "data-custom": "link", ...props }, children as ReactNode);
 }
 
-// Streamdown props per variant (beyond `plugins` and the document).
+// An app's own BlockComponent wrapping the Block it imports (Arca's shape): each side
+// wraps its own module's Block.
+const IndexContext = createContext(-1);
+const wrapBlock = (Block: ComponentType<Record<string, unknown>>) =>
+  memo((props: Record<string, unknown>) =>
+    createElement(IndexContext.Provider, { value: props.index as number }, createElement(Block, props))
+  );
+const ReferenceBlock = wrapBlock(StreamdownBlock as never);
+const CandidateBlock = wrapBlock(RillBlock as never);
+
+// Streamdown props per variant (beyond `plugins` and the document). `block` is set per
+// side below.
 const variants: Record<string, Record<string, unknown>> = {
+  block: {},
   default: {},
   prefix: { prefix: "tw" },
   controls: { controls: false },
@@ -47,6 +63,10 @@ const variants: Record<string, Record<string, unknown>> = {
 };
 const variantProps = variants[variant];
 if (!variantProps) throw new Error(`unknown variant ${variant}`);
+const sideProps = (component: unknown): Record<string, unknown> =>
+  variant === "block"
+    ? { BlockComponent: component === Streamdown ? ReferenceBlock : CandidateBlock }
+    : {};
 
 await initRill(await (await fetch("rill_bg.wasm")).arrayBuffer());
 
@@ -87,7 +107,13 @@ function mount(): { host: HTMLElement; root: Root } {
 
 async function renderOne(component: Component, markdown: string, props: Record<string, unknown>) {
   const { host, root } = mount();
-  root.render(createElement(component, { plugins, ...variantProps, ...props }, markdown));
+  root.render(
+    createElement(
+      component,
+      { plugins, ...variantProps, ...sideProps(component), ...props },
+      markdown
+    )
+  );
   await settle(host, 250);
   const html = host.innerHTML;
   root.unmount();
@@ -102,7 +128,11 @@ async function renderSteps(component: Component, steps: [string, boolean][]) {
   const out: string[] = [];
   for (const [markdown, isAnimating] of steps) {
     root.render(
-      createElement(component, { plugins, ...variantProps, isAnimating }, markdown)
+      createElement(
+        component,
+        { plugins, ...variantProps, ...sideProps(component), isAnimating },
+        markdown
+      )
     );
     await settle(host, 120);
     out.push(host.innerHTML);
@@ -142,5 +172,3 @@ page.probe = async (markdown: string) => ({
   actual: await renderOne(candidates[candidateName] as Component, markdown, {}),
 });
 document.body.dataset.ready = "true";
-import { styleAttribute } from "../../js/src/html.ts";
-page.styleAttribute = styleAttribute;

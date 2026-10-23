@@ -30,18 +30,13 @@ import {
   type PluginConfig,
 } from "streamdown";
 
+import type { Highlighter } from "./highlight.ts";
 import { escapeHtml, updateStyle, type Cn, type StyleSlot } from "./html.ts";
 
 const LANGUAGE = /language-([^\s]+)/;
 const START_LINE = /startLine=(\d+)/;
 const NO_LINE_NUMBERS = /\bnoLineNumbers\b/;
 
-/**
- * Highlights code as `plugins.code.highlight` does: a cached result, or `null` and the
- * result later through `callback`. The code plugin's own is the default; a faster one
- * must return the same tokens.
- */
-export type Highlight = NonNullable<PluginConfig["code"]>["highlight"];
 
 export type CodeSegmentProps = {
   /** The `<code>`'s text, untrimmed. */
@@ -54,7 +49,7 @@ export type CodeSegmentProps = {
   plugins: PluginConfig | undefined;
   components: Record<string, unknown>;
   cn: Cn;
-  highlight: Highlight | undefined;
+  highlight: Highlighter | undefined;
 };
 
 /** A fenced code block as Streamdown's `code` component renders it. */
@@ -204,7 +199,7 @@ type CodeBodyProps = {
   startLine: number | undefined;
   rest: Record<string, unknown>;
   cn: Cn;
-  highlight: Highlight | undefined;
+  highlight: Highlighter | undefined;
 };
 
 /** CodeBlock's raw result: each line one uncolored token. */
@@ -246,31 +241,45 @@ const CodeBody = memo(function CodeBody({
     }
     // Ignore results for code this block has already moved past.
     let current = true;
-    const cached = highlight(
+    const callback = (highlighted: HighlightResult) => {
+      if (current) setResult(highlighted);
+    };
+    const cached = highlight.highlight(
       {
         code,
         isIncomplete,
         language: language as never,
         themes: shikiTheme,
       },
-      (highlighted) => {
-        if (current) setResult(highlighted);
-      }
+      callback
     );
     if (cached) setResult(cached);
     return () => {
       current = false;
+      highlight.cancel(callback);
     };
   }, [code, isIncomplete, language, shikiTheme, highlight, raw]);
   const maxHeight = resolveMaxHeight(codeBlockMaxHeight);
   const scrollRef = usePinnedScroll(isAnimating, Boolean(maxHeight), result);
-  // Each element's style as React would have updated it since the first render.
-  const styles = useRef<BodyStyles>({ pre: undefined, code: undefined, rows: [] });
-  const html = useMemo(
-    () => bodyHtml(result, className, lineNumbers, startLine, cn, styles.current),
-    [result, className, lineNumbers, startLine, cn]
-  );
-  return createElement("div", {
+  // The token spans' styles as React would have updated them since the first render,
+  // and each line's HTML while its tokens stay the same.
+  const lines = useRef<Line[]>([]);
+  const names = classes(cn, className);
+  const preStyle: Record<string, string> = {};
+  if (result.bg) preStyle["--sdm-bg"] = result.bg;
+  if (result.fg) preStyle["--sdm-fg"] = result.fg;
+  if (result.rootStyle) Object.assign(preStyle, parseRootStyle(result.rootStyle));
+  const lineClass = lineNumbers ? names.lineNumbers : names.line;
+  const codeStyle =
+    lineNumbers && startLine && startLine > 1
+      ? { counterReset: `line ${startLine - 1}` }
+      : undefined;
+  const rows = useMemo(() => linesHtml(result, names, lines.current), [result, names]);
+  // A block that arrives complete renders its <pre> as one string; one that streams
+  // keeps a React element per line, so each update touches only the lines that changed.
+  const [whole] = useState(!isIncomplete);
+  const styles = useRef<{ pre?: StyleSlot; code?: StyleSlot }>({});
+  const body = {
     className: cn(
       className,
       maxHeight ? "overflow-y-auto" : null,
@@ -281,26 +290,63 @@ const CodeBody = memo(function CodeBody({
     ref: scrollRef,
     style: maxHeight ? { maxHeight } : undefined,
     ...rest,
-    dangerouslySetInnerHTML: { __html: html },
-  });
+  };
+  if (whole) {
+    // The <pre> and <code> styles as React would have updated them.
+    const pre = (styles.current.pre = updateStyle(styles.current.pre, preStyle));
+    const code = (styles.current.code = updateStyle(styles.current.code, codeStyle));
+    let html = `<pre class="${escapeHtml(names.pre)}"`;
+    if (pre.attribute !== null) html += ` style="${pre.attribute}"`;
+    html += "><code";
+    if (lineNumbers) html += ` class="${escapeHtml(names.code)}"`;
+    if (code.attribute !== null) html += ` style="${code.attribute}"`;
+    html += ">";
+    const line = `<span class="${escapeHtml(lineClass)}">`;
+    for (const row of rows) html += `${line}${row}</span>`;
+    html += "</code></pre>";
+    return createElement("div", { ...body, dangerouslySetInnerHTML: { __html: html } });
+  }
+  return createElement(
+    "div",
+    body,
+    createElement(
+      "pre",
+      { className: names.pre, style: preStyle },
+      createElement(
+        "code",
+        { className: lineNumbers ? names.code : undefined, style: codeStyle },
+        rows.map((html, index) =>
+          createElement("span", {
+            className: lineClass,
+            key: index,
+            dangerouslySetInnerHTML: { __html: html },
+          })
+        )
+      )
+    )
+  );
 });
 
-/** The style slots of a body's elements, in React's element order. */
-type BodyStyles = {
-  pre: StyleSlot | undefined;
-  code: StyleSlot | undefined;
-  rows: StyleSlot[][];
-};
+type Row = HighlightResult["tokens"][number];
+
+/** A line's tokens, their style slots, and its HTML. */
+type Line = { row: Row; slots: StyleSlot[]; html: string };
 
 type Classes = {
   pre: string;
   code: string;
   line: string;
+  lineNumbers: string;
   token: string;
   tokenWithBackground: string;
 };
 const classesByCn = new WeakMap<Cn, Map<string | undefined, Classes>>();
 
+const LINE_CLASSES = "block";
+const LINE_NUMBER_CLASSES =
+  "block before:content-[counter(line)] before:inline-block before:[counter-increment:line] before:w-6 before:mr-4 before:text-[13px] before:text-right before:text-muted-foreground/50 before:font-mono before:select-none";
+
+/** CodeBlockBody's classes for `cn` (React elements' unescaped, tokens' escaped). */
 function classes(cn: Cn, className: string | undefined): Classes {
   let byClass = classesByCn.get(cn);
   if (!byClass) {
@@ -310,15 +356,14 @@ function classes(cn: Cn, className: string | undefined): Classes {
   let found = byClass.get(className);
   if (!found) {
     found = {
-      pre: escapeHtml(
-        cn(
-          className,
-          "bg-[var(--sdm-bg,inherit)]",
-          "dark:bg-[var(--shiki-dark-bg,var(--sdm-bg,inherit))]"
-        )
+      pre: cn(
+        className,
+        "bg-[var(--sdm-bg,inherit)]",
+        "dark:bg-[var(--shiki-dark-bg,var(--sdm-bg,inherit))]"
       ),
-      code: escapeHtml(cn("[counter-increment:line_0] [counter-reset:line]")),
-      line: "",
+      code: cn("[counter-increment:line_0] [counter-reset:line]"),
+      line: cn(LINE_CLASSES),
+      lineNumbers: cn(LINE_NUMBER_CLASSES),
       token: escapeHtml(
         cn(
           "text-[var(--sdm-c,inherit)]",
@@ -339,89 +384,66 @@ function classes(cn: Cn, className: string | undefined): Classes {
   return found;
 }
 
-const LINE_CLASSES = "block";
-const LINE_NUMBER_CLASSES =
-  "block before:content-[counter(line)] before:inline-block before:[counter-increment:line] before:w-6 before:mr-4 before:text-[13px] before:text-right before:text-muted-foreground/50 before:font-mono before:select-none";
-const lineClasses = new WeakMap<Cn, [string, string]>();
-
-/** CodeBlockBody's `<pre>`, as HTML. */
-function bodyHtml(
-  result: HighlightResult,
-  className: string | undefined,
-  lineNumbers: boolean,
-  startLine: number | undefined,
-  cn: Cn,
-  styles: BodyStyles
-): string {
-  const names = classes(cn, className);
-  let lines = lineClasses.get(cn);
-  if (!lines) {
-    lines = [escapeHtml(cn(LINE_CLASSES)), escapeHtml(cn(LINE_NUMBER_CLASSES))];
-    lineClasses.set(cn, lines);
-  }
-  const lineClass = lineNumbers ? lines[1] : lines[0];
-  const preStyle: Record<string, string> = {};
-  if (result.bg) preStyle["--sdm-bg"] = result.bg;
-  if (result.fg) preStyle["--sdm-fg"] = result.fg;
-  if (result.rootStyle) Object.assign(preStyle, parseRootStyle(result.rootStyle));
-  let out = `<pre class="${names.pre}"`;
-  styles.pre = updateStyle(styles.pre, preStyle);
-  if (styles.pre.attribute !== null) out += ` style="${styles.pre.attribute}"`;
-  out += "><code";
-  if (lineNumbers) out += ` class="${names.code}"`;
-  styles.code = updateStyle(
-    styles.code,
-    lineNumbers && startLine && startLine > 1
-      ? { counterReset: `line ${startLine - 1}` }
-      : undefined
-  );
-  if (styles.code.attribute !== null) out += ` style="${styles.code.attribute}"`;
-  out += ">";
+/** Each line's token spans as HTML (CodeBlockBody's rows), reusing `lines` where a
+ * line's tokens are the ones it rendered last time (Shiki keeps finished rows). */
+function linesHtml(result: HighlightResult, names: Classes, lines: Line[]): string[] {
   const rows = result.tokens;
-  styles.rows.length = Math.min(styles.rows.length, rows.length);
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-    const row = rows[rowIndex] as HighlightResult["tokens"][number];
-    out += `<span class="${lineClass}">`;
-    const slots = (styles.rows[rowIndex] ??= []);
-    if (row.length === 0 || (row.length === 1 && row[0]?.content === "")) {
-      // Its token spans unmount.
-      slots.length = 0;
-      out += "\n";
-    } else {
-      slots.length = Math.min(slots.length, row.length);
-      for (let tokenIndex = 0; tokenIndex < row.length; tokenIndex += 1) {
-        const token = row[tokenIndex] as HighlightResult["tokens"][number][number];
-        const style: Record<string, string> = {};
-        let background = Boolean(token.bgColor);
-        if (token.color) style["--sdm-c"] = token.color;
-        if (token.bgColor) style["--sdm-tbg"] = token.bgColor;
-        if (token.htmlStyle) {
-          for (const [key, value] of Object.entries(token.htmlStyle)) {
-            if (key === "color") {
-              style["--sdm-c"] = value;
-            } else if (key === "background-color") {
-              style["--sdm-tbg"] = value;
-              background = true;
-            } else {
-              style[key] = value;
-            }
-          }
+  lines.length = Math.min(lines.length, rows.length);
+  const out = new Array<string>(rows.length);
+  for (let index = 0; index < rows.length; index += 1) {
+    const row = rows[index] as Row;
+    let line = lines[index];
+    if (line?.row === row) {
+      out[index] = line.html;
+      continue;
+    }
+    // A line React keeps keeps its token spans (and their styles).
+    const slots = line?.slots ?? [];
+    line = { row, slots, html: lineHtml(row, names, slots) };
+    lines[index] = line;
+    out[index] = line.html;
+  }
+  return out;
+}
+
+function lineHtml(row: Row, names: Classes, slots: StyleSlot[]): string {
+  if (row.length === 0 || (row.length === 1 && row[0]?.content === "")) {
+    // Its token spans unmount.
+    slots.length = 0;
+    return "\n";
+  }
+  slots.length = Math.min(slots.length, row.length);
+  let out = "";
+  for (let index = 0; index < row.length; index += 1) {
+    const token = row[index] as Row[number];
+    const style: Record<string, string> = {};
+    let background = Boolean(token.bgColor);
+    if (token.color) style["--sdm-c"] = token.color;
+    if (token.bgColor) style["--sdm-tbg"] = token.bgColor;
+    if (token.htmlStyle) {
+      for (const [key, value] of Object.entries(token.htmlStyle)) {
+        if (key === "color") {
+          style["--sdm-c"] = value;
+        } else if (key === "background-color") {
+          style["--sdm-tbg"] = value;
+          background = true;
+        } else {
+          style[key] = value;
         }
-        out += `<span class="${background ? names.tokenWithBackground : names.token}"`;
-        const slot = updateStyle(slots[tokenIndex], style);
-        slots[tokenIndex] = slot;
-        if (slot.attribute !== null) out += ` style="${slot.attribute}"`;
-        if (token.htmlAttrs) {
-          for (const [key, value] of Object.entries(token.htmlAttrs)) {
-            out += ` ${key}="${escapeHtml(String(value))}"`;
-          }
-        }
-        out += `>${escapeHtml(token.content)}</span>`;
       }
     }
-    out += "</span>";
+    out += `<span class="${background ? names.tokenWithBackground : names.token}"`;
+    const slot = updateStyle(slots[index], style);
+    slots[index] = slot;
+    if (slot.attribute !== null) out += ` style="${slot.attribute}"`;
+    if (token.htmlAttrs) {
+      for (const [key, value] of Object.entries(token.htmlAttrs)) {
+        out += ` ${key}="${escapeHtml(String(value))}"`;
+      }
+    }
+    out += `>${escapeHtml(token.content)}</span>`;
   }
-  return `${out}</code></pre>`;
+  return out;
 }
 
 function parseRootStyle(rootStyle: string): Record<string, string> {

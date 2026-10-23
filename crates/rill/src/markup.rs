@@ -129,6 +129,20 @@ fn classed(tag: &str) -> Option<(&'static str, &'static str, &'static str)> {
     })
 }
 
+/// A built-in class as it appears in an attribute (React-escaped).
+fn escaped_class(base: &'static str) -> &'static str {
+    match base {
+        "list-inside list-decimal whitespace-normal [li_&]:pl-6" => {
+            "list-inside list-decimal whitespace-normal [li_&amp;]:pl-6"
+        }
+        "list-inside list-disc whitespace-normal [li_&]:pl-6" => {
+            "list-inside list-disc whitespace-normal [li_&amp;]:pl-6"
+        }
+        "py-1 [&>p]:inline" => "py-1 [&amp;&gt;p]:inline",
+        _ => base,
+    }
+}
+
 const LINK_BUTTON_CLASS: &str =
     "wrap-anywhere appearance-none text-left font-medium text-primary underline";
 const LINK_CLASS: &str = "wrap-anywhere font-medium text-primary underline";
@@ -376,7 +390,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
     fn prefixed(&self, classes: &str) -> String {
         let prefix = &self.options.prefix;
         if prefix.is_empty() {
-            return classes.split_whitespace().collect::<Vec<_>>().join(" ");
+            return classes.to_owned();
         }
         let mut out = String::with_capacity(classes.len() * 2);
         for class in classes.split_whitespace() {
@@ -653,9 +667,13 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         }
     }
 
-    fn html_children(&self, html: &mut Html, children: &[NodeId]) -> Result<(), Unsupported> {
+    fn html_children(
+        &self,
+        html: &mut Html,
+        children: impl IntoIterator<Item = NodeId>,
+    ) -> Result<(), Unsupported> {
         let mut text_before = false;
-        for &child in children {
+        for child in children {
             let text = self.text(child);
             if self.options.ssr && text_before && text.is_some_and(|text| !text.is_empty()) {
                 html.out.push_str("<!-- -->");
@@ -679,6 +697,46 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         if self.unwrapped_paragraph(ix) {
             return Err(Unsupported);
         }
+        let tag = self.write_start(html, ix)?;
+        if void(tag) {
+            html.out.push_str("/>");
+            return Ok(());
+        }
+        html.out.push('>');
+        let source = self.tag(ix).unwrap_or_default();
+        if table_part(source) || source == "li" || self.footnote_items.contains_key(&ix) {
+            self.html_children(html, self.children(ix))?;
+        } else {
+            self.html_children(html, self.tree.children(ix))?;
+        }
+        html.out.push_str("</");
+        html.out.push_str(tag);
+        html.out.push('>');
+        Ok(())
+    }
+
+    /// Writes `<tag attributes` for the element Streamdown renders for `ix`; returns
+    /// the tag.
+    fn write_start(&self, html: &mut Html, ix: NodeId) -> Result<&'static str, Unsupported> {
+        let source = self.tag(ix).unwrap_or_default();
+        // Most elements have no props of their own: their markup is a constant.
+        if self.props(ix).is_empty() && self.options.prefix.is_empty() {
+            if let Some((tag, base, name)) = classed(source) {
+                html.out.push('<');
+                html.out.push_str(tag);
+                html.out.push_str(" class=\"");
+                html.out.push_str(escaped_class(base));
+                html.out.push_str("\" data-streamdown=\"");
+                html.out.push_str(name);
+                html.out.push('"');
+                return Ok(tag);
+            }
+            if !matches!(source, "a" | "section") {
+                html.out.push('<');
+                html.out.push_str(source);
+                return Ok(source);
+            }
+        }
         let (tag, props) = self.component(ix)?;
         if let Some(href) = self.link_button(ix) {
             html.links.push(href);
@@ -686,16 +744,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         html.out.push('<');
         html.out.push_str(tag);
         self.attributes(&mut html.out, tag, &props);
-        if void(tag) {
-            html.out.push_str("/>");
-            return Ok(());
-        }
-        html.out.push('>');
-        self.html_children(html, &self.children(ix))?;
-        html.out.push_str("</");
-        html.out.push_str(tag);
-        html.out.push('>');
-        Ok(())
+        Ok(tag)
     }
 
     // -----------------------------------------------------------------------------
@@ -779,7 +828,10 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         }
         let (element, props) = self.component(ix)?;
         let children = self.children(ix);
-        if need == Need::React || void(element) {
+        // A table's sections are React elements with a static element per row, so a
+        // streaming table re-renders only its last row.
+        let split = matches!(tag, "thead" | "tbody" | "tfoot");
+        if need == Need::React || void(element) || split {
             if let Some(href) = self.link_button(ix) {
                 self.encoder.push(seg::LINK);
                 self.encoder.name(tag);
@@ -798,7 +850,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         if let Some(href) = self.link_button(ix) {
             html.links.push(href);
         }
-        self.html_children(&mut html, &children)?;
+        self.html_children(&mut html, children.iter().copied())?;
         self.encoder.push(seg::STATIC);
         self.encoder.name(tag);
         self.encoder.name(element);

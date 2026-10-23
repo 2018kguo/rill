@@ -31,12 +31,20 @@ const variant = option("--variant", "default");
 const candidate = option("--candidate", "rill");
 const show = Number(option("--show", "5"));
 
-if (args.includes("--build") || !existsSync(join(dist, "dom.js"))) build();
+if (args.includes("--build") || !existsSync(join(dist, "dom.js"))) buildAll();
 
-export function build() {
+function buildAll() {
+  // The page, and the highlighting worker beside it (js/src/highlight.ts loads it
+  // from next to the bundle).
+  for (const entry of [join(here, "dom.tsx"), join(here, "../../js/src/highlight-worker.ts")]) build(entry);
+  copyFileSync(join(here, "dom.html"), join(dist, "dom.html"));
+  copyFileSync(join(repo, "js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
+}
+
+function build(entry) {
   const result = spawnSync(
     "bun",
-    ["build", join(here, "dom.tsx"), "--outdir", dist, "--target", "browser", "--splitting",
+    ["build", entry, "--outdir", dist, "--target", "browser", "--splitting",
       "--define", 'process.env.NODE_ENV="production"'],
     { encoding: "utf8" }
   );
@@ -44,8 +52,6 @@ export function build() {
     console.error(result.stdout, result.stderr);
     process.exit(1);
   }
-  copyFileSync(join(here, "dom.html"), join(dist, "dom.html"));
-  copyFileSync(join(repo, "js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
 }
 
 function corpus(name) {
