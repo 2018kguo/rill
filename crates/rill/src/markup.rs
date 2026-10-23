@@ -863,9 +863,9 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         }
         let (element, props) = self.component(ix)?;
         let children = self.children(ix);
-        // A table's sections are React elements with a static element per row, so a
-        // streaming table re-renders only its last row.
-        let split = matches!(tag, "thead" | "tbody" | "tfoot");
+        // While streaming, a table's sections are React elements with a static element
+        // per row, so a growing table re-renders only its last row.
+        let split = self.options.spine && matches!(tag, "thead" | "tbody" | "tfoot");
         if need == Need::React || void(element) || split || spine != Spine::Off {
             if let Some(href) = self.link_button(ix) {
                 self.encoder.push(seg::LINK);

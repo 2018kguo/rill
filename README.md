@@ -15,25 +15,45 @@ character position. You get the same page, just much sooner.
 npm install @2018kguo/rill
 ```
 
-```tsx
-import { Streamdown } from "streamdown";
-import { useRill } from "@2018kguo/rill/react";
+Change one import:
 
-export function Message({ markdown }: { markdown: string }) {
-  return <Streamdown {...useRill()}>{markdown}</Streamdown>;
-}
+```diff
+- import { Streamdown } from "streamdown";
++ import { Streamdown } from "@2018kguo/rill/streamdown";
 ```
 
-With Streamdown's `plugins` for math or CJK, hand the same (stable) object to both:
-`<Streamdown plugins={plugins} {...useRill(plugins)}>`. rill targets Streamdown 2.7.1.
+`@2018kguo/rill/streamdown` exports everything `streamdown` 2.7.1 exports, so the rest of
+your imports (`Block`, `CodeBlock`, `defaultComponents`, types...) keep working from the
+new path, including a `BlockComponent` of your own that wraps `Block`: import `Block`
+from here too and it renders with rill. The component takes the same props and renders
+the same DOM, down to every class, attribute and text node, with the same behavior
+(copy and download buttons, table menus, the link safety modal, the caret, server
+rendering and hydration, `components` overrides, `plugins`).
 
-That's the whole change. Until the WebAssembly arrives (and during server rendering)
-`useRill()` returns `null` and Streamdown renders as it always has; then rill takes over,
-with the same output, so nothing on the page moves. If rill ever can't take a document,
-that one renders with Streamdown's own plugins.
+What changes is the work behind it. Streamdown is still the component: its root, its
+contexts, its block splitting and memoization are its own. rill renders each block in
+Rust: static markup becomes one React element with its HTML, and React only builds the
+interactive parts (code block shells, tables, images, link buttons) from Streamdown's
+own exported components. With `@streamdown/code`, code is tokenized by rill-highlight
+(Shiki's tokenizer ported to Rust, the same tokens) in a Web Worker, and Streamdown's
+streaming repair (remend) runs in Rust on just what was appended.
+
+Anything rill doesn't reproduce exactly renders with Streamdown's own `Block`, the same
+way: raw HTML that needs the HTML5 parser, `animated`, `allowedTags`, custom
+`remarkPlugins`/`rehypePlugins`, `urlTransform` and the other Markdown filters,
+`fallbackComponent`, and every block until the WebAssembly has loaded (and on the server
+without `initRill`). `mode="static"` is Streamdown's own as well.
+
+The other tiers stay:
+
+- `@2018kguo/rill/react`: `useRill(plugins?)` returns `remarkPlugins`/`rehypePlugins` for
+  Streamdown's own component (`<Streamdown plugins={plugins} {...useRill(plugins)}>`):
+  rill parses, Streamdown's React renders.
+- `@2018kguo/rill/plugins` (also exported from `/streamdown`): `rillPlugins`, the same
+  plugins when you load rill yourself.
 
 With Vite, keep the package out of dependency pre-bundling, which would move the
-WebAssembly file away from the code that loads it:
+WebAssembly files away from the code that loads them:
 
 ```ts
 // vite.config.ts
@@ -131,8 +151,11 @@ source text instead of copying it.
 
 `@2018kguo/rill` ships the WebAssembly prebuilt, so you don't need Rust to use it.
 
-- `@2018kguo/rill/react`: `useRill(plugins?)`, the drop-in above.
-- `@2018kguo/rill/streamdown`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
+- `@2018kguo/rill/streamdown`: `Streamdown` and `Block`, the drop-in above, plus everything
+  `streamdown` exports. `setRillHighlight(false)` keeps Shiki for code;
+  `setHighlightWasm(url)` points at `rill_highlight.wasm` where a bundler can't place it.
+- `@2018kguo/rill/react`: `useRill(plugins?)`, plugins for Streamdown's own component.
+- `@2018kguo/rill/plugins`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
   and `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
   it). `plugins` is the `plugins` prop you give `<Streamdown>` (its `math` and `cjk`);
   when the two disagree, documents render in JavaScript, with the same output. With
@@ -147,7 +170,7 @@ source text instead of copying it.
 
 ```ts
 import { loadRill } from "@2018kguo/rill";
-import { rillPlugins } from "@2018kguo/rill/streamdown";
+import { rillPlugins } from "@2018kguo/rill/plugins";
 
 const plugins = rillPlugins({ rill: await loadRill(), after: [rehypeSlug] });
 // <Streamdown {...plugins}>{markdown}</Streamdown>
@@ -235,7 +258,7 @@ pub fn render_hast(source: &str, math: bool, cjk: bool) -> Result<rill::wasm::Re
 ```ts
 import init, { renderHast } from "./pkg/my_markdown.js";
 import { createRill } from "@2018kguo/rill/core"; // core: no prebuilt WebAssembly
-import { rillPlugins } from "@2018kguo/rill/streamdown";
+import { rillPlugins } from "@2018kguo/rill/plugins";
 
 await init();
 const plugins = rillPlugins({
@@ -275,6 +298,25 @@ Known differences, all of them position-only or in rare shapes:
   after a bare `>`, can end one line off.
 - micromark miscounts the text before a NUL byte; rill reports what U+FFFD would give.
 
+### The drop-in component
+
+```sh
+node conformance/dom/dom-diff.mjs --build --config code          # DOM, per document
+node conformance/dom/dom-diff.mjs --config code --variant prefix  # props variants
+node conformance/dom/dom-diff.mjs --config code --stream every=40 # streamed prefixes
+bun conformance/dom/ssr.tsx --config code                         # renderToString
+node conformance/dom/interactions.mjs                             # buttons, menus, modal
+node conformance/remend.mjs --fuzz 100000                         # remend against remend
+```
+
+`dom-diff.mjs` renders each document with Streamdown 2.7.1 and with rill's component in
+Chromium, waits until both stop changing (highlighting included), and compares their
+`innerHTML`. Configurations are `default`, `code` (`@streamdown/code`), `math`, `cjk` and
+`all`; variants cover `prefix`, `controls={false}`, `linkSafety` off, `lineNumbers`
+off, a `components` override, `dir="rtl"`, `mode="static"`, `caret` and a custom
+`BlockComponent` around `Block`. With `--stream` it streams the chat corpus into one
+root with `isAnimating`, comparing after every Nth character.
+
 ### Benchmarks
 
 ```sh
@@ -288,9 +330,15 @@ node conformance/bench.mjs                     # the JavaScript pipeline, same d
   marked `rill:`.
 - `crates/rill`: `mdast.rs` (the syntax tree), `hast.rs` (HTML tree, sanitize, harden,
   plugins), `autolink.rs`, and `wasm` (the boundary the JavaScript package reads).
-- `js/`: the `@2018kguo/rill` npm package (loader, opcode decoder, Streamdown plugins,
-  React hook) and its test against Streamdown's own pipeline.
-- `conformance/`: the differential harness, the probe and the benchmark.
+- `crates/rill/src/markup.rs`: Streamdown's DOM as HTML segments for the drop-in;
+  `remend.rs`: remend 1.4.0.
+- `crates/rill-highlight`: Shiki's TextMate tokenizer in Rust (`highlight/` builds its
+  data and tests it against Shiki).
+- `js/`: the `@2018kguo/rill` npm package (the drop-in component, loader, opcode
+  decoder, Streamdown plugins, React hook) and its test against Streamdown's pipeline.
+- `conformance/`: the differential harnesses (trees, DOM, SSR, interactions, remend), the
+  probe and the benchmark.
+- `demo/perf`: the main-thread benchmark (production React, CPU throttling).
 - `demo/`: the page in the GIF.
 
 ## License

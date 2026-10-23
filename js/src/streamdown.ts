@@ -195,7 +195,11 @@ function streamdownPlugins(
   if (!wrapped) {
     wrapped = {
       ...plugins,
-      code: { ...code, highlight: (options, callback) => highlighter.highlight(options, callback ?? (() => {})) },
+      code: {
+        ...code,
+        highlight: (options, callback) =>
+          highlighter.highlight(options, callback ?? (() => {})),
+      },
     };
     codePlugins.set(plugins, wrapped);
   }
