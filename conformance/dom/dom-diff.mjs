@@ -34,11 +34,12 @@ const show = Number(option("--show", "5"));
 if (args.includes("--build") || !existsSync(join(dist, "dom.js"))) buildAll();
 
 function buildAll() {
-  // The page, and the highlighting worker beside it (js/src/highlight.ts loads it
+  // The page, and rill's highlighting worker beside it (js/src/highlight.ts loads it
   // from next to the bundle).
   for (const entry of [join(here, "dom.tsx"), join(here, "../../js/src/highlight-worker.ts")]) build(entry);
   copyFileSync(join(here, "dom.html"), join(dist, "dom.html"));
   copyFileSync(join(repo, "js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
+  copyFileSync(join(repo, "js/wasm/rill_highlight.wasm"), join(dist, "rill_highlight.wasm"));
 }
 
 function build(entry) {
@@ -55,8 +56,8 @@ function build(entry) {
 }
 
 function corpus(name) {
-  if (name === "examples" || name === "chat") {
-    const directory = name === "chat" ? join(here, "chat") : join(repo, "examples");
+  if (name === "examples" || name === "chat" || existsSync(join(name, "."))) {
+    const directory = name === "chat" ? join(here, "chat") : name === "examples" ? join(repo, "examples") : name;
     return readdirSync(directory)
       .filter((file) => file.endsWith(".md"))
       .sort()
@@ -65,6 +66,7 @@ function corpus(name) {
   const path =
     name === "real" ? join(repo, "conformance/real.jsonl")
     : name;
+  if (path.endsWith(".md")) return [readFileSync(path, "utf8")];
   return readFileSync(path, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line));
 }
 
@@ -176,13 +178,20 @@ if (probe !== undefined) {
     report(name, results, (index) => JSON.stringify(documents[index]).slice(0, 100));
   }
 }
-const renders = { rill: 0, streamdown: 0 };
+const renders = { rill: 0, streamdown: 0, tableTails: 0, rillHighlight: 0, shiki: 0 };
 for (const worker of pages) {
   const counts = await worker.evaluate(() => window.blockRenders());
   renders.rill += counts.rill;
   renders.streamdown += counts.streamdown;
+  renders.tableTails += counts.tableTails;
+  renders.rillHighlight += counts.highlights.rill;
+  renders.shiki += counts.highlights.shiki;
 }
-console.log(`block renders: ${renders.rill} by rill, ${renders.streamdown} by Streamdown's Block`);
+console.log(
+  `block renders: ${renders.rill} by rill (${renders.tableTails} as a table's new rows), ` +
+    `${renders.streamdown} by Streamdown's Block; ` +
+    `highlights: ${renders.rillHighlight} by rill-highlight, ${renders.shiki} by Shiki`
+);
 await browser.close();
 server.close();
 process.exitCode = failed ? 1 : 0;

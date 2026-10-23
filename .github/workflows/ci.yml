@@ -24,6 +24,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - uses: oven-sh/setup-bun@v2
       - name: wasm-bindgen
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -66,8 +67,26 @@ jobs:
           done
           # @streamdown/cjk: autolink literals end at CJK punctuation; the rest is relinked.
           node conformance/diff.mjs --config cjk --pieces '["https://x.com/a","www.y.org","a@b.co","。","，","（","）","中","<",">","](https://x.com/b。c)"," "]' --length 4
+      - name: remend (Streamdown's streaming repair) against the package
+        run: |
+          sh scripts/build-wasm.sh
+          node conformance/remend.mjs --fuzz 100000
       - name: JavaScript package
         working-directory: js
         run: |
+          npm install --prefix ../highlight --no-audit --no-fund
           npm run build
           npm test
+      - name: The drop-in <Streamdown> against Streamdown 2.7.1 (DOM, SSR)
+        run: |
+          npx playwright install --with-deps chromium
+          for config in default code math cjk all; do
+            node conformance/dom/dom-diff.mjs --build --config "$config"
+          done
+          for variant in prefix controls nosafety nolines components rtl static caret block; do
+            node conformance/dom/dom-diff.mjs --config code --variant "$variant"
+          done
+          node conformance/dom/dom-diff.mjs --config code --stream every=60,short=1
+          bun conformance/dom/ssr.tsx --config default
+          bun conformance/dom/ssr.tsx --config code
+          node conformance/dom/interactions.mjs

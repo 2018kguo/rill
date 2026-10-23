@@ -59,6 +59,8 @@ export type MarkupOptions = {
   ssr: boolean;
   /** Tag names the page gives components of its own. */
   overrides: string;
+  /** While streaming: React elements down the block's last element (`rill::MarkupOptions::spine`). */
+  spine?: boolean;
 };
 
 /** What a markup export takes: `rill::wasm::render_markup`'s arguments. */
@@ -103,7 +105,7 @@ export function createRill<A extends unknown[]>(
           syntax.math === true,
           syntax.cjk === true,
           options.prefix,
-          (options.linkSafety ? 1 : 0) | (options.ssr ? 2 : 0),
+          (options.linkSafety ? 1 : 0) | (options.ssr ? 2 : 0) | (options.spine ? 4 : 0),
           options.overrides
         );
         try {

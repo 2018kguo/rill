@@ -39,6 +39,11 @@ pub struct MarkupOptions {
     pub overrides: Vec<String>,
     /// Math elements are left for KaTeX (a [`crate::Kind::Math`] tree).
     pub math: bool,
+    /// While an answer streams: the last element of the block, its last element, and so
+    /// on down are React elements (with their other children static), so an update that
+    /// grows the end changes only text nodes there, as React does, instead of replacing
+    /// static HTML.
+    pub spine: bool,
 }
 
 /// The tree holds something only Streamdown's own `Block` renders exactly.
@@ -210,6 +215,16 @@ enum Need {
     React,
     /// Through hast-util-to-jsx-runtime, from the top-level element holding it.
     Jsx,
+}
+
+/// Where an element is on the streaming spine ([`MarkupOptions::spine`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Spine {
+    Off,
+    /// A React element, and so is its last element child.
+    Last,
+    /// A React element, and so is everything inside it.
+    Deep,
 }
 
 struct Markup<'e, 't, 's, 'o> {
@@ -774,19 +789,39 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         }
     }
 
-    /// Writes a count, then the segments for `children`.
-    fn segments(&mut self, children: &[NodeId]) -> Result<(), Unsupported> {
+    /// Writes a count, then the segments for `children` of an element on `spine`.
+    fn segments(&mut self, children: &[NodeId], spine: Spine) -> Result<(), Unsupported> {
         let slot = self.encoder.slot();
+        let last = match spine {
+            Spine::Last => children
+                .iter()
+                .rposition(|&child| self.tag(child).is_some()),
+            _ => None,
+        };
         let mut count = 0;
-        for &child in children {
-            count += self.segment(child)?;
+        for (index, &child) in children.iter().enumerate() {
+            let on = match spine {
+                Spine::Deep => Spine::Deep,
+                Spine::Last if last == Some(index) => {
+                    // What holds text grows anywhere inside: all of it is React.
+                    match self.tag(child) {
+                        Some(
+                            "p" | "li" | "tr" | "td" | "th" | "h1" | "h2" | "h3" | "h4" | "h5"
+                            | "h6",
+                        ) => Spine::Deep,
+                        _ => Spine::Last,
+                    }
+                }
+                _ => Spine::Off,
+            };
+            count += self.segment(child, on)?;
         }
         self.encoder.patch(slot, count);
         Ok(())
     }
 
-    /// Writes the segments for one node; returns how many.
-    fn segment(&mut self, ix: NodeId) -> Result<u32, Unsupported> {
+    /// Writes the segments for one node on `spine`; returns how many.
+    fn segment(&mut self, ix: NodeId, spine: Spine) -> Result<u32, Unsupported> {
         if let Some(text) = self.text(ix) {
             self.encoder.push(seg::TEXT);
             self.encoder.string(text);
@@ -815,14 +850,14 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             let props = self.jsx_props(ix)?;
             self.write_props(&props);
             let children = self.children(ix);
-            self.segments(&children)?;
+            self.segments(&children, spine)?;
             return Ok(1);
         }
         if self.unwrapped_paragraph(ix) {
             let children: Vec<NodeId> = self.tree.children(ix).collect();
             let mut count = 0;
             for child in children {
-                count += self.segment(child)?;
+                count += self.segment(child, spine)?;
             }
             return Ok(count);
         }
@@ -831,7 +866,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         // A table's sections are React elements with a static element per row, so a
         // streaming table re-renders only its last row.
         let split = matches!(tag, "thead" | "tbody" | "tfoot");
-        if need == Need::React || void(element) || split {
+        if need == Need::React || void(element) || split || spine != Spine::Off {
             if let Some(href) = self.link_button(ix) {
                 self.encoder.push(seg::LINK);
                 self.encoder.name(tag);
@@ -843,7 +878,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 self.encoder.name(element);
                 self.write_props(&props);
             }
-            self.segments(&children)?;
+            self.segments(&children, spine)?;
             return Ok(1);
         }
         let mut html = Html::default();
@@ -936,5 +971,12 @@ fn encode<'t, 's>(
     };
     markup.prepare(root);
     let children: Vec<NodeId> = tree.children(root).collect();
-    markup.segments(&children)
+    markup.segments(
+        &children,
+        if options.spine {
+            Spine::Last
+        } else {
+            Spine::Off
+        },
+    )
 }

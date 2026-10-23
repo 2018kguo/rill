@@ -1157,6 +1157,10 @@ pub struct Converted<'s> {
 
 /// mdast-util-to-hast. `katex`: rehype-katex runs later, so ```math blocks count as math.
 pub fn to_hast<'s>(mdast: &mdast::Tree<'s>, katex: bool) -> Converted<'s> {
+    convert(mdast, katex, false)
+}
+
+fn convert<'s>(mdast: &mdast::Tree<'s>, katex: bool, close_open_raw: bool) -> Converted<'s> {
     let mut state = ToHast {
         mdast,
         hast: Tree {
@@ -1182,7 +1186,10 @@ pub fn to_hast<'s>(mdast: &mdast::Tree<'s>, katex: bool) -> Converted<'s> {
         state.hast.append(&mut children, section);
         state.hast.set_children(root, children);
     }
-    if state.simple_raw && !state.raw_boundary && !pair_simple_raw(&mut state.hast, root) {
+    if state.simple_raw
+        && !state.raw_boundary
+        && !pair_simple_raw(&mut state.hast, root, close_open_raw)
+    {
         state.raw_boundary = true;
     }
     Converted {
@@ -1267,15 +1274,51 @@ fn simple_raw_at(tree: &Tree<'_>, ix: NodeId) -> Option<SimpleRaw> {
 /// Turns the simple raw HTML under `parent` into elements, as parse5 would. Returns
 /// `false`, leaving the tree as it was, when a start or end tag has no partner among
 /// its siblings (parse5 would then close or ignore it by rules this does not model).
-fn pair_simple_raw(tree: &mut Tree<'_>, parent: NodeId) -> bool {
-    if !raw_tags_pair(tree, parent) {
+///
+/// With `close_open`, start tags of [`closes_with_parent`] elements left open in a
+/// paragraph, table cell, list item or heading end with it, as parse5 ends them (what a
+/// streaming answer holds while `<sup>1` waits for its `</sup>`). Those elements get no
+/// position, which only [`crate::markup`] (`Options::close_open_raw`) can ignore.
+fn pair_simple_raw(tree: &mut Tree<'_>, parent: NodeId, close_open: bool) -> bool {
+    if !raw_tags_pair(tree, parent, close_open) {
         return false;
     }
     rewrite_simple_raw(tree, parent);
     true
 }
 
-fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId) -> bool {
+/// [`PAIRED_TAGS`] elements outside the HTML parser's formatting elements: parse5 closes
+/// them with their parent and never reopens them later (the adoption agency's
+/// reconstruction is for formatting elements only).
+fn closes_with_parent(tag: &str) -> bool {
+    matches!(
+        tag,
+        "abbr"
+            | "cite"
+            | "del"
+            | "dfn"
+            | "ins"
+            | "kbd"
+            | "mark"
+            | "q"
+            | "samp"
+            | "span"
+            | "sub"
+            | "sup"
+            | "time"
+            | "var"
+    )
+}
+
+/// Parents whose end tag pops every element still open inside them.
+fn closes_open_children(tag: Option<&str>) -> bool {
+    matches!(
+        tag,
+        Some("p" | "td" | "th" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6")
+    )
+}
+
+fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId, close_open: bool) -> bool {
     let mut open = Vec::new();
     for child in tree.children(parent) {
         match simple_raw_at(tree, child) {
@@ -1287,13 +1330,16 @@ fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId) -> bool {
             }
             Some(SimpleRaw::Break | SimpleRaw::Comment) => {}
             None => {
-                if !raw_tags_pair(tree, child) {
+                if !raw_tags_pair(tree, child, close_open) {
                     return false;
                 }
             }
         }
     }
     open.is_empty()
+        || (close_open
+            && closes_open_children(tree.tag_name(parent))
+            && open.iter().all(|tag| closes_with_parent(tag)))
 }
 
 fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
@@ -1334,6 +1380,13 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
             tree.append(children, node);
         }
         cursor = next;
+    }
+    // Elements still open end with the parent (see `pair_simple_raw`).
+    while levels.len() > 1 {
+        let (element, children) = levels.pop().expect("more than the parent's level");
+        tree.set_children(element, children);
+        let (_, outer) = levels.last_mut().expect("the parent's level stays");
+        tree.append(outer, element);
     }
     let (_, children) = levels.pop().expect("only the parent's level is left");
     tree.set_children(parent, children);
@@ -2163,6 +2216,11 @@ pub struct Options {
     pub harden: Harden,
     pub sanitize: Sanitize,
     pub plugins: Vec<Box<dyn Plugin>>,
+    /// End a simple raw start tag left open (`<sup>1` while its `</sup>` streams) with
+    /// its paragraph, cell, list item or heading, as parse5 does, instead of leaving the
+    /// document to JavaScript. The element then has no position, so only output without
+    /// positions ([`crate::render_markup`]) sets this.
+    pub close_open_raw: bool,
 }
 
 impl Options {
@@ -2516,7 +2574,7 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         root,
         raw_boundary,
         math,
-    } = to_hast(&mdast, options.math);
+    } = convert(&mdast, options.math, options.close_open_raw);
     // HAST owns or borrows the source for every string, so only the positions stay.
     let mdast::Tree { points, .. } = mdast;
     if raw_boundary {

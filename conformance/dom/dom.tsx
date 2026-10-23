@@ -13,7 +13,9 @@ import { math } from "@streamdown/math";
 import {
   Block as RillBlock,
   blockRenders,
+  highlightCounts,
   pendingHighlights,
+  setHighlightWasm,
   Streamdown as RillStreamdown,
 } from "../../js/src/streamdown.ts";
 import { initRill } from "../../js/src/index.ts";
@@ -70,6 +72,7 @@ const sideProps = (component: unknown): Record<string, unknown> =>
     : {};
 
 await initRill(await (await fetch("rill_bg.wasm")).arrayBuffer());
+setHighlightWasm(new URL("rill_highlight.wasm", location.href));
 
 type Component = ComponentType<Record<string, unknown>>;
 const candidates: Record<string, Component> = {
@@ -86,7 +89,6 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
       clearTimeout(timer);
       timer = setTimeout(done, quietMs);
     });
-    const finish = done;
     const started = performance.now();
     const deadline = setTimeout(done, timeoutMs);
     observer.observe(element, {
@@ -97,7 +99,7 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
     });
     function done() {
       if (pendingHighlights() > 0 && performance.now() < started + timeoutMs) {
-        timer = setTimeout(finish, quietMs);
+        timer = setTimeout(done, quietMs);
         return;
       }
       observer.disconnect();
@@ -175,7 +177,13 @@ page.stream = async (steps: [string, boolean][]) => {
   const actual = await renderSteps(candidate, steps);
   return reference.map((html, index) => ({ reference: html, actual: actual[index] }));
 };
-page.blockRenders = () => ({ ...blockRenders });
+// Interaction tests (interactions.mjs): mounts a candidate that stays on the page.
+page.mount = (markdown: string, props: Record<string, unknown> = {}) => {
+  const { host, root } = mount();
+  host.id = "mounted";
+  root.render(createElement(candidates[candidateName] as Component, { plugins, ...props }, markdown));
+};
+page.blockRenders = () => ({ ...blockRenders, highlights: highlightCounts() });
 page.probe = async (markdown: string) => ({
   reference: await renderOne(Streamdown as never, markdown, {}),
   actual: await renderOne(candidates[candidateName] as Component, markdown, {}),

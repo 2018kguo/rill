@@ -1,7 +1,7 @@
 {
   "name": "@2018kguo/rill",
-  "version": "0.1.0",
-  "description": "Render Streamdown's Markdown 10x faster with the exact same output, in Rust compiled to WebAssembly.",
+  "version": "0.2.0",
+  "description": "A drop-in for Streamdown's <Streamdown>: the same DOM with a fraction of the main-thread work, rendered in Rust compiled to WebAssembly.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -9,13 +9,15 @@
     "directory": "js"
   },
   "keywords": [
-    "markdown",
-    "streamdown",
-    "remark",
-    "rehype",
-    "webassembly",
     "ai",
-    "chat"
+    "chat",
+    "markdown",
+    "rehype",
+    "remark",
+    "shiki",
+    "streamdown",
+    "syntax-highlighting",
+    "webassembly"
   ],
   "type": "module",
   "sideEffects": false,
@@ -32,42 +34,58 @@
       "types": "./dist/streamdown.d.ts",
       "default": "./dist/streamdown.js"
     },
+    "./plugins": {
+      "types": "./dist/plugins.d.ts",
+      "default": "./dist/plugins.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "default": "./dist/react.js"
     },
-    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm"
+    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm",
+    "./wasm/rill_highlight.wasm": "./wasm/rill_highlight.wasm"
   },
   "files": [
     "dist",
     "wasm",
-    "src"
+    "src",
+    "highlight"
   ],
   "scripts": {
-    "build": "sh ../scripts/build-wasm.sh && tsc -p .",
+    "build": "sh ../scripts/build-wasm.sh && node ../highlight/scripts/build-grammars.mjs && sh ../highlight/scripts/build-wasm.sh && node ../scripts/build-highlight-data.mjs && tsc -p .",
     "prepack": "npm run build",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
+    "clsx": "^2.1.1",
+    "hast-util-to-jsx-runtime": "^2.3.6",
+    "property-information": "^7.0.0",
     "remark-parse": "^11.0.0",
     "remark-rehype": "^11.1.2",
+    "style-to-js": "^1.1.0",
+    "tailwind-merge": "^3.6.0",
     "unified": "^11.0.5"
   },
   "peerDependencies": {
     "react": ">=18",
+    "react-dom": ">=18",
     "streamdown": "^2.7.1"
   },
   "peerDependenciesMeta": {
     "react": {
       "optional": true
+    },
+    "react-dom": {
+      "optional": true
     }
   },
   "devDependencies": {
     "@streamdown/cjk": "1.0.4",
+    "@streamdown/code": "2.0.0",
     "@streamdown/math": "1.0.3",
     "@types/react": "19.2.2",
-    "@types/react-dom": "^19.2.2",
+    "@types/react-dom": "19.2.2",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "streamdown": "2.7.1",

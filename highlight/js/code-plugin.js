@@ -7,7 +7,8 @@
 //   const code = createCodePlugin({ core });
 //
 // Additions: `highlightSync(options)` returns the result when the language's
-// highlighter is already loaded (null otherwise) without a callback round trip.
+// highlighter is already loaded (null otherwise) without a callback round trip, and
+// `load(options)` loads it (rejecting when a grammar fails to compile).
 
 export function createCodePlugin({ core, themes } = {}) {
   const defaultThemes = themes ?? ['github-light', 'github-dark'];
@@ -150,6 +151,10 @@ export function createCodePlugin({ core, themes } = {}) {
         .then((highlighter) => callback?.(run(highlighter, code, safeLanguage, themes, tokensCacheKey, isIncomplete)))
         .catch((error) => console.error('[Streamdown Code] Failed to highlight code:', error));
       return null;
+    },
+    load({ language, themes }) {
+      const { safeLanguage } = resolve(language, themes);
+      return getHighlighter(safeLanguage, themes).then(() => undefined);
     },
     highlightSync({ code, language, themes, isIncomplete = false }) {
       const { safeLanguage, themeNames } = resolve(language, themes);

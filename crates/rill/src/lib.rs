@@ -110,8 +110,9 @@ pub mod wasm {
         }
 
         /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
-        /// `linkSafety.enabled`, bit 1 server rendering; `overrides`: the tag names
-        /// with components of the page's own, space-separated.
+        /// `linkSafety.enabled`, bit 1 server rendering, bit 2 the streaming spine;
+        /// `overrides`: the tag names with components of the page's own,
+        /// space-separated.
         #[wasm_bindgen(js_name = renderMarkup)]
         pub fn render_markup(
             source: &str,
@@ -124,6 +125,7 @@ pub mod wasm {
             let options = Options {
                 math,
                 cjk,
+                close_open_raw: true,
                 ..Options::default()
             };
             let markup = MarkupOptions {
@@ -132,6 +134,7 @@ pub mod wasm {
                 ssr: flags & 2 != 0,
                 overrides: overrides.split_whitespace().map(str::to_owned).collect(),
                 math: false,
+                spine: flags & 4 != 0,
             };
             super::render_markup(source, &options, &markup)
         }

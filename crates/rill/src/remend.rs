@@ -1501,8 +1501,8 @@ fn incomplete_bold_italic(text: Units) -> Units {
         return text;
     }
     if count_triple_asterisks(&scan) % 2 == 1 {
-        let balanced =
-            scan.count_double_pairs(STAR).is_multiple_of(2) && count_single_asterisks(&scan).is_multiple_of(2);
+        let balanced = scan.count_double_pairs(STAR).is_multiple_of(2)
+            && count_single_asterisks(&scan).is_multiple_of(2);
         drop(scan);
         if balanced {
             return text;

@@ -64,7 +64,12 @@ export {
   type RillPluginsOptions,
 } from "./plugins.ts";
 export { useRill } from "./react.ts";
-export { pendingHighlights, setHighlightWorker } from "./highlight.ts";
+export {
+  highlightCounts,
+  pendingHighlights,
+  setHighlightWasm,
+  setRillHighlight,
+} from "./highlight.ts";
 
 /** What `Block` needs from `<Streamdown>`'s props that its own props lack. */
 type Settings = {
@@ -80,7 +85,7 @@ const RillContext = createContext<Settings | null>(null);
 
 /** How many block renders rill took and how many went to Streamdown's own Block
  * (diagnostics, for tests and benchmarks). */
-export const blockRenders = { rill: 0, streamdown: 0 };
+export const blockRenders = { rill: 0, streamdown: 0, tableTails: 0 };
 
 type Props = StreamdownProps & Record<string, unknown>;
 
@@ -369,7 +374,7 @@ const useServerFormat = () => {
 /** Streamdown's `Block`, rendered by rill. Same props, same DOM. */
 export const Block = memo(function Block(props: BlockProps) {
   const settings = useContext(RillContext);
-  const { linkSafety } = useContext(StreamdownContext);
+  const { linkSafety, isAnimating } = useContext(StreamdownContext);
   const rill = useSyncExternalStore(subscribe, snapshot, snapshot);
   const ssr = useServerFormat();
   const [link, setLink] = useState<{ href: string; id: number } | null>(null);
@@ -385,29 +390,35 @@ export const Block = memo(function Block(props: BlockProps) {
     ? normalizeHtmlIndentation(props.content)
     : props.content;
   const safe = Boolean(linkSafety?.enabled);
+  const tables = useRef<TableCache | null>(null);
   const nodes = useMemo(() => {
     if (!(plan && settings && rill?.markup) || content.length > DEFAULT_MAX_SOURCE_LENGTH) {
+      tables.current = null;
       return null;
     }
-    let reader: HastReader | null = null;
-    try {
-      reader = rill.markup(content, plan, {
-        prefix: settings.prefix,
-        linkSafety: safe,
-        ssr,
-        overrides: plan.overrides,
-      });
-    } catch {
-      return null;
-    }
-    if (!reader) return null;
-    return segments(reader, {
+    const env: Env = {
       settings,
       components: props.components as Record<string, unknown>,
       isIncomplete: props.isIncomplete,
       ssr,
       openLink,
-    });
+    };
+    const render = (source: string) => {
+      let reader: HastReader | null = null;
+      try {
+        reader = rill.markup!(source, plan, {
+          prefix: settings.prefix,
+          linkSafety: safe,
+          ssr,
+          overrides: plan.overrides,
+          spine: isAnimating,
+        });
+      } catch {
+        return null;
+      }
+      return reader ? segments(reader, env) : null;
+    };
+    return renderGrowingTable(content, render, tables, env) ?? remember(content, render(content), tables, env);
     // `plan` is derived from these.
   }, [
     content,
@@ -421,6 +432,7 @@ export const Block = memo(function Block(props: BlockProps) {
     safe,
     linkSafety?.renderModal,
     ssr,
+    isAnimating,
   ]);
   if (!nodes) {
     blockRenders.streamdown += 1;
@@ -445,6 +457,139 @@ export const Block = memo(function Block(props: BlockProps) {
     : createElement(Fragment, null, ...nodes, activator);
 }, sameBlockProps);
 (Block as { displayName?: string }).displayName = "Block";
+
+// ---------------------------------------------------------------------------------
+// Streaming tables: a GFM table's rows parse one line at a time, so once a row's line
+// has ended it renders the same however the table grows. A block that is one table
+// keeps its finished rows' React elements, and rill renders only the header and the
+// lines after them; React then skips the rows it already has.
+// ---------------------------------------------------------------------------------
+
+type TableCache = {
+  /** The block source up to `finished`: the header and the rows the cache holds. A
+   * block that still starts with it has those rows (the partial line after them may
+   * change, as remend heals it). */
+  source: string;
+  /** The header and delimiter rows (with their line endings). */
+  header: string;
+  /** Where the finished lines end in `source`. */
+  finished: number;
+  /** The rows of those lines. */
+  rows: ReactElement[];
+  table: ReactElement;
+  head: ReactElement;
+  body: ReactElement | undefined;
+};
+
+type TableParts = {
+  /** The newlines parse5 moves out of the table's structure, before it. */
+  lead: string;
+  table: ReactElement;
+  head: ReactElement;
+  body: ReactElement | undefined;
+  rows: ReactElement[];
+};
+
+const childList = (element: ReactElement): ReactNode[] => {
+  const children = (element.props as { children?: ReactNode }).children;
+  return children === undefined ? [] : Array.isArray(children) ? children : [children];
+};
+
+/** The parts of a block rendered as exactly one table. */
+function tableParts(nodes: ReactNode[] | null, env: Env): TableParts | null {
+  if (!nodes || nodes.length !== 2) return null;
+  const lead = nodes[0];
+  if (typeof lead !== "string" || !/^\n+$/.test(lead)) return null;
+  const table = nodes[1] as ReactElement;
+  if (!table || table.type !== env.components.table) return null;
+  const [head, body, ...rest] = childList(table) as ReactElement[];
+  if (rest.length > 0 || head?.type !== "thead" || (body && body.type !== "tbody")) return null;
+  const rows = body ? (childList(body) as ReactElement[]) : [];
+  return rows.every((row) => row?.type === "tr") ? { lead, table, head, body, rows } : null;
+}
+
+/** A row's key at `index`: `tr-n`, with `:html` for a static one. */
+const rowKey = (row: ReactElement, index: number) =>
+  `tr-${index}${String(row.key).endsWith(":html") ? ":html" : ""}`;
+
+const nonBlankLines = (text: string) =>
+  text.split("\n").filter((line) => line.trim() !== "").length;
+
+function remember(
+  content: string,
+  nodes: ReactNode[] | null,
+  cache: { current: TableCache | null },
+  env: Env
+): ReactNode[] | null {
+  cache.current = null;
+  const parts = tableParts(nodes, env);
+  if (!parts) return nodes;
+  const second = content.indexOf("\n", content.indexOf("\n") + 1);
+  if (second < 0) return nodes;
+  const header = content.slice(0, second + 1);
+  // Every line after the header is a row (the table holds the whole block).
+  if (parts.rows.length !== nonBlankLines(content.slice(header.length))) return nodes;
+  const finished = Math.max(header.length, content.lastIndexOf("\n") + 1);
+  const done = nonBlankLines(content.slice(header.length, finished));
+  cache.current = {
+    source: content.slice(0, finished),
+    header,
+    finished,
+    rows: parts.rows.slice(0, done),
+    table: parts.table,
+    head: parts.head,
+    body: parts.body,
+  };
+  return nodes;
+}
+
+function renderGrowingTable(
+  content: string,
+  render: (source: string) => ReactNode[] | null,
+  cache: { current: TableCache | null },
+  env: Env
+): ReactNode[] | null {
+  const previous = cache.current;
+  if (!(previous && content.startsWith(previous.source))) {
+    return null;
+  }
+  const tail = content.slice(previous.finished);
+  const parts = tableParts(render(previous.header + tail), env);
+  const rendered = parts?.rows.length ?? 0;
+  if (!parts || rendered === 0 || rendered !== nonBlankLines(tail)) return null;
+  // mdast-util-to-hast's newlines around and between the c cells of each row: the
+  // header's c + 5, the first body row's c + 4, each later row's c + 2, all moved before
+  // the table. So the lead of `rendered` rows gives c, and each cached row adds c + 2.
+  const columns = (parts.lead.length - 2 * rendered - 7) / (rendered + 1);
+  if (!Number.isInteger(columns) || columns < 1) return null;
+  const offset = previous.rows.length;
+  const rows = previous.rows.concat(
+    parts.rows.map((row, index) =>
+      cloneElement(row, { key: rowKey(row, offset + index) })
+    )
+  );
+  const body = parts.body ?? previous.body;
+  const bodyProps = { ...(body?.props as object), key: body?.key } as Record<string, unknown>;
+  delete bodyProps.children;
+  const table = createElement(
+    previous.table.type as ComponentType<Record<string, unknown>>,
+    { ...(parts.table.props as object), key: parts.table.key, children: undefined },
+    previous.head,
+    ...(body ? [createElement("tbody", bodyProps, ...rows)] : [])
+  );
+  blockRenders.tableTails += 1;
+  // The rows finished now join the cache.
+  const finished = Math.max(previous.header.length, content.lastIndexOf("\n") + 1);
+  const done = offset + nonBlankLines(content.slice(previous.finished, finished));
+  cache.current = {
+    ...previous,
+    source: content.slice(0, finished),
+    finished,
+    rows: rows.slice(0, done),
+    body,
+  };
+  return ["\n".repeat(parts.lead.length + offset * (columns + 2)), table];
+}
 
 /**
  * Opens a link as Streamdown's link component does (`onLinkCheck`, `window.open`, or

@@ -13,7 +13,11 @@ import { Block as StreamdownBlock, Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
 
 import { initRill } from "../../js/src/index.ts";
-import { Block as RillBlock, Streamdown as RillStreamdown } from "../../js/src/streamdown.ts";
+import {
+  Block as RillBlock,
+  setHighlightWasm,
+  Streamdown as RillStreamdown,
+} from "../../js/src/streamdown.ts";
 import answer from "../race/answer.md" with { type: "text" };
 import codeAnswer from "./code-answer.md" with { type: "text" };
 
@@ -23,6 +27,7 @@ const scene = params.get("scene") ?? "history";
 const step = Number(params.get("step") ?? 24);
 
 await initRill(await (await fetch("rill_bg.wasm")).arrayBuffer());
+setHighlightWasm(new URL("rill_highlight.wasm", location.href));
 
 // An app's own BlockComponent around the Block it imports.
 const IndexContext = createContext(-1);

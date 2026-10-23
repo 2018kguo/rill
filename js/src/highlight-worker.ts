@@ -1,39 +1,55 @@
-// The code plugin's highlighter (`@streamdown/code`, Shiki with its JavaScript regex
-// engine) in a Web Worker: the same package, so the same tokens, off the main thread.
-// Requests that are cancelled before their turn are skipped.
-import { code } from "@streamdown/code";
+// rill-highlight in a Web Worker, for the drop-in's code blocks (see highlight.ts):
+// tokenizing never runs on the page's main thread. A request rill-highlight cannot take
+// (a grammar that does not compile) is answered with `fallback`, and the page asks the
+// code plugin it was given (Shiki). Requests cancelled before their turn are skipped.
+import type { Options, Result } from "./rill-highlight.ts";
+import { highlightCounts, setRillHighlightWasm, withRill } from "./rill-highlight.ts";
 
-type Request = { type: "highlight"; id: number; options: Parameters<typeof code.highlight>[0] };
-type Message = Request | { type: "cancel"; id: number };
-
-const queue: Request[] = [];
-let scheduled = false;
+type Message =
+  | { type: "init"; wasm: string }
+  | { type: "highlight"; id: number; options: Options }
+  | { type: "cancel"; id: number };
 
 const scope = globalThis as unknown as {
   postMessage(message: unknown): void;
   onmessage: ((event: { data: Message }) => void) | null;
 };
 
-type Result = NonNullable<ReturnType<typeof code.highlight>>;
+// rill-highlight's fallback, answered with a marker the reply passes to the page.
+const FALLBACK = { fallback: true } as unknown as Result;
+const highlighter = withRill({
+  highlight(_options: Options, callback: (result: Result) => void) {
+    callback(FALLBACK);
+    return null;
+  },
+});
 
-/** The rows last sent per highlighter (language and themes). Shiki keeps the rows of
- * finished lines as they were, so a reply sends only rows that are not the ones sent at
- * the same index last time (`null` for those), and the page rebuilds the rest. */
+/** The rows last sent per highlighter (language and themes). Finished lines keep their
+ * rows from request to request, so a reply sends only rows that are not the ones sent
+ * at the same index last time (`null` for those), and the page rebuilds the rest. */
 const sent = new Map<string, Result["tokens"]>();
+const queue: { id: number; options: Options }[] = [];
+let scheduled = false;
 
 function run() {
   scheduled = false;
   const request = queue.shift();
   if (!request) return;
-  const { options } = request;
+  const { id, options } = request;
   const channel = `${options.language}\0${JSON.stringify(options.themes)}`;
   const reply = (result: Result) => {
+    if (result === FALLBACK) {
+      scope.postMessage({ id, fallback: true });
+      return;
+    }
     const previous = sent.get(channel) ?? [];
     const rows = result.tokens.map((row, index) => (previous[index] === row ? null : row));
     sent.set(channel, result.tokens);
-    scope.postMessage({ id: request.id, channel, result: { ...result, tokens: rows } });
+    // Shiki's grammar state stays here; the page never reads it.
+    const { grammarState: _state, ...rest } = result as Result & { grammarState?: unknown };
+    scope.postMessage({ id, channel, result: { ...rest, tokens: rows }, counts: highlightCounts });
   };
-  const cached = code.highlight(request.options, reply);
+  const cached = highlighter.highlight(options, reply);
   if (cached) reply(cached);
   schedule();
 }
@@ -46,11 +62,13 @@ function schedule() {
 }
 
 scope.onmessage = ({ data }) => {
-  if (data.type === "cancel") {
+  if (data.type === "init") {
+    setRillHighlightWasm(new URL(data.wasm));
+  } else if (data.type === "cancel") {
     const index = queue.findIndex((request) => request.id === data.id);
     if (index >= 0) queue.splice(index, 1);
-    return;
+  } else {
+    queue.push({ id: data.id, options: data.options });
+    schedule();
   }
-  queue.push(data);
-  schedule();
 };

@@ -28,7 +28,7 @@ const profile = args.includes("--profile");
 const breakdown = args.includes("--breakdown");
 
 if (args.includes("--build") || !existsSync(join(dist, "perf.js"))) {
-  // The page, and the highlighting worker beside it (js/src/highlight.ts loads it
+  // The page, and rill's highlighting worker beside it (js/src/highlight.ts loads it
   // from next to the bundle).
   for (const entry of [join(here, "perf.tsx"), join(here, "../../js/src/highlight-worker.ts")]) build(entry);
   // The app's stylesheet: real layout, as in a Tailwind app.
@@ -52,6 +52,7 @@ function build(entry) {
   }
   copyFileSync(join(here, "perf.html"), join(dist, "perf.html"));
   copyFileSync(join(here, "../../js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
+  copyFileSync(join(here, "../../js/wasm/rill_highlight.wasm"), join(dist, "rill_highlight.wasm"));
 }
 
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm" };
