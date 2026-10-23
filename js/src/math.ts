@@ -1,11 +1,11 @@
 // The math tail: rill returns a `math` tree finished except for its math elements, which
 // are left as sanitized `<code class="language-math">` (in a `<pre>` for display math).
-// Each is rendered on its own: the tail's plugins (Streamdown's KaTeX, sanitize and
-// harden) run on a tree holding just that element, and the result takes its place.
-// conformance/diff.mjs checks this against Streamdown's whole-tree order.
-// rehype-katex only replaces that element and sanitize and harden act per element, so
-// this matches running them on the whole tree. Results are cached by expression, so a
-// streamed answer renders each formula once, not on every update.
+// Each is rendered on its own: the tail's plugins (Streamdown's `plugins.math` KaTeX,
+// which runs after sanitize and harden) run on a tree holding just that element, and the
+// result takes its place. rehype-katex only replaces that element, so this matches
+// running it on the whole tree; conformance/diff.mjs --config math checks that. Results
+// are cached by expression, so a streamed answer renders each formula once, not on every
+// update.
 import { unified } from "unified";
 import type { PluggableList, Processor } from "unified";
 

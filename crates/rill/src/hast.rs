@@ -2142,12 +2142,12 @@ impl Json<'_, '_> {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-/// rehype-sanitize's schema: the default, plus `className` values `<code>` may keep beyond
-/// `language-*`.
+/// rehype-sanitize's schema: Streamdown's, plus `className` values `<code>` may keep
+/// beyond `language-*`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sanitize {
-    /// For example `["math", "math-display", "math-inline"]`, so rehype-katex can still
-    /// find remark-math's code after sanitizing.
+    /// For example `["math-display", "math-inline"]`, for a rehype plugin after the chain
+    /// that reads remark-math's classes.
     pub code_classes: &'static [&'static str],
 }
 
@@ -2216,12 +2216,13 @@ pub enum Kind {
     /// Final HAST: Streamdown's whole rehype chain ran.
     Complete,
     /// HAST before `rehype-raw`: raw HTML (or a link in a link) needs parse5. Run
-    /// rehype-raw, rehype-katex, rehype-sanitize and rehype-harden on it in JavaScript.
+    /// rehype-raw, rehype-sanitize and rehype-harden on it in JavaScript, then (with
+    /// [`Options::math`]) rehype-katex.
     Raw,
-    /// Final HAST except its math elements, left as sanitized `<code
-    /// class="language-math">` (in a `<pre>` for display math). Render each with
-    /// rehype-katex, rehype-sanitize and rehype-harden on its own in JavaScript; that
-    /// matches Streamdown running them on the whole tree.
+    /// With [`Options::math`]: final HAST except its math elements, left as sanitized
+    /// `<code class="language-math">` (in a `<pre>` for display math) for rehype-katex,
+    /// which Streamdown runs after the rest of the chain. Rendering each on its own
+    /// matches running it on the whole tree; sanitize and harden never see its output.
     Math,
 }
 
