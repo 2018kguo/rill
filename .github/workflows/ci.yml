@@ -69,6 +69,8 @@ jobs:
             node conformance/diff.mjs --config "$config" --pieces '["**","*","_","~~","中","」","「","a",".","。"," "]' --length 5
             node conformance/diff.mjs --config "$config" --pieces '["*","_","~","\uFE0E","\uFE01","“","中","😀","a"," "]' --length 5
           done
+          # Indented code on micromark's lazy line: after a container that did not continue.
+          node conformance/diff.mjs --pieces '["> ","- ","1. ",">\n","    a\n","a\n","\n","```\n"]' --length 5
           # @streamdown/cjk: autolink literals end at CJK punctuation; the rest is relinked.
           node conformance/diff.mjs --config cjk --pieces '["https://x.com/a","www.y.org","a@b.co","。","，","（","）","中","<",">","](https://x.com/b。c)"," "]' --length 4
       - name: remend (Streamdown's streaming repair) against the package

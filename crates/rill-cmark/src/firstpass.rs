@@ -71,6 +71,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         let mut line_start = LineStart::new(&bytes[start_ix..]);
 
         let i = scan_containers(&self.tree, &mut line_start);
+        // rill: micromark's lazy line: a container did not continue (and none starts).
+        let mut lazy = i < self.tree.spine_len();
         if self.lazy_html.take() != Some(start_ix) {
             for _ in i..self.tree.spine_len() {
                 self.pop(start_ix);
@@ -109,6 +111,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     None
                 })
             {
+                lazy = false;
                 let after_marker_index = start_ix + line_start.bytes_scanned();
                 self.continue_list(container_start - outer_indent, ch, index);
                 self.tree.append(Item {
@@ -152,6 +155,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     }
                 }
             } else if line_start.scan_blockquote_marker() {
+                lazy = false;
                 self.finish_list(start_ix);
                 self.tree.append(Item {
                     start: container_start,
@@ -194,10 +198,19 @@ impl<'a, 'b> FirstPass<'a, 'b> {
 
         let indent = line_start.scan_space_upto(4);
         if indent == 4 {
+            // rill: micromark keeps an item that began with a blank line open through
+            // the blank lines after it, until this line fails to continue it: lazy too.
+            let lazy = lazy
+                || self.begin_list_item.is_some()
+                    && self.last_line_blank
+                    && self
+                        .tree
+                        .peek_up()
+                        .is_some_and(|ix| matches!(self.tree[ix].item.body, ItemBody::ListItem(_)));
             self.finish_list(start_ix);
             let ix = start_ix + line_start.bytes_scanned();
             let remaining_space = line_start.remaining_space();
-            return self.parse_indented_code_block(ix, remaining_space);
+            return self.parse_indented_code_block(ix, remaining_space, lazy);
         }
 
         let ix = start_ix + line_start.bytes_scanned();
@@ -1160,11 +1173,18 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         ix
     }
 
-    fn parse_indented_code_block(&mut self, start_ix: usize, mut remaining_space: usize) -> usize {
+    /// rill: `lazy`: it starts on micromark's lazy line (in the flow of a container that
+    /// did not continue), where its continuation check fails at once, so it is that line.
+    fn parse_indented_code_block(
+        &mut self,
+        start_ix: usize,
+        mut remaining_space: usize,
+        lazy: bool,
+    ) -> usize {
         self.tree.append(Item {
             start: start_ix,
             end: 0, // will get set later
-            body: ItemBody::IndentCodeBlock,
+            body: ItemBody::IndentCodeBlock(lazy),
         });
         self.tree.push();
         let bytes = self.text.as_bytes();
@@ -1186,6 +1206,9 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 end_ix = ix;
             }
 
+            if lazy {
+                break;
+            }
             let mut line_start = LineStart::new(&bytes[ix..]);
             let n_containers = scan_containers(&self.tree, &mut line_start);
             if n_containers < self.tree.spine_len()

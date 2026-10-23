@@ -71,6 +71,10 @@ pub struct Syntax {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CodeBlockKind<'a> {
     Indented,
+    /// rill: indented code that starts on micromark's lazy line (in the flow of a
+    /// container that did not continue): that line alone, with no whitespace-only lines
+    /// after it.
+    LazyIndented,
     /// The value contained in the tag describes the language of the code, which may be empty.
     Fenced(CowStr<'a>),
 }

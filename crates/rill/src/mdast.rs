@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 pub use rill_cmark::Syntax;
-use rill_cmark::{Alignment, Event, LinkType, Parser, Tag, TagEnd};
+use rill_cmark::{Alignment, CodeBlockKind, Event, LinkType, Parser, Tag, TagEnd};
 
 use crate::autolink::{self, Finder, Piece};
 use crate::json::{json_string, json_u32};
@@ -180,6 +180,8 @@ pub struct CodeBlock<'s> {
     pub meta: Option<Box<str>>,
     /// Always `true` for math.
     pub fenced: bool,
+    /// Indented code on micromark's lazy line (see `CodeBlockKind::LazyIndented`).
+    pub lazy: bool,
 }
 
 /// mdast's Resource and Alternative mixins: a link's or image's destination.
@@ -831,7 +833,7 @@ impl<'s> Builder<'s> {
                 start = indented_code_start(source, start, synthesized);
                 end = trim_blank_lines(source, start, end);
                 // ponytail: top level only; container prefixes would need the spine.
-                if !in_container {
+                if !in_container && !code.lazy {
                     let (tail, suffix) = indented_tail(source, end);
                     end = tail;
                     if !suffix.is_empty() {
@@ -1523,6 +1525,7 @@ impl<'s> Builder<'s> {
                     lang,
                     meta,
                     fenced,
+                    lazy: kind == CodeBlockKind::LazyIndented,
                 }))
             }
             Tag::MathBlock(_) => {
@@ -1532,6 +1535,7 @@ impl<'s> Builder<'s> {
                     lang: None,
                     meta: (!info.is_empty()).then(|| rill_cmark::decode_string(info).into()),
                     fenced: true,
+                    lazy: false,
                 }))
             }
             Tag::HtmlBlock => NodeKind::Html(Cow::Borrowed("")),

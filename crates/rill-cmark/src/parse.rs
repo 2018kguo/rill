@@ -97,7 +97,8 @@ pub(crate) enum ItemBody {
     FencedCodeBlock(CowIndex),
     // rill: `$$` math flow; the index is its meta string.
     MathBlock(CowIndex),
-    IndentCodeBlock,
+    /// rill: whether it starts on micromark's lazy line.
+    IndentCodeBlock(bool),
     HtmlBlock,
     BlockQuote,
     List(bool, u8, u64), // is_tight, list character, list start index
@@ -1876,7 +1877,7 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
         ItemBody::Link(..) => TagEnd::Link,
         ItemBody::Image(..) => TagEnd::Image,
         ItemBody::Heading(level) => TagEnd::Heading(level),
-        ItemBody::IndentCodeBlock | ItemBody::FencedCodeBlock(..) => TagEnd::CodeBlock,
+        ItemBody::IndentCodeBlock(_) | ItemBody::FencedCodeBlock(..) => TagEnd::CodeBlock,
         ItemBody::MathBlock(..) => TagEnd::MathBlock,
         ItemBody::BlockQuote => TagEnd::BlockQuote,
         ItemBody::HtmlBlock => TagEnd::HtmlBlock,
@@ -1945,7 +1946,8 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::FencedCodeBlock(cow_ix) => {
             Tag::CodeBlock(CodeBlockKind::Fenced(allocs.take_cow(cow_ix)))
         }
-        ItemBody::IndentCodeBlock => Tag::CodeBlock(CodeBlockKind::Indented),
+        ItemBody::IndentCodeBlock(false) => Tag::CodeBlock(CodeBlockKind::Indented),
+        ItemBody::IndentCodeBlock(true) => Tag::CodeBlock(CodeBlockKind::LazyIndented),
         ItemBody::MathBlock(cow_ix) => Tag::MathBlock(allocs.take_cow(cow_ix)),
         ItemBody::BlockQuote => Tag::BlockQuote,
         ItemBody::List(_, c, listitem_start) => {
