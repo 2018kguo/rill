@@ -496,7 +496,10 @@ fn code_point_at(text: &[u16], index: usize) -> (u32, usize) {
 
 /// `/[\p{L}\p{N}_]/u` at a code point.
 fn word_code_point(code_point: u32) -> bool {
-    code_point == u32::from(UNDERSCORE) || letter_or_number(code_point)
+    if code_point < 0x80 {
+        return code_point == u32::from(UNDERSCORE) || (code_point as u8).is_ascii_alphanumeric();
+    }
+    letter_or_number(code_point)
 }
 
 /// `/^[\s_~*`]*$/`.
@@ -1027,6 +1030,17 @@ fn math_mask(text: &[u16], regions: &[u8], mut context: MathContext) -> (Vec<u8>
     let mut mask = vec![0; n];
     let mut i = 0;
     while i < n {
+        // Only `\` and `$` can change the context: the units before the next one take
+        // the current context.
+        let next = text[i..]
+            .iter()
+            .position(|&unit| unit == BACKSLASH || unit == DOLLAR)
+            .map_or(n, |offset| i + offset);
+        mask[i..next].fill(u8::from(context != MathContext::None));
+        i = next;
+        if i >= n {
+            break;
+        }
         mask[i] = u8::from(context != MathContext::None);
         let delimiter = if regions[i] == PROSE {
             let next = text.get(i + 1).copied();
@@ -1130,11 +1144,16 @@ fn whitespace_unit(unit: u16) -> bool {
 fn count_single_asterisks(view: &View<'_>, from: usize, mut count: usize) -> usize {
     let text = view.text;
     let mut chain = false;
-    for index in from..text.len() {
-        if text[index] != STAR || view.region_at(index) != PROSE {
-            if !word_unit(Some(text[index])) {
-                chain = false;
-            }
+    // Only stars count; a unit that is not a word unit (a star outside prose included)
+    // breaks the chain, so the units between stars are read only while one is open.
+    let mut after = from;
+    while let Some(index) = index_of_unit(text, STAR, after) {
+        if chain && !text[after..index].iter().all(|&unit| word_unit(Some(unit))) {
+            chain = false;
+        }
+        after = index + 1;
+        if view.region_at(index) != PROSE {
+            chain = false;
             continue;
         }
         let previous = if index > 0 {
@@ -1757,35 +1776,56 @@ fn skip_completion(ctx: &Ctx<'_>, content: usize, marker_index: usize, rule: u16
 /// The escape needs only the units around the tilde and whether it is in code.
 fn single_tilde(text: &[u16], from: usize, fence: Option<OpenFence>) -> Units {
     let text = &text[from..];
-    if !text.contains(&TILDE) {
-        return text.to_vec();
-    }
-    let scan = TailScan::new(text, fence);
-    let mut out = Vec::with_capacity(text.len() + 4);
+    // `/([\p{L}\p{N}_])~(?!~)(?=[\p{L}\p{N}_])/gu`: a match is a word code point, a
+    // `~`, and a word code point after it (so not a `~`), and its `~` is escaped in
+    // prose. A match consumes the code point before its `~` and the `~`, never the code
+    // point before the next one, so each `~` is decided on its own: only the tildes are
+    // visited (not a table lookup per code point), and the regions are painted once a
+    // match needs them.
+    let mut scan: Option<TailScan> = None;
+    let mut out: Option<Units> = None;
     let mut copied = 0;
-    let mut i = 0;
-    while i < text.len() {
-        let (code_point, length) = code_point_at(text, i);
-        let tilde = i + length;
-        let matched = word_code_point(code_point)
-            && text.get(tilde) == Some(&TILDE)
-            && text.get(tilde + 1) != Some(&TILDE)
-            && tilde + 1 < text.len()
-            && word_code_point(code_point_at(text, tilde + 1).0);
-        if matched {
-            if scan.regions[tilde] == PROSE {
-                out.extend_from_slice(&text[copied..tilde]);
-                out.push(BACKSLASH);
-                out.push(TILDE);
-                copied = tilde + 1;
-            }
-            i = tilde + 1;
-        } else {
-            i += length;
+    let mut at = 0;
+    while let Some(offset) = text[at..].iter().position(|&unit| unit == TILDE) {
+        let tilde = at + offset;
+        at = tilde + 1;
+        if tilde == 0 || tilde + 1 >= text.len() || text[tilde + 1] == TILDE {
+            continue;
+        }
+        if !(word_code_point(code_point_before(text, tilde))
+            && word_code_point(code_point_at(text, tilde + 1).0))
+        {
+            continue;
+        }
+        let regions = &scan
+            .get_or_insert_with(|| TailScan::new(text, fence))
+            .regions;
+        if regions[tilde] == PROSE {
+            let out = out.get_or_insert_with(|| Vec::with_capacity(text.len() + 4));
+            out.extend_from_slice(&text[copied..tilde]);
+            out.push(BACKSLASH);
+            out.push(TILDE);
+            copied = tilde + 1;
         }
     }
-    out.extend_from_slice(&text[copied..]);
-    out
+    match out {
+        Some(mut out) => {
+            out.extend_from_slice(&text[copied..]);
+            out
+        }
+        None => text.to_vec(),
+    }
+}
+
+/// The code point that ends right before `index` (`index > 0`), decoded as a scan from
+/// the start decodes it (UTF-16 resynchronizes at every unit).
+fn code_point_before(text: &[u16], index: usize) -> u32 {
+    let unit = text[index - 1];
+    if (0xdc00..0xe000).contains(&unit) && index >= 2 && (0xd800..0xdc00).contains(&text[index - 2])
+    {
+        return code_point_at(text, index - 2).0;
+    }
+    u32::from(unit)
 }
 
 /// comparison-operator-handler.ts (`- > 25` → `- \> 25`) on `text[from..]`, which
