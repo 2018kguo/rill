@@ -27,7 +27,7 @@ fn examples_render() -> Result<(), rill::Error> {
 struct HeadingIds;
 
 impl rill::Plugin for HeadingIds {
-    fn hast(&self, tree: &mut rill::hast::HTree<'_>, root: u32, _: &rill::Context<'_>) {
+    fn hast(&self, tree: &mut rill::hast::Tree<'_>, root: u32, _: &rill::Context<'_>) {
         let mut stack = vec![root];
         while let Some(ix) = stack.pop() {
             stack.extend(tree.child_list(ix));
@@ -41,12 +41,14 @@ impl rill::Plugin for HeadingIds {
                 .child_list(ix)
                 .into_iter()
                 .filter_map(|child| match &tree.nodes[child as usize].kind {
-                    rill::hast::HKind::Text(value) => Some(value.to_lowercase().replace(' ', "-")),
+                    rill::hast::NodeKind::Text(value) => {
+                        Some(value.to_lowercase().replace(' ', "-"))
+                    }
                     _ => None,
                 })
                 .collect();
             if let Some(props) = tree.properties_mut(ix) {
-                rill::hast::set(props, "id", rill::hast::Val::Str(text.into()));
+                rill::hast::set(props, "id", rill::hast::Value::Str(text.into()));
             }
         }
     }

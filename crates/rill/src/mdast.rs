@@ -79,7 +79,7 @@ pub fn without_nul(source: &str) -> Cow<'_, str> {
 
 /// A unist point in JavaScript (UTF-16) units.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Pt {
+pub struct Point {
     pub line: u32,
     pub column: u32,
     pub offset: u32,
@@ -129,19 +129,19 @@ impl Points {
     /// micromark starts a task item's paragraph after the line ending that follows its
     /// check, a point no source byte has.
     #[must_use]
-    pub fn past_line_ending(&self, byte: u32) -> Pt {
-        let mut point = self.pt(byte);
+    pub fn past_line_ending(&self, byte: u32) -> Point {
+        let mut point = self.point(byte);
         point.column += 1;
         point.offset += 1;
         point
     }
 
     #[must_use]
-    pub fn pt(&self, byte: u32) -> Pt {
+    pub fn point(&self, byte: u32) -> Point {
         let line = self.line_starts.partition_point(|start| *start <= byte);
         let offset = self.units(byte);
         let column = offset - self.units(self.line_starts[line - 1]) + 1;
-        Pt {
+        Point {
             line: line as u32,
             column,
             offset,
@@ -167,8 +167,8 @@ pub enum At {
 // Arena MDAST
 // ---------------------------------------------------------------------------
 
-pub type Ix = u32;
-pub const NIL: Ix = u32::MAX;
+pub type NodeId = u32;
+pub const NIL: NodeId = u32::MAX;
 
 /// A fenced or indented code block's, or a math block's, payload.
 #[derive(Clone, Debug, PartialEq)]
@@ -219,7 +219,7 @@ pub struct Definition<'s> {
 /// A node's type and fields. Rare, large payloads are boxed so the common nodes (text,
 /// paragraphs, table cells, list items) stay small.
 #[derive(Clone, Debug, PartialEq)]
-pub enum MKind<'s> {
+pub enum NodeKind<'s> {
     Root,
     Paragraph,
     Heading(u8),
@@ -256,64 +256,64 @@ pub enum MKind<'s> {
     TableCell,
 }
 
-impl MKind<'_> {
+impl NodeKind<'_> {
     /// The mdast `type`.
     #[must_use]
     pub fn type_name(&self) -> &'static str {
         match self {
-            MKind::Root => "root",
-            MKind::Paragraph => "paragraph",
-            MKind::Heading(_) => "heading",
-            MKind::ThematicBreak => "thematicBreak",
-            MKind::Blockquote => "blockquote",
-            MKind::List { .. } => "list",
-            MKind::ListItem { .. } => "listItem",
-            MKind::Html(_) => "html",
-            MKind::Code { .. } => "code",
-            MKind::Math { .. } => "math",
-            MKind::Definition { .. } => "definition",
-            MKind::Text(_) => "text",
-            MKind::Emphasis => "emphasis",
-            MKind::Strong => "strong",
-            MKind::Delete => "delete",
-            MKind::InlineCode(_) => "inlineCode",
-            MKind::InlineMath(_) => "inlineMath",
-            MKind::Break => "break",
-            MKind::Link { .. } => "link",
-            MKind::LinkReference { .. } => "linkReference",
-            MKind::Image { .. } => "image",
-            MKind::ImageReference { .. } => "imageReference",
-            MKind::FootnoteDefinition { .. } => "footnoteDefinition",
-            MKind::FootnoteReference { .. } => "footnoteReference",
-            MKind::Table(_) => "table",
-            MKind::TableRow => "tableRow",
-            MKind::TableCell => "tableCell",
+            NodeKind::Root => "root",
+            NodeKind::Paragraph => "paragraph",
+            NodeKind::Heading(_) => "heading",
+            NodeKind::ThematicBreak => "thematicBreak",
+            NodeKind::Blockquote => "blockquote",
+            NodeKind::List { .. } => "list",
+            NodeKind::ListItem { .. } => "listItem",
+            NodeKind::Html(_) => "html",
+            NodeKind::Code { .. } => "code",
+            NodeKind::Math { .. } => "math",
+            NodeKind::Definition { .. } => "definition",
+            NodeKind::Text(_) => "text",
+            NodeKind::Emphasis => "emphasis",
+            NodeKind::Strong => "strong",
+            NodeKind::Delete => "delete",
+            NodeKind::InlineCode(_) => "inlineCode",
+            NodeKind::InlineMath(_) => "inlineMath",
+            NodeKind::Break => "break",
+            NodeKind::Link { .. } => "link",
+            NodeKind::LinkReference { .. } => "linkReference",
+            NodeKind::Image { .. } => "image",
+            NodeKind::ImageReference { .. } => "imageReference",
+            NodeKind::FootnoteDefinition { .. } => "footnoteDefinition",
+            NodeKind::FootnoteReference { .. } => "footnoteReference",
+            NodeKind::Table(_) => "table",
+            NodeKind::TableRow => "tableRow",
+            NodeKind::TableCell => "tableCell",
         }
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct MNode<'s> {
-    pub kind: MKind<'s>,
-    pub first: Ix,
-    pub last: Ix,
-    pub next: Ix,
+pub struct Node<'s> {
+    pub kind: NodeKind<'s>,
+    pub first: NodeId,
+    pub last: NodeId,
+    pub next: NodeId,
     pub at: At,
 }
 
-pub struct MTree<'s> {
+pub struct Tree<'s> {
     pub source: &'s str,
-    pub nodes: Vec<MNode<'s>>,
+    pub nodes: Vec<Node<'s>>,
     pub points: Points,
 }
 
-impl<'s> MTree<'s> {
-    pub const ROOT: Ix = 0;
+impl<'s> Tree<'s> {
+    pub const ROOT: NodeId = 0;
 
     /// A new, detached node.
-    pub fn push(&mut self, kind: MKind<'s>, at: At) -> Ix {
-        let ix = self.nodes.len() as Ix;
-        self.nodes.push(MNode {
+    pub fn push(&mut self, kind: NodeKind<'s>, at: At) -> NodeId {
+        let ix = self.nodes.len() as NodeId;
+        self.nodes.push(Node {
             kind,
             first: NIL,
             last: NIL,
@@ -324,7 +324,7 @@ impl<'s> MTree<'s> {
     }
 
     /// Appends detached `child` to `parent`'s children.
-    pub fn append(&mut self, parent: Ix, child: Ix) {
+    pub fn append(&mut self, parent: NodeId, child: NodeId) {
         let last = self.nodes[parent as usize].last;
         if last == NIL {
             self.nodes[parent as usize].first = child;
@@ -335,12 +335,12 @@ impl<'s> MTree<'s> {
     }
 
     #[must_use]
-    pub fn node(&self, ix: Ix) -> &MNode<'s> {
+    pub fn node(&self, ix: NodeId) -> &Node<'s> {
         &self.nodes[ix as usize]
     }
 
     #[must_use]
-    pub fn children(&self, parent: Ix) -> Children<'_, 's> {
+    pub fn children(&self, parent: NodeId) -> Children<'_, 's> {
         Children {
             tree: self,
             next: self.nodes[parent as usize].first,
@@ -348,7 +348,7 @@ impl<'s> MTree<'s> {
     }
 
     /// `ix`'s byte span; `None` for `NIL` or a node without one.
-    fn bytes(&self, ix: Ix) -> Option<(u32, u32)> {
+    fn bytes(&self, ix: NodeId) -> Option<(u32, u32)> {
         match self.nodes.get(ix as usize)?.at {
             At::Bytes(start, end) => Some((start, end)),
             _ => None,
@@ -356,13 +356,13 @@ impl<'s> MTree<'s> {
     }
 
     #[must_use]
-    pub fn pt_range(&self, at: At) -> Option<(Pt, Pt)> {
+    pub fn point_range(&self, at: At) -> Option<(Point, Point)> {
         match at {
             At::None => None,
-            At::Bytes(start, end) => Some((self.points.pt(start), self.points.pt(end))),
+            At::Bytes(start, end) => Some((self.points.point(start), self.points.point(end))),
             At::PastLineEnding { line_ending, end } => Some((
                 self.points.past_line_ending(line_ending),
-                self.points.pt(end),
+                self.points.point(end),
             )),
         }
     }
@@ -372,11 +372,11 @@ impl<'s> MTree<'s> {
     pub fn to_json(&self) -> String {
         // The text, plus up to about 150 bytes of syntax and position per node.
         let mut out = String::with_capacity(self.source.len() + self.nodes.len() * 150);
-        self.write_json(&mut out, MTree::ROOT);
+        self.write_json(&mut out, Tree::ROOT);
         out
     }
 
-    fn write_json(&self, out: &mut String, ix: Ix) {
+    fn write_json(&self, out: &mut String, ix: NodeId) {
         let node = self.node(ix);
         let field = |out: &mut String, key: &str| {
             out.push_str(",\"");
@@ -411,11 +411,11 @@ impl<'s> MTree<'s> {
         out.push('"');
         let mut parent = true;
         match &node.kind {
-            MKind::Heading(depth) => {
+            NodeKind::Heading(depth) => {
                 field(out, "depth");
                 json_u32(out, u32::from(*depth));
             }
-            MKind::List {
+            NodeKind::List {
                 ordered,
                 start,
                 spread,
@@ -428,7 +428,7 @@ impl<'s> MTree<'s> {
                 }
                 flag(out, "spread", *spread);
             }
-            MKind::ListItem { spread, checked } => {
+            NodeKind::ListItem { spread, checked } => {
                 flag(out, "spread", *spread);
                 field(out, "checked");
                 out.push_str(match checked {
@@ -437,38 +437,38 @@ impl<'s> MTree<'s> {
                     None => "null",
                 });
             }
-            MKind::Html(value)
-            | MKind::Text(value)
-            | MKind::InlineCode(value)
-            | MKind::InlineMath(value) => {
+            NodeKind::Html(value)
+            | NodeKind::Text(value)
+            | NodeKind::InlineCode(value)
+            | NodeKind::InlineMath(value) => {
                 parent = false;
                 string(out, "value", value);
             }
-            MKind::Code(code) | MKind::Math(code) => {
+            NodeKind::Code(code) | NodeKind::Math(code) => {
                 parent = false;
-                if matches!(node.kind, MKind::Code(_)) {
+                if matches!(node.kind, NodeKind::Code(_)) {
                     nullable(out, "lang", code.lang.as_deref());
                 }
                 nullable(out, "meta", code.meta.as_deref());
                 string(out, "value", &code.value);
             }
-            MKind::Definition(definition) => {
+            NodeKind::Definition(definition) => {
                 parent = false;
                 string(out, "identifier", &definition.identifier);
                 string(out, "label", &definition.label);
                 nullable(out, "title", definition.title.as_deref());
                 string(out, "url", &definition.url);
             }
-            MKind::Link(resource) | MKind::Image(resource) => {
-                if matches!(node.kind, MKind::Image(_)) {
+            NodeKind::Link(resource) | NodeKind::Image(resource) => {
+                if matches!(node.kind, NodeKind::Image(_)) {
                     parent = false;
                     string(out, "alt", &resource.alt);
                 }
                 nullable(out, "title", resource.title.as_deref());
                 string(out, "url", &resource.url);
             }
-            MKind::LinkReference(reference) | MKind::ImageReference(reference) => {
-                if matches!(node.kind, MKind::ImageReference(_)) {
+            NodeKind::LinkReference(reference) | NodeKind::ImageReference(reference) => {
+                if matches!(node.kind, NodeKind::ImageReference(_)) {
                     parent = false;
                     string(out, "alt", &reference.alt);
                 }
@@ -476,12 +476,13 @@ impl<'s> MTree<'s> {
                 string(out, "label", &reference.label);
                 reference_type(out, reference.kind);
             }
-            MKind::FootnoteDefinition(association) | MKind::FootnoteReference(association) => {
-                parent = matches!(node.kind, MKind::FootnoteDefinition(_));
+            NodeKind::FootnoteDefinition(association)
+            | NodeKind::FootnoteReference(association) => {
+                parent = matches!(node.kind, NodeKind::FootnoteDefinition(_));
                 string(out, "identifier", &association.identifier);
                 string(out, "label", &association.label);
             }
-            MKind::Table(align) => {
+            NodeKind::Table(align) => {
                 field(out, "align");
                 out.push('[');
                 for (index, align) in align.iter().enumerate() {
@@ -497,7 +498,7 @@ impl<'s> MTree<'s> {
                 }
                 out.push(']');
             }
-            MKind::ThematicBreak | MKind::Break => parent = false,
+            NodeKind::ThematicBreak | NodeKind::Break => parent = false,
             _ => {}
         }
         if parent {
@@ -510,7 +511,7 @@ impl<'s> MTree<'s> {
             }
             out.push(']');
         }
-        if let Some((start, end)) = self.pt_range(node.at) {
+        if let Some((start, end)) = self.point_range(node.at) {
             out.push_str(",\"position\":{\"start\":");
             write_point(out, start);
             out.push_str(",\"end\":");
@@ -522,13 +523,13 @@ impl<'s> MTree<'s> {
 }
 
 pub struct Children<'t, 's> {
-    tree: &'t MTree<'s>,
-    next: Ix,
+    tree: &'t Tree<'s>,
+    next: NodeId,
 }
 
 impl Iterator for Children<'_, '_> {
-    type Item = Ix;
-    fn next(&mut self) -> Option<Ix> {
+    type Item = NodeId;
+    fn next(&mut self) -> Option<NodeId> {
         (self.next != NIL).then(|| {
             let ix = self.next;
             self.next = self.tree.nodes[ix as usize].next;
@@ -577,7 +578,7 @@ pub(crate) fn push_cow(target: &mut Cow<'_, str>, value: &str) {
 // ---------------------------------------------------------------------------
 
 struct Frame {
-    node: Ix,
+    node: NodeId,
     start: usize,
     end: usize,
     /// Spaces pulldown synthesized from a partly consumed tab at an indented code start.
@@ -586,7 +587,7 @@ struct Frame {
 
 /// A closed node whose end waits on what opens the line that closed it.
 struct Exit {
-    node: Ix,
+    node: NodeId,
     settle: Settle,
     /// pulldown's end: the start of the line that closed it.
     closing: usize,
@@ -605,7 +606,7 @@ enum Settle {
     },
     /// A list item (in `list`) whose last child settles first: it ends no earlier than
     /// that child.
-    Item { list: Ix },
+    Item { list: NodeId },
 }
 
 /// An open container's line prefix: a quote marker, or indentation to an item's content
@@ -633,13 +634,13 @@ struct PendingText<'s> {
 /// A task item's check (`[x]`) and the paragraph it opens.
 #[derive(Clone, Copy)]
 struct TaskCheck {
-    paragraph: Ix,
+    paragraph: NodeId,
     start: usize,
     end: usize,
 }
 
 struct Builder<'s> {
-    tree: MTree<'s>,
+    tree: Tree<'s>,
     stack: Vec<Frame>,
     text: Option<PendingText<'s>>,
     /// Plain text collected for the open image's alt; nested images only add text.
@@ -648,7 +649,7 @@ struct Builder<'s> {
     /// The open task item's paragraph with its check's byte span.
     task: Option<TaskCheck>,
     /// Nodes that start past a line ending (see `task_paragraph`), with that line ending.
-    starts: Vec<(Ix, u32)>,
+    starts: Vec<(NodeId, u32)>,
     exits: Vec<Exit>,
     /// Where plain text (image alts included) holds a code run micromark gave up on.
     failed_runs: Vec<u32>,
@@ -661,19 +662,19 @@ impl<'s> Builder<'s> {
         self.failed_runs.extend(runs);
     }
 
-    fn parent(&self) -> Result<Ix, Error> {
+    fn parent(&self) -> Result<NodeId, Error> {
         self.stack
             .last()
             .map(|frame| frame.node)
             .ok_or(Error::Unbalanced)
     }
 
-    fn kind_mut(&mut self) -> Option<&mut MKind<'s>> {
+    fn kind_mut(&mut self) -> Option<&mut NodeKind<'s>> {
         let ix = self.stack.last()?.node;
         Some(&mut self.tree.nodes[ix as usize].kind)
     }
 
-    fn leaf(&mut self, kind: MKind<'s>, at: At) -> Result<(), Error> {
+    fn leaf(&mut self, kind: NodeKind<'s>, at: At) -> Result<(), Error> {
         self.flush_text()?;
         let parent = self.parent()?;
         let ix = self.tree.push(kind, at);
@@ -686,7 +687,7 @@ impl<'s> Builder<'s> {
             let parent = self.parent()?;
             let ix = self
                 .tree
-                .push(MKind::Text(value), At::Bytes(start as u32, end as u32));
+                .push(NodeKind::Text(value), At::Bytes(start as u32, end as u32));
             self.tree.append(parent, ix);
         }
         Ok(())
@@ -718,7 +719,7 @@ impl<'s> Builder<'s> {
         }
     }
 
-    fn open(&mut self, kind: MKind<'s>, start: usize, end: usize) -> Result<(), Error> {
+    fn open(&mut self, kind: NodeKind<'s>, start: usize, end: usize) -> Result<(), Error> {
         self.flush_text()?;
         let parent = self.parent()?;
         let ix = self.tree.push(kind, At::None);
@@ -736,7 +737,12 @@ impl<'s> Builder<'s> {
     fn quote_depth(&self) -> usize {
         self.stack
             .iter()
-            .filter(|frame| matches!(self.tree.nodes[frame.node as usize].kind, MKind::Blockquote))
+            .filter(|frame| {
+                matches!(
+                    self.tree.nodes[frame.node as usize].kind,
+                    NodeKind::Blockquote
+                )
+            })
             .count()
     }
 
@@ -745,7 +751,9 @@ impl<'s> Builder<'s> {
         self.stack.iter().any(|frame| {
             matches!(
                 self.tree.nodes[frame.node as usize].kind,
-                MKind::Blockquote | MKind::ListItem { .. } | MKind::FootnoteDefinition { .. }
+                NodeKind::Blockquote
+                    | NodeKind::ListItem { .. }
+                    | NodeKind::FootnoteDefinition { .. }
             )
         })
     }
@@ -763,8 +771,8 @@ impl<'s> Builder<'s> {
         } = self.stack.pop().ok_or(Error::Unbalanced)?;
         // Only concrete blocks look at their containers, only lists and items at spread.
         let (concrete, listing) = match self.tree.nodes[ix as usize].kind {
-            MKind::Code { .. } | MKind::Math { .. } | MKind::Html(_) => (true, false),
-            MKind::List { .. } | MKind::ListItem { .. } => (false, true),
+            NodeKind::Code { .. } | NodeKind::Math { .. } | NodeKind::Html(_) => (true, false),
+            NodeKind::List { .. } | NodeKind::ListItem { .. } => (false, true),
             _ => (false, false),
         };
         let in_container = concrete && self.in_container();
@@ -778,12 +786,14 @@ impl<'s> Builder<'s> {
         let pulldown_end = end;
         let pending = !self.exits.is_empty();
         let fence_prefixes = match &self.tree.nodes[ix as usize].kind {
-            MKind::Code(code) | MKind::Math(code) if code.fenced && in_container => self.prefixes(),
+            NodeKind::Code(code) | NodeKind::Math(code) if code.fenced && in_container => {
+                self.prefixes()
+            }
             _ => Vec::new(),
         };
         let eof_prefixed = matches!(
             self.tree.nodes[ix as usize].kind,
-            MKind::List { .. } | MKind::Blockquote | MKind::FootnoteDefinition { .. }
+            NodeKind::List { .. } | NodeKind::Blockquote | NodeKind::FootnoteDefinition { .. }
         ) && {
             let (line_start, line_end) = closing_line(source, end);
             line_end == source.len() && self.continued_prefix_end(line_start).0 == source.len()
@@ -799,7 +809,7 @@ impl<'s> Builder<'s> {
             )
         };
         match &mut self.tree.nodes[ix as usize].kind {
-            MKind::Code(code) | MKind::Math(code) if code.fenced => {
+            NodeKind::Code(code) | NodeKind::Math(code) if code.fenced => {
                 let defer;
                 (end, defer) = fence_end(source, &mut code.value, start, end, in_container);
                 if defer {
@@ -814,7 +824,7 @@ impl<'s> Builder<'s> {
                     });
                 }
             }
-            MKind::Code(code) => {
+            NodeKind::Code(code) => {
                 start = indented_code_start(source, start, synthesized);
                 end = trim_blank_lines(source, start, end);
                 // ponytail: top level only; container prefixes would need the spine.
@@ -826,7 +836,7 @@ impl<'s> Builder<'s> {
                     }
                 }
             }
-            MKind::Html(value) => {
+            NodeKind::Html(value) => {
                 if !in_container && unterminated_raw_html(source, start, end) {
                     *value = Cow::Borrowed(&source[start..]);
                     end = source.len();
@@ -838,7 +848,7 @@ impl<'s> Builder<'s> {
                     }
                 }
             }
-            MKind::List {
+            NodeKind::List {
                 spread: list_spread,
                 ..
             } => {
@@ -848,10 +858,10 @@ impl<'s> Builder<'s> {
                 *list_spread = spread;
                 container_end = Some(content_end(start));
             }
-            MKind::Blockquote => container_end = Some(trim_blank_lines(source, start, end)),
+            NodeKind::Blockquote => container_end = Some(trim_blank_lines(source, start, end)),
             // gfm-footnote definitions are micromark containers too.
-            MKind::FootnoteDefinition { .. } => container_end = Some(content_end(start)),
-            MKind::ListItem {
+            NodeKind::FootnoteDefinition { .. } => container_end = Some(content_end(start)),
+            NodeKind::ListItem {
                 spread: item_spread,
                 ..
             } => {
@@ -879,12 +889,12 @@ impl<'s> Builder<'s> {
                     });
                 }
             }
-            MKind::TableCell => {
+            NodeKind::TableCell => {
                 if start > 0 && bytes[start - 1] == b'|' {
                     start -= 1;
                 }
             }
-            MKind::TableRow => {
+            NodeKind::TableRow => {
                 end = trim_line_ending(source, start, end);
                 // The last cell runs through the closing pipe to the row end.
                 let last = self.tree.nodes[ix as usize].last;
@@ -894,7 +904,7 @@ impl<'s> Builder<'s> {
                     *cell_end = (*cell_end).max(end as u32);
                 }
             }
-            MKind::Heading(_) => {
+            NodeKind::Heading(_) => {
                 end = trim_line_ending(source, start, end);
                 // micromark: a setext heading's content includes the definitions that
                 // opened its paragraph, so the heading starts at the first of them.
@@ -903,7 +913,7 @@ impl<'s> Builder<'s> {
                     let mut candidate = self.previous_sibling(parent, ix);
                     // Definitions directly before, each ending on the line before.
                     while candidate != NIL {
-                        let MKind::Definition { .. } = self.tree.nodes[candidate as usize].kind
+                        let NodeKind::Definition { .. } = self.tree.nodes[candidate as usize].kind
                         else {
                             break;
                         };
@@ -921,7 +931,7 @@ impl<'s> Builder<'s> {
                     start = earliest;
                 }
             }
-            MKind::Paragraph | MKind::Table(_) | MKind::ThematicBreak => {
+            NodeKind::Paragraph | NodeKind::Table(_) | NodeKind::ThematicBreak => {
                 end = trim_line_ending(source, start, end);
             }
             _ => {}
@@ -942,7 +952,7 @@ impl<'s> Builder<'s> {
             self.task = None;
             self.task_paragraph(ix, check.start, check.end, end);
         }
-        if matches!(self.tree.nodes[ix as usize].kind, MKind::Paragraph)
+        if matches!(self.tree.nodes[ix as usize].kind, NodeKind::Paragraph)
             && self.tree.nodes[ix as usize].first == NIL
         {
             // micromark never makes an empty paragraph (pulldown does after definitions).
@@ -986,7 +996,7 @@ impl<'s> Builder<'s> {
     }
 
     /// A list item ends no earlier than its last child.
-    fn settle_item(&mut self, ix: Ix, list: Ix, next: Option<(usize, Opens)>) {
+    fn settle_item(&mut self, ix: NodeId, list: NodeId, next: Option<(usize, Opens)>) {
         let source = self.tree.source;
         // Only a sibling's prefix: an outer list's closes this list first.
         let sibling = self.stack.last().is_some_and(|frame| frame.node == list);
@@ -1013,7 +1023,7 @@ impl<'s> Builder<'s> {
     /// An unclosed fence in containers, closed by the line at `closing`.
     fn settle_fence(
         &mut self,
-        ix: Ix,
+        ix: NodeId,
         in_blockquote: bool,
         prefixes: &[Prefix],
         closing: usize,
@@ -1026,7 +1036,7 @@ impl<'s> Builder<'s> {
             let (end, eof_value) = fence_at_eof(source, prefixes, fence_start as usize);
             let node = &mut self.tree.nodes[ix as usize];
             node.at = At::Bytes(fence_start, end as u32);
-            if let MKind::Code(code) | MKind::Math(code) = &mut node.kind {
+            if let NodeKind::Code(code) | NodeKind::Math(code) = &mut node.kind {
                 code.value = Cow::Owned(eof_value);
             }
             return;
@@ -1062,7 +1072,8 @@ impl<'s> Builder<'s> {
         // `onexitcodefenced` strips one final line ending from data that, closed lazily,
         // already stops before the last one: a blank last line goes.
         if !opens_container
-            && let MKind::Code(code) | MKind::Math(code) = &mut self.tree.nodes[ix as usize].kind
+            && let NodeKind::Code(code) | NodeKind::Math(code) =
+                &mut self.tree.nodes[ix as usize].kind
         {
             pop_line_ending(&mut code.value);
         }
@@ -1071,7 +1082,7 @@ impl<'s> Builder<'s> {
     /// A blockquote, list or footnote definition closed by the line at `closing`.
     fn settle_container(
         &mut self,
-        ix: Ix,
+        ix: NodeId,
         eof_prefixed: bool,
         closing: usize,
         content_end: usize,
@@ -1101,7 +1112,7 @@ impl<'s> Builder<'s> {
         if let At::Bytes(_, node_end) = &mut self.tree.nodes[ix as usize].at {
             *node_end = end as u32;
         }
-        if let MKind::List { spread, .. } = &mut self.tree.nodes[ix as usize].kind {
+        if let NodeKind::List { spread, .. } = &mut self.tree.nodes[ix as usize].kind {
             // prepareList: line endings between the content and the exit count toward
             // spread, and the last item reaches the exit unless one follows its content.
             if line_endings(&source.as_bytes()[content_end..end]) >= 2 {
@@ -1117,10 +1128,10 @@ impl<'s> Builder<'s> {
         self.stack
             .iter()
             .filter_map(|frame| match self.tree.nodes[frame.node as usize].kind {
-                MKind::Blockquote => Some(Prefix::Quote),
+                NodeKind::Blockquote => Some(Prefix::Quote),
                 // ponytail: four columns from the line start, exact at the top level.
-                MKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
-                MKind::ListItem { .. } => {
+                NodeKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
+                NodeKind::ListItem { .. } => {
                     Some(Prefix::Item(item_content_column(source, frame.start)))
                 }
                 _ => None,
@@ -1173,7 +1184,7 @@ impl<'s> Builder<'s> {
         prefix_end(self.tree.source, &self.prefixes(), line_start)
     }
 
-    fn extend_last_item(&mut self, list: Ix, list_end: usize) {
+    fn extend_last_item(&mut self, list: NodeId, list_end: usize) {
         let item = self.tree.nodes[list as usize].last;
         if item == NIL {
             return;
@@ -1197,9 +1208,9 @@ impl<'s> Builder<'s> {
     /// mdast-util-gfm-task-list-item `exitParagraphWithTaskListItem`: micromark's paragraph
     /// starts at the check; a text head drops the one whitespace after it and the paragraph
     /// starts there, with `column++` even when that whitespace was a line ending.
-    fn task_paragraph(&mut self, ix: Ix, check_start: usize, check_end: usize, end: usize) {
+    fn task_paragraph(&mut self, ix: NodeId, check_start: usize, check_end: usize, end: usize) {
         let head = self.tree.nodes[ix as usize].first;
-        if head == NIL || !matches!(self.tree.nodes[head as usize].kind, MKind::Text(_)) {
+        if head == NIL || !matches!(self.tree.nodes[head as usize].kind, NodeKind::Text(_)) {
             self.tree.nodes[ix as usize].at = At::Bytes(check_start as u32, end as u32);
             return;
         }
@@ -1209,7 +1220,7 @@ impl<'s> Builder<'s> {
             return;
         }
         if bytes[eol..].starts_with(b"\r\n")
-            && let MKind::Text(value) = &mut self.tree.nodes[head as usize].kind
+            && let NodeKind::Text(value) = &mut self.tree.nodes[head as usize].kind
         {
             // `slice(1)` drops only the CR.
             value.to_mut().insert(0, '\n');
@@ -1219,7 +1230,7 @@ impl<'s> Builder<'s> {
     }
 
     /// Removes `ix`, the newest child of the current parent frame.
-    fn unlink_last_child(&mut self, ix: Ix) {
+    fn unlink_last_child(&mut self, ix: NodeId) {
         let Some(parent) = self.stack.last().map(|frame| frame.node) else {
             return;
         };
@@ -1233,7 +1244,7 @@ impl<'s> Builder<'s> {
         }
     }
 
-    fn previous_sibling(&self, parent: Ix, ix: Ix) -> Ix {
+    fn previous_sibling(&self, parent: NodeId, ix: NodeId) -> NodeId {
         let mut previous = NIL;
         for child in self.tree.children(parent) {
             if child == ix {
@@ -1245,7 +1256,7 @@ impl<'s> Builder<'s> {
     }
 
     /// Whether a blank line separates any two consecutive children of `ix`.
-    fn spread(&self, ix: Ix) -> bool {
+    fn spread(&self, ix: NodeId) -> bool {
         let mut previous: Option<u32> = None;
         for child in self.tree.children(ix) {
             let span = self.tree.bytes(child);
@@ -1313,8 +1324,8 @@ impl<'s> Builder<'s> {
                     ..
                 } = self.stack.pop().ok_or(Error::Unbalanced)?;
                 match &mut self.tree.nodes[ix as usize].kind {
-                    MKind::Image(image) => image.alt = alt,
-                    MKind::ImageReference(reference) => {
+                    NodeKind::Image(image) => image.alt = alt,
+                    NodeKind::ImageReference(reference) => {
                         reference.alt = alt;
                         if reference.kind == ReferenceKind::Collapsed
                             && source.get(end..end + 2) == Some("[]")
@@ -1329,8 +1340,10 @@ impl<'s> Builder<'s> {
             }
             Event::End(TagEnd::CodeBlock | TagEnd::HtmlBlock | TagEnd::MathBlock) => {
                 match self.kind_mut() {
-                    Some(MKind::Code(code) | MKind::Math(code)) => pop_line_ending(&mut code.value),
-                    Some(MKind::Html(value)) => pop_line_ending(value),
+                    Some(NodeKind::Code(code) | NodeKind::Math(code)) => {
+                        pop_line_ending(&mut code.value)
+                    }
+                    Some(NodeKind::Html(value)) => pop_line_ending(value),
                     _ => return Err(Error::Unbalanced),
                 }
                 self.close()
@@ -1338,7 +1351,7 @@ impl<'s> Builder<'s> {
             Event::End(TagEnd::Link) => {
                 let collapsed = matches!(
                     self.kind_mut(),
-                    Some(MKind::LinkReference(reference)) if reference.kind == ReferenceKind::Collapsed
+                    Some(NodeKind::LinkReference(reference)) if reference.kind == ReferenceKind::Collapsed
                 );
                 if let Some(frame) = self.stack.last_mut()
                     && collapsed
@@ -1351,7 +1364,7 @@ impl<'s> Builder<'s> {
             Event::End(_) => self.close(),
             Event::Text(text) => {
                 match self.kind_mut() {
-                    Some(MKind::Code(code) | MKind::Math(code)) => {
+                    Some(NodeKind::Code(code) | NodeKind::Math(code)) => {
                         let synthesized = code.value.is_empty() && start == end;
                         push_cow(&mut code.value, &text);
                         if synthesized && let Some(frame) = self.stack.last_mut() {
@@ -1359,7 +1372,7 @@ impl<'s> Builder<'s> {
                         }
                         return Ok(());
                     }
-                    Some(MKind::Html(value)) => {
+                    Some(NodeKind::Html(value)) => {
                         // pulldown synthesizes the block's own indentation; MDAST starts there,
                         // but after a tab a container prefix partly consumed.
                         let synthesized = value.is_empty() && start == end;
@@ -1392,19 +1405,23 @@ impl<'s> Builder<'s> {
                 Ok(())
             }
             Event::Html(html) => match self.kind_mut() {
-                Some(MKind::Html(value)) => {
+                Some(NodeKind::Html(value)) => {
                     push_cow(value, &html);
                     Ok(())
                 }
                 _ => Err(Error::Unbalanced),
             },
-            Event::InlineHtml(html) => self.leaf(MKind::Html(Cow::from(html)), bytes(start, end)),
-            Event::Code(code) => self.leaf(MKind::InlineCode(Cow::from(code)), bytes(start, end)),
+            Event::InlineHtml(html) => {
+                self.leaf(NodeKind::Html(Cow::from(html)), bytes(start, end))
+            }
+            Event::Code(code) => {
+                self.leaf(NodeKind::InlineCode(Cow::from(code)), bytes(start, end))
+            }
             Event::InlineMath(value) => {
-                self.leaf(MKind::InlineMath(Cow::from(value)), bytes(start, end))
+                self.leaf(NodeKind::InlineMath(Cow::from(value)), bytes(start, end))
             }
             Event::FootnoteReference(label) => self.leaf(
-                MKind::FootnoteReference(Box::new(Association {
+                NodeKind::FootnoteReference(Box::new(Association {
                     identifier: normalize_identifier(&label).into(),
                     label: label.into_string().into(),
                 })),
@@ -1415,9 +1432,9 @@ impl<'s> Builder<'s> {
                 self.push_text(Cow::Borrowed(ending), start, end);
                 Ok(())
             }
-            Event::HardBreak => self.leaf(MKind::Break, bytes(start, end)),
+            Event::HardBreak => self.leaf(NodeKind::Break, bytes(start, end)),
             Event::Rule => self.leaf(
-                MKind::ThematicBreak,
+                NodeKind::ThematicBreak,
                 bytes(start, trim_line_ending(source, start, end)),
             ),
             Event::Definition { label, dest, title } => {
@@ -1428,7 +1445,7 @@ impl<'s> Builder<'s> {
                 let (identifier, label) = self.reference_label(&label, range);
                 let end = skip_blanks(source.as_bytes(), end);
                 self.leaf(
-                    MKind::Definition(Box::new(Definition {
+                    NodeKind::Definition(Box::new(Definition {
                         url: Cow::from(dest),
                         title: title.map(Cow::from),
                         identifier,
@@ -1443,10 +1460,10 @@ impl<'s> Builder<'s> {
                     [.., item, paragraph]
                         if matches!(
                             self.tree.nodes[paragraph.node as usize].kind,
-                            MKind::Paragraph
+                            NodeKind::Paragraph
                         ) && matches!(
                             self.tree.nodes[item.node as usize].kind,
-                            MKind::ListItem { .. }
+                            NodeKind::ListItem { .. }
                         ) && self.tree.nodes[item.node as usize].first == paragraph.node =>
                     {
                         Some((item.node, paragraph.node))
@@ -1455,7 +1472,7 @@ impl<'s> Builder<'s> {
                 };
                 match task {
                     Some((item, paragraph)) => {
-                        if let MKind::ListItem { checked: slot, .. } =
+                        if let NodeKind::ListItem { checked: slot, .. } =
                             &mut self.tree.nodes[item as usize].kind
                         {
                             *slot = Some(checked);
@@ -1483,9 +1500,9 @@ impl<'s> Builder<'s> {
     fn start(&mut self, tag: Tag<'s>, start: usize, end: usize) -> Result<(), Error> {
         let source = self.tree.source;
         let kind = match tag {
-            Tag::Paragraph => MKind::Paragraph,
-            Tag::Heading(level) => MKind::Heading(level as u8),
-            Tag::BlockQuote => MKind::Blockquote,
+            Tag::Paragraph => NodeKind::Paragraph,
+            Tag::Heading(level) => NodeKind::Heading(level as u8),
+            Tag::BlockQuote => NodeKind::Blockquote,
             Tag::CodeBlock(kind) => {
                 let fenced = kind.is_fenced();
                 let (lang, meta) = if fenced {
@@ -1493,7 +1510,7 @@ impl<'s> Builder<'s> {
                 } else {
                     (None, None)
                 };
-                MKind::Code(Box::new(CodeBlock {
+                NodeKind::Code(Box::new(CodeBlock {
                     value: Cow::Borrowed(""),
                     lang,
                     meta,
@@ -1502,33 +1519,35 @@ impl<'s> Builder<'s> {
             }
             Tag::MathBlock(_) => {
                 let info = fence_info_raw(source, start);
-                MKind::Math(Box::new(CodeBlock {
+                NodeKind::Math(Box::new(CodeBlock {
                     value: Cow::Borrowed(""),
                     lang: None,
                     meta: (!info.is_empty()).then(|| rill_cmark::decode_string(info).into()),
                     fenced: true,
                 }))
             }
-            Tag::HtmlBlock => MKind::Html(Cow::Borrowed("")),
-            Tag::List(first) => MKind::List {
+            Tag::HtmlBlock => NodeKind::Html(Cow::Borrowed("")),
+            Tag::List(first) => NodeKind::List {
                 ordered: first.is_some(),
                 start: first.map(|value| value as u32),
                 spread: false,
             },
-            Tag::Item => MKind::ListItem {
+            Tag::Item => NodeKind::ListItem {
                 spread: false,
                 checked: None,
             },
-            Tag::FootnoteDefinition(label) => MKind::FootnoteDefinition(Box::new(Association {
+            Tag::FootnoteDefinition(label) => NodeKind::FootnoteDefinition(Box::new(Association {
                 identifier: normalize_identifier(&label).into(),
                 label: label.into_string().into(),
             })),
-            Tag::Table(align) => MKind::Table(align.iter().copied().map(AlignKind::from).collect()),
-            Tag::TableHead | Tag::TableRow => MKind::TableRow,
-            Tag::TableCell => MKind::TableCell,
-            Tag::Emphasis => MKind::Emphasis,
-            Tag::Strong => MKind::Strong,
-            Tag::Strikethrough => MKind::Delete,
+            Tag::Table(align) => {
+                NodeKind::Table(align.iter().copied().map(AlignKind::from).collect())
+            }
+            Tag::TableHead | Tag::TableRow => NodeKind::TableRow,
+            Tag::TableCell => NodeKind::TableCell,
+            Tag::Emphasis => NodeKind::Emphasis,
+            Tag::Strong => NodeKind::Strong,
+            Tag::Strikethrough => NodeKind::Delete,
             Tag::Link {
                 link_type,
                 dest_url,
@@ -1538,14 +1557,14 @@ impl<'s> Builder<'s> {
                 Some(kind) => {
                     let range = reference_label_range(source, start, end, kind, 1);
                     let (identifier, label) = self.reference_label(&id, range);
-                    MKind::LinkReference(Box::new(Reference {
+                    NodeKind::LinkReference(Box::new(Reference {
                         kind,
                         identifier,
                         label,
                         alt: String::new(),
                     }))
                 }
-                None => MKind::Link(Box::new(Resource {
+                None => NodeKind::Link(Box::new(Resource {
                     url: if link_type == LinkType::Email {
                         Cow::Owned(format!("mailto:{dest_url}"))
                     } else {
@@ -1566,14 +1585,14 @@ impl<'s> Builder<'s> {
                     Some(kind) => {
                         let range = reference_label_range(source, start, end, kind, 2);
                         let (identifier, label) = self.reference_label(&id, range);
-                        MKind::ImageReference(Box::new(Reference {
+                        NodeKind::ImageReference(Box::new(Reference {
                             kind,
                             identifier,
                             label,
                             alt: String::new(),
                         }))
                     }
-                    None => MKind::Image(Box::new(Resource {
+                    None => NodeKind::Image(Box::new(Resource {
                         url: Cow::from(dest_url),
                         title: (!title.is_empty()).then(|| Cow::from(title)),
                         alt: String::new(),
@@ -1633,21 +1652,21 @@ fn reference_kind(link_type: LinkType) -> Option<ReferenceKind> {
 
 /// Parses `source` (NUL-free; see [`without_nul`]) into an arena MDAST, including
 /// mdast-util-gfm-autolink-literal's text transform.
-pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
+pub fn parse_arena(source: &str) -> Result<Tree<'_>, Error> {
     if source.contains('\0') {
         return Err(Error::Nul);
     }
-    let mut tree = MTree {
+    let mut tree = Tree {
         source,
         // Chat Markdown runs 4 to 19 bytes per node, about 8 typically: room for 6.
         nodes: Vec::with_capacity(source.len() / 6 + 16),
         points: Points::new(source),
     };
-    tree.push(MKind::Root, bytes(0, source.len()));
+    tree.push(NodeKind::Root, bytes(0, source.len()));
     let mut builder = Builder {
         tree,
         stack: vec![Frame {
-            node: MTree::ROOT,
+            node: Tree::ROOT,
             start: 0,
             end: source.len(),
             synthesized: 0,
@@ -1679,8 +1698,8 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
     autolink_transform(&mut tree);
     if !failed_runs.is_empty() {
         // An autolink's text, literal ones included, was never tried as code.
-        let autolinks: Vec<(u32, u32)> = (0..tree.nodes.len() as Ix)
-            .filter(|ix| matches!(tree.nodes[*ix as usize].kind, MKind::Link(_)))
+        let autolinks: Vec<(u32, u32)> = (0..tree.nodes.len() as NodeId)
+            .filter(|ix| matches!(tree.nodes[*ix as usize].kind, NodeKind::Link(_)))
             .filter_map(|ix| tree.bytes(ix))
             .filter(|(start, _)| source.as_bytes()[*start as usize] != b'[')
             .collect();
@@ -1689,7 +1708,7 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
                 .iter()
                 .any(|(start, end)| (*start..*end).contains(at))
         });
-        crossed_line_endings(&mut tree, MTree::ROOT, &mut Vec::new(), &failed_runs);
+        crossed_line_endings(&mut tree, Tree::ROOT, &mut Vec::new(), &failed_runs);
     }
     Ok(tree)
 }
@@ -1701,24 +1720,24 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
 /// holds one, as a run inside code, HTML, a link destination, or an autolink was never
 /// tried as code.
 fn crossed_line_endings(
-    tree: &mut MTree<'_>,
-    ix: Ix,
+    tree: &mut Tree<'_>,
+    ix: NodeId,
     prefixes: &mut Vec<Prefix>,
     failed_runs: &[u32],
 ) {
     let source = tree.source;
     let prefix = match tree.nodes[ix as usize].kind {
-        MKind::Paragraph => {
+        NodeKind::Paragraph => {
             if !prefixes.is_empty() {
                 crossed_in_paragraph(tree, ix, prefixes, failed_runs);
             }
             return;
         }
-        MKind::Blockquote => Some(Prefix::Quote),
-        MKind::ListItem { .. } => tree
+        NodeKind::Blockquote => Some(Prefix::Quote),
+        NodeKind::ListItem { .. } => tree
             .bytes(ix)
             .map(|(start, _)| Prefix::Item(item_content_column(source, start as usize))),
-        MKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
+        NodeKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
         _ => None,
     };
     prefixes.extend(prefix);
@@ -1733,8 +1752,8 @@ fn crossed_line_endings(
 }
 
 fn crossed_in_paragraph(
-    tree: &mut MTree<'_>,
-    paragraph: Ix,
+    tree: &mut Tree<'_>,
+    paragraph: NodeId,
     prefixes: &[Prefix],
     failed_runs: &[u32],
 ) {
@@ -1753,7 +1772,7 @@ fn crossed_in_paragraph(
             let crossed = first_run.is_some_and(|at| at < end);
             if matches!(
                 tree.nodes[cursor as usize].kind,
-                MKind::Text(_) | MKind::Break
+                NodeKind::Text(_) | NodeKind::Break
             ) && crossed
                 && next != NIL
                 && text.ends_with(['\n', '\r'])
@@ -1787,7 +1806,7 @@ pub fn parse_json(source: &str) -> Result<String, Error> {
     Ok(parse_arena(&source)?.to_json())
 }
 
-fn write_point(out: &mut String, point: Pt) {
+fn write_point(out: &mut String, point: Point) {
     out.push_str("{\"line\":");
     json_u32(out, point.line);
     out.push_str(",\"column\":");
@@ -1801,37 +1820,39 @@ fn write_point(out: &mut String, point: Pt) {
 // mdast-util-gfm-autolink-literal 2.0.1 `transformGfmAutolinkLiterals` on the arena
 // ---------------------------------------------------------------------------
 
-fn autolink_transform(tree: &mut MTree<'_>) {
+fn autolink_transform(tree: &mut Tree<'_>) {
     let finders: [Finder; 2] = [autolink::find_url, autolink::find_email];
     for finder in finders {
-        transform_children(tree, MTree::ROOT, finder);
+        transform_children(tree, Tree::ROOT, finder);
     }
 }
 
 /// mdast-util-find-and-replace: changed text nodes become new, unpositioned nodes.
-fn transform_children(tree: &mut MTree<'_>, parent: Ix, finder: Finder) {
+fn transform_children(tree: &mut Tree<'_>, parent: NodeId, finder: Finder) {
     let mut previous = NIL;
     let mut cursor = tree.nodes[parent as usize].first;
     while cursor != NIL {
         let next = tree.nodes[cursor as usize].next;
         match &tree.nodes[cursor as usize].kind {
-            MKind::Text(value) => {
+            NodeKind::Text(value) => {
                 if let Some(pieces) = autolink::replace(value, finder) {
                     let mut chain_first = NIL;
                     let mut chain_last = NIL;
                     for piece in pieces {
                         let ix = match piece {
-                            Piece::Text(text) => tree.push(MKind::Text(Cow::Owned(text)), At::None),
+                            Piece::Text(text) => {
+                                tree.push(NodeKind::Text(Cow::Owned(text)), At::None)
+                            }
                             Piece::Link { url, text } => {
                                 let link = tree.push(
-                                    MKind::Link(Box::new(Resource {
+                                    NodeKind::Link(Box::new(Resource {
                                         url: Cow::Owned(url),
                                         title: None,
                                         alt: String::new(),
                                     })),
                                     At::None,
                                 );
-                                let child = tree.push(MKind::Text(Cow::Owned(text)), At::None);
+                                let child = tree.push(NodeKind::Text(Cow::Owned(text)), At::None);
                                 tree.append(link, child);
                                 link
                             }
@@ -1857,7 +1878,7 @@ fn transform_children(tree: &mut MTree<'_>, parent: Ix, finder: Finder) {
                     continue;
                 }
             }
-            MKind::Link { .. } | MKind::LinkReference { .. } => {}
+            NodeKind::Link { .. } | NodeKind::LinkReference { .. } => {}
             _ => transform_children(tree, cursor, finder),
         }
         previous = cursor;

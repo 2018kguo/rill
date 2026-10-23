@@ -12,8 +12,7 @@ use std::fmt::Write as _;
 
 use crate::json::{json_string, json_u32};
 use crate::mdast::{
-    self, AlignKind, At, Error, Ix, MKind, MTree, NIL, Points, Pt, Reference, ReferenceKind,
-    push_cow,
+    self, AlignKind, At, Error, NIL, NodeId, Point, Points, Reference, ReferenceKind, push_cow,
 };
 use crate::url::Url;
 
@@ -32,7 +31,7 @@ pub enum Edge {
 
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
-pub enum Val<'s> {
+pub enum Value<'s> {
     Str(Cow<'s, str>),
     Bool(bool),
     Num(i64),
@@ -42,7 +41,7 @@ pub enum Val<'s> {
 }
 
 /// An element's properties, in hast's order.
-pub type Props<'s> = Vec<(&'static str, Val<'s>)>;
+pub type Props<'s> = Vec<(&'static str, Value<'s>)>;
 
 /// An element's hast `data`, boxed because only some code elements have any.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,7 +51,7 @@ pub struct Data {
 }
 
 #[derive(Clone, Debug)]
-pub enum HKind<'s> {
+pub enum NodeKind<'s> {
     Root,
     Element {
         tag: &'static str,
@@ -64,16 +63,16 @@ pub enum HKind<'s> {
 }
 
 #[derive(Clone, Debug)]
-pub struct HNode<'s> {
-    pub kind: HKind<'s>,
-    pub first: Ix,
-    pub last: Ix,
-    pub next: Ix,
+pub struct Node<'s> {
+    pub kind: NodeKind<'s>,
+    pub first: NodeId,
+    pub last: NodeId,
+    pub next: NodeId,
     pub start: Edge,
     pub end: Edge,
 }
 
-impl HNode<'_> {
+impl Node<'_> {
     /// hast-util-sanitize keeps only complete positions.
     fn drop_partial_position(&mut self) {
         if self.start == Edge::None || self.end == Edge::None {
@@ -83,8 +82,8 @@ impl HNode<'_> {
     }
 }
 
-pub struct HTree<'s> {
-    pub nodes: Vec<HNode<'s>>,
+pub struct Tree<'s> {
+    pub nodes: Vec<Node<'s>>,
     /// `data.quirksMode` from `rehype-raw`.
     pub quirks: bool,
 }
@@ -98,8 +97,8 @@ enum Spacing {
 
 #[derive(Clone, Copy)]
 struct Chain {
-    first: Ix,
-    last: Ix,
+    first: NodeId,
+    last: NodeId,
 }
 
 const EMPTY: Chain = Chain {
@@ -109,8 +108,8 @@ const EMPTY: Chain = Chain {
 
 impl Chain {
     /// A chain of just `ix`, a fresh node whose `next` is still `NIL`. A node that may
-    /// still be linked needs [`HTree::one_chain`].
-    fn one(ix: Ix) -> Chain {
+    /// still be linked needs [`Tree::one_chain`].
+    fn one(ix: NodeId) -> Chain {
         Chain {
             first: ix,
             last: ix,
@@ -120,10 +119,10 @@ impl Chain {
 
 impl Edge {
     /// The point this edge stands for, if any.
-    fn point(self, points: &Points) -> Option<Pt> {
+    fn point(self, points: &Points) -> Option<Point> {
         match self {
             Edge::None => None,
-            Edge::Byte(byte) => Some(points.pt(byte)),
+            Edge::Byte(byte) => Some(points.point(byte)),
             Edge::PastLineEnding(byte) => Some(points.past_line_ending(byte)),
         }
     }
@@ -139,11 +138,11 @@ fn edges(at: At) -> (Edge, Edge) {
     }
 }
 
-impl<'s> HTree<'s> {
-    fn push(&mut self, kind: HKind<'s>, at: At) -> Ix {
+impl<'s> Tree<'s> {
+    fn push(&mut self, kind: NodeKind<'s>, at: At) -> NodeId {
         let (start, end) = edges(at);
-        let ix = self.nodes.len() as Ix;
-        self.nodes.push(HNode {
+        let ix = self.nodes.len() as NodeId;
+        self.nodes.push(Node {
             kind,
             first: NIL,
             last: NIL,
@@ -154,13 +153,13 @@ impl<'s> HTree<'s> {
         ix
     }
 
-    fn text(&mut self, value: impl Into<Cow<'s, str>>) -> Ix {
-        self.push(HKind::Text(value.into()), At::None)
+    fn text(&mut self, value: impl Into<Cow<'s, str>>) -> NodeId {
+        self.push(NodeKind::Text(value.into()), At::None)
     }
 
-    fn element(&mut self, tag: &'static str, props: Props<'s>, at: At) -> Ix {
+    fn element(&mut self, tag: &'static str, props: Props<'s>, at: At) -> NodeId {
         self.push(
-            HKind::Element {
+            NodeKind::Element {
                 tag,
                 props,
                 data: None,
@@ -170,37 +169,49 @@ impl<'s> HTree<'s> {
     }
 
     /// A new node of `kind` with `children`.
-    fn parent(&mut self, kind: HKind<'s>, at: At, children: Chain) -> Ix {
+    fn parent(&mut self, kind: NodeKind<'s>, at: At, children: Chain) -> NodeId {
         let parent = self.push(kind, at);
         self.set_children(parent, children);
         parent
     }
 
     /// A new element with `children`.
-    fn element_with(&mut self, tag: &'static str, props: Props<'s>, at: At, children: Chain) -> Ix {
+    fn element_with(
+        &mut self,
+        tag: &'static str,
+        props: Props<'s>,
+        at: At,
+        children: Chain,
+    ) -> NodeId {
         let element = self.element(tag, props, at);
         self.set_children(element, children);
         element
     }
 
     /// A new element around one fresh node.
-    fn element_around(&mut self, tag: &'static str, props: Props<'s>, at: At, child: Ix) -> Ix {
+    fn element_around(
+        &mut self,
+        tag: &'static str,
+        props: Props<'s>,
+        at: At,
+        child: NodeId,
+    ) -> NodeId {
         self.element_with(tag, props, at, Chain::one(child))
     }
 
-    fn set_children(&mut self, parent: Ix, chain: Chain) {
+    fn set_children(&mut self, parent: NodeId, chain: Chain) {
         self.nodes[parent as usize].first = chain.first;
         self.nodes[parent as usize].last = chain.last;
     }
 
-    fn children_of(&self, parent: Ix) -> Chain {
+    fn children_of(&self, parent: NodeId) -> Chain {
         Chain {
             first: self.nodes[parent as usize].first,
             last: self.nodes[parent as usize].last,
         }
     }
 
-    fn one_chain(&mut self, ix: Ix) -> Chain {
+    fn one_chain(&mut self, ix: NodeId) -> Chain {
         self.nodes[ix as usize].next = NIL;
         Chain {
             first: ix,
@@ -208,7 +219,7 @@ impl<'s> HTree<'s> {
         }
     }
 
-    fn append(&mut self, chain: &mut Chain, ix: Ix) {
+    fn append(&mut self, chain: &mut Chain, ix: NodeId) {
         self.nodes[ix as usize].next = NIL;
         if chain.first == NIL {
             chain.first = ix;
@@ -230,7 +241,7 @@ impl<'s> HTree<'s> {
         }
     }
 
-    fn prepend(&mut self, chain: &mut Chain, ix: Ix) {
+    fn prepend(&mut self, chain: &mut Chain, ix: NodeId) {
         self.nodes[ix as usize].next = chain.first;
         if chain.first == NIL {
             chain.last = ix;
@@ -239,7 +250,7 @@ impl<'s> HTree<'s> {
     }
 
     /// `first` and the siblings after it.
-    fn siblings(&self, first: Ix) -> impl Iterator<Item = Ix> + '_ {
+    fn siblings(&self, first: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         let mut cursor = first;
         std::iter::from_fn(move || {
             let ix = cursor;
@@ -252,17 +263,17 @@ impl<'s> HTree<'s> {
 
     /// An element's tag name.
     #[must_use]
-    pub fn tag_name(&self, ix: Ix) -> Option<&'static str> {
+    pub fn tag_name(&self, ix: NodeId) -> Option<&'static str> {
         match &self.nodes[ix as usize].kind {
-            HKind::Element { tag, .. } => Some(tag),
+            NodeKind::Element { tag, .. } => Some(tag),
             _ => None,
         }
     }
 
     /// An element's properties.
-    pub fn properties_mut(&mut self, ix: Ix) -> Option<&mut Props<'s>> {
+    pub fn properties_mut(&mut self, ix: NodeId) -> Option<&mut Props<'s>> {
         match &mut self.nodes[ix as usize].kind {
-            HKind::Element { props, .. } => Some(props),
+            NodeKind::Element { props, .. } => Some(props),
             _ => None,
         }
     }
@@ -294,25 +305,25 @@ impl<'s> HTree<'s> {
 }
 
 /// Editing for [`Plugin`]s. New nodes have no position, like nodes a rehype plugin makes.
-impl<'s> HTree<'s> {
+impl<'s> Tree<'s> {
     /// A new, detached node.
-    pub fn add(&mut self, kind: HKind<'s>) -> Ix {
+    pub fn add(&mut self, kind: NodeKind<'s>) -> NodeId {
         self.push(kind, At::None)
     }
 
     /// `parent`'s children, in order.
-    pub fn children(&self, parent: Ix) -> impl Iterator<Item = Ix> + '_ {
+    pub fn children(&self, parent: NodeId) -> impl Iterator<Item = NodeId> + '_ {
         self.siblings(self.nodes[parent as usize].first)
     }
 
     /// `parent`'s children, in order, collected so the tree can be edited meanwhile.
     #[must_use]
-    pub fn child_list(&self, parent: Ix) -> Vec<Ix> {
+    pub fn child_list(&self, parent: NodeId) -> Vec<NodeId> {
         self.children(parent).collect()
     }
 
     /// Makes `children` (detached nodes or `parent`'s own) `parent`'s children.
-    pub fn replace_children(&mut self, parent: Ix, children: &[Ix]) {
+    pub fn replace_children(&mut self, parent: NodeId, children: &[NodeId]) {
         let mut chain = EMPTY;
         for &child in children {
             self.append(&mut chain, child);
@@ -322,7 +333,7 @@ impl<'s> HTree<'s> {
 }
 
 /// Sets property `key`, replacing any value it had.
-pub fn set<'s>(props: &mut Props<'s>, key: &'static str, value: Val<'s>) {
+pub fn set<'s>(props: &mut Props<'s>, key: &'static str, value: Value<'s>) {
     match props.iter_mut().find(|(name, _)| *name == key) {
         Some((_, slot)) => *slot = value,
         None => props.push((key, value)),
@@ -331,7 +342,7 @@ pub fn set<'s>(props: &mut Props<'s>, key: &'static str, value: Val<'s>) {
 
 /// Property `key`.
 #[must_use]
-pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Val<'s>> {
+pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Value<'s>> {
     props
         .iter()
         .find(|(name, _)| *name == key)
@@ -494,11 +505,11 @@ struct FootnoteCalls {
 }
 
 struct ToHast<'t, 's> {
-    mdast: &'t MTree<'s>,
-    hast: HTree<'s>,
+    mdast: &'t mdast::Tree<'s>,
+    hast: Tree<'s>,
     /// Definitions by uppercased identifier; the first of a duplicate wins.
     definitions: HashMap<String, Definition<'s>>,
-    footnotes: HashMap<String, Ix>,
+    footnotes: HashMap<String, NodeId>,
     /// Cited footnotes in first-citation order, which numbers them.
     footnote_calls: Vec<FootnoteCalls>,
     /// Raw HTML or links inside links: parse5 effects the native raw stage omits.
@@ -510,9 +521,9 @@ struct ToHast<'t, 's> {
 }
 
 impl<'s> ToHast<'_, 's> {
-    fn collect(&mut self, ix: Ix) {
+    fn collect(&mut self, ix: NodeId) {
         match &self.mdast.node(ix).kind {
-            MKind::Definition(definition) => {
+            mdast::NodeKind::Definition(definition) => {
                 self.definitions
                     .entry(definition.identifier.to_uppercase())
                     .or_insert_with(|| Definition {
@@ -520,7 +531,7 @@ impl<'s> ToHast<'_, 's> {
                         title: definition.title.clone(),
                     });
             }
-            MKind::FootnoteDefinition(association) => {
+            mdast::NodeKind::FootnoteDefinition(association) => {
                 self.footnotes
                     .entry(association.identifier.to_uppercase())
                     .or_insert(ix);
@@ -544,17 +555,16 @@ impl<'s> ToHast<'_, 's> {
     }
 
     /// Handlers that return an array skip the after-break trim.
-    fn returns_array(&self, ix: Ix) -> bool {
+    fn returns_array(&self, ix: NodeId) -> bool {
         match &self.mdast.node(ix).kind {
-            MKind::Break => true,
-            MKind::LinkReference(reference) | MKind::ImageReference(reference) => {
-                !self.defined(&reference.identifier)
-            }
+            mdast::NodeKind::Break => true,
+            mdast::NodeKind::LinkReference(reference)
+            | mdast::NodeKind::ImageReference(reference) => !self.defined(&reference.identifier),
             _ => false,
         }
     }
 
-    fn all(&mut self, parent: Ix) -> Chain {
+    fn all(&mut self, parent: NodeId) -> Chain {
         let mut values = EMPTY;
         let mut previous_break = false;
         for child in self.mdast.children(parent) {
@@ -562,28 +572,28 @@ impl<'s> ToHast<'_, 's> {
             if result.first != NIL && previous_break && !self.returns_array(child) {
                 let head = result.first;
                 let target = match &self.hast.nodes[head as usize].kind {
-                    HKind::Text(_) => Some(head),
-                    HKind::Element { .. } => {
+                    NodeKind::Text(_) => Some(head),
+                    NodeKind::Element { .. } => {
                         let first = self.hast.nodes[head as usize].first;
                         (first != NIL
-                            && matches!(self.hast.nodes[first as usize].kind, HKind::Text(_)))
+                            && matches!(self.hast.nodes[first as usize].kind, NodeKind::Text(_)))
                         .then_some(first)
                     }
                     _ => None,
                 };
                 if let Some(target) = target
-                    && let HKind::Text(value) = &mut self.hast.nodes[target as usize].kind
+                    && let NodeKind::Text(value) = &mut self.hast.nodes[target as usize].kind
                 {
                     *value = trim_markdown_space_start(value);
                 }
             }
-            previous_break = matches!(self.mdast.node(child).kind, MKind::Break);
+            previous_break = matches!(self.mdast.node(child).kind, mdast::NodeKind::Break);
             self.hast.extend(&mut values, result);
         }
         values
     }
 
-    fn element(&mut self, tag: &'static str, ix: Ix, props: Props<'s>) -> Chain {
+    fn element(&mut self, tag: &'static str, ix: NodeId, props: Props<'s>) -> Chain {
         let children = self.all(ix);
         Chain::one(
             self.hast
@@ -591,7 +601,13 @@ impl<'s> ToHast<'_, 's> {
         )
     }
 
-    fn wrapped(&mut self, tag: &'static str, ix: Ix, props: Props<'s>, spacing: Spacing) -> Chain {
+    fn wrapped(
+        &mut self,
+        tag: &'static str,
+        ix: NodeId,
+        props: Props<'s>,
+        spacing: Spacing,
+    ) -> Chain {
         let children = self.all(ix);
         let children = self.hast.wrap(children, spacing);
         Chain::one(
@@ -600,25 +616,27 @@ impl<'s> ToHast<'_, 's> {
         )
     }
 
-    fn one(&mut self, ix: Ix, parent: Ix) -> Chain {
+    fn one(&mut self, ix: NodeId, parent: NodeId) -> Chain {
         // A copy of the shared borrow, so node fields outlive the `&mut self` calls.
         let mdast = self.mdast;
         let at = mdast.node(ix).at;
         match &mdast.node(ix).kind {
-            MKind::Root => {
+            mdast::NodeKind::Root => {
                 let children = self.all(ix);
                 let children = self.hast.wrap(children, Spacing::Tight);
-                Chain::one(self.hast.parent(HKind::Root, at, children))
+                Chain::one(self.hast.parent(NodeKind::Root, at, children))
             }
-            MKind::Blockquote => self.wrapped("blockquote", ix, Vec::new(), Spacing::Loose),
-            MKind::Break => {
+            mdast::NodeKind::Blockquote => {
+                self.wrapped("blockquote", ix, Vec::new(), Spacing::Loose)
+            }
+            mdast::NodeKind::Break => {
                 let br = self.hast.element("br", Vec::new(), at);
                 let mut chain = Chain::one(br);
                 let newline = self.hast.text("\n");
                 self.hast.append(&mut chain, newline);
                 chain
             }
-            MKind::Code(code) => {
+            mdast::NodeKind::Code(code) => {
                 let value = if code.value.is_empty() {
                     Cow::Borrowed("")
                 } else {
@@ -634,7 +652,7 @@ impl<'s> ToHast<'_, 's> {
                     self.math |= first == "math";
                     props.push((
                         "className",
-                        Val::List(vec![Cow::Owned(format!("language-{first}"))]),
+                        Value::List(vec![Cow::Owned(format!("language-{first}"))]),
                     ));
                 }
                 let data = code
@@ -644,7 +662,7 @@ impl<'s> ToHast<'_, 's> {
                     .map(|meta| Box::new(Data { meta }));
                 let text = self.hast.text(value);
                 let code = self.hast.parent(
-                    HKind::Element {
+                    NodeKind::Element {
                         tag: "code",
                         props,
                         data,
@@ -654,17 +672,17 @@ impl<'s> ToHast<'_, 's> {
                 );
                 Chain::one(self.hast.element_around("pre", Vec::new(), at, code))
             }
-            MKind::Delete => self.element("del", ix, Vec::new()),
-            MKind::Emphasis => self.element("em", ix, Vec::new()),
-            MKind::Strong => self.element("strong", ix, Vec::new()),
-            MKind::Paragraph => self.element("p", ix, Vec::new()),
-            MKind::Heading(depth) => {
+            mdast::NodeKind::Delete => self.element("del", ix, Vec::new()),
+            mdast::NodeKind::Emphasis => self.element("em", ix, Vec::new()),
+            mdast::NodeKind::Strong => self.element("strong", ix, Vec::new()),
+            mdast::NodeKind::Paragraph => self.element("p", ix, Vec::new()),
+            mdast::NodeKind::Heading(depth) => {
                 let tag =
                     ["h1", "h2", "h3", "h4", "h5", "h6"][usize::from((*depth).clamp(1, 6) - 1)];
                 self.element(tag, ix, Vec::new())
             }
-            MKind::ThematicBreak => Chain::one(self.hast.element("hr", Vec::new(), at)),
-            MKind::FootnoteReference(association) => {
+            mdast::NodeKind::ThematicBreak => Chain::one(self.hast.element("hr", Vec::new(), at)),
+            mdast::NodeKind::FootnoteReference(association) => {
                 let id = association.identifier.to_uppercase();
                 let safe_id = footnote_safe_id(&id);
                 let index = match self.footnote_calls.iter().position(|calls| calls.id == id) {
@@ -681,14 +699,14 @@ impl<'s> ToHast<'_, 's> {
                 let props = vec![
                     (
                         "href",
-                        Val::Str(Cow::Owned(format!("#user-content-fn-{safe_id}"))),
+                        Value::Str(Cow::Owned(format!("#user-content-fn-{safe_id}"))),
                     ),
                     (
                         "id",
-                        Val::Str(Cow::Owned(format!("user-content-fnref-{safe_id}{suffix}"))),
+                        Value::Str(Cow::Owned(format!("user-content-fnref-{safe_id}{suffix}"))),
                     ),
-                    ("dataFootnoteRef", Val::Bool(true)),
-                    ("ariaDescribedBy", Val::Class("footnote-label")),
+                    ("dataFootnoteRef", Value::Bool(true)),
+                    ("ariaDescribedBy", Value::Class("footnote-label")),
                 ];
                 if self.link_depth > 0 {
                     self.raw_boundary = true;
@@ -697,26 +715,26 @@ impl<'s> ToHast<'_, 's> {
                 let link = self.hast.element_around("a", props, at, label);
                 Chain::one(self.hast.element_around("sup", Vec::new(), at, link))
             }
-            MKind::Html(value) => {
+            mdast::NodeKind::Html(value) => {
                 // Flow HTML (a block of its own) can restructure what follows it.
                 let flow = matches!(
                     self.mdast.node(parent).kind,
-                    MKind::Root
-                        | MKind::Blockquote
-                        | MKind::ListItem { .. }
-                        | MKind::FootnoteDefinition(_)
+                    mdast::NodeKind::Root
+                        | mdast::NodeKind::Blockquote
+                        | mdast::NodeKind::ListItem { .. }
+                        | mdast::NodeKind::FootnoteDefinition(_)
                 );
                 if !flow && SimpleRaw::parse(value).is_some() {
                     self.simple_raw = true;
                 } else {
                     self.raw_boundary = true;
                 }
-                Chain::one(self.hast.push(HKind::Raw(value.clone()), at))
+                Chain::one(self.hast.push(NodeKind::Raw(value.clone()), at))
             }
-            MKind::Image(image) => {
+            mdast::NodeKind::Image(image) => {
                 self.image(image.url.clone(), image.title.clone(), &image.alt, at)
             }
-            MKind::ImageReference(reference) => match self.definition(reference) {
+            mdast::NodeKind::ImageReference(reference) => match self.definition(reference) {
                 None => {
                     let suffix = revert_suffix(reference);
                     let alt = &reference.alt;
@@ -724,31 +742,31 @@ impl<'s> ToHast<'_, 's> {
                 }
                 Some(Definition { url, title }) => self.image(url, title, &reference.alt, at),
             },
-            MKind::InlineCode(value) => {
+            mdast::NodeKind::InlineCode(value) => {
                 let value = if value.contains(['\n', '\r']) {
                     Cow::Owned(value.replace("\r\n", " ").replace(['\r', '\n'], " "))
                 } else {
                     value.clone()
                 };
-                let text = self.hast.push(HKind::Text(value), at);
+                let text = self.hast.push(NodeKind::Text(value), at);
                 Chain::one(self.hast.element_around("code", Vec::new(), at, text))
             }
-            MKind::Link(link) => self.link(ix, link.url.clone(), link.title.clone()),
-            MKind::LinkReference(reference) => match self.definition(reference) {
+            mdast::NodeKind::Link(link) => self.link(ix, link.url.clone(), link.title.clone()),
+            mdast::NodeKind::LinkReference(reference) => match self.definition(reference) {
                 None => {
                     let suffix = revert_suffix(reference);
                     let mut contents = self.all(ix);
                     let head = (contents.first != NIL)
                         .then(|| &mut self.hast.nodes[contents.first as usize].kind);
                     match head {
-                        Some(HKind::Text(value)) => *value = Cow::Owned(format!("[{value}")),
+                        Some(NodeKind::Text(value)) => *value = Cow::Owned(format!("[{value}")),
                         _ => {
                             let open = self.hast.text("[");
                             self.hast.prepend(&mut contents, open);
                         }
                     }
                     match &mut self.hast.nodes[contents.last as usize].kind {
-                        HKind::Text(value) => push_cow(value, &suffix),
+                        NodeKind::Text(value) => push_cow(value, &suffix),
                         _ => {
                             let close = self.hast.text(Cow::Owned(suffix));
                             self.hast.append(&mut contents, close);
@@ -758,33 +776,37 @@ impl<'s> ToHast<'_, 's> {
                 }
                 Some(Definition { url, title }) => self.link(ix, url, title),
             },
-            MKind::List { ordered, start, .. } => {
+            mdast::NodeKind::List { ordered, start, .. } => {
                 let tag = if *ordered { "ol" } else { "ul" };
                 let mut props = Vec::new();
                 if let Some(start) = start.filter(|start| *start != 1) {
-                    props.push(("start", Val::Num(i64::from(start))));
+                    props.push(("start", Value::Num(i64::from(start))));
                 }
                 let results = self.all(ix);
                 let has_task = self.hast.siblings(results.first).any(|item| {
                     matches!(
                         &self.hast.nodes[item as usize].kind,
-                        HKind::Element { tag: "li", props, .. }
-                            if matches!(get(props, "className"), Some(Val::Class("task-list-item")))
+                        NodeKind::Element { tag: "li", props, .. }
+                            if matches!(get(props, "className"), Some(Value::Class("task-list-item")))
                     )
                 });
                 if has_task {
-                    props.push(("className", Val::Class("contains-task-list")));
+                    props.push(("className", Value::Class("contains-task-list")));
                 }
                 let children = self.hast.wrap(results, Spacing::Loose);
                 Chain::one(self.hast.element_with(tag, props, at, children))
             }
-            MKind::ListItem { spread, checked } => self.list_item(ix, parent, *spread, *checked),
-            MKind::Table(align) => self.table(ix, align, at),
-            MKind::Text(value) => Chain::one(self.hast.push(HKind::Text(trim_lines(value)), at)),
-            MKind::Math(math) => {
+            mdast::NodeKind::ListItem { spread, checked } => {
+                self.list_item(ix, parent, *spread, *checked)
+            }
+            mdast::NodeKind::Table(align) => self.table(ix, align, at),
+            mdast::NodeKind::Text(value) => {
+                Chain::one(self.hast.push(NodeKind::Text(trim_lines(value)), at))
+            }
+            mdast::NodeKind::Math(math) => {
                 self.math = true;
                 let text = self.hast.text(math.value.clone());
-                let class = Val::List(vec![
+                let class = Value::List(vec![
                     Cow::Borrowed("language-math"),
                     Cow::Borrowed("math-display"),
                 ]);
@@ -793,10 +815,10 @@ impl<'s> ToHast<'_, 's> {
                         .element_around("code", vec![("className", class)], At::None, text);
                 Chain::one(self.hast.element_around("pre", Vec::new(), at, code))
             }
-            MKind::InlineMath(value) => {
+            mdast::NodeKind::InlineMath(value) => {
                 self.math = true;
                 let text = self.hast.text(value.clone());
-                let class = Val::List(vec![
+                let class = Value::List(vec![
                     Cow::Borrowed("language-math"),
                     Cow::Borrowed("math-inline"),
                 ]);
@@ -805,9 +827,13 @@ impl<'s> ToHast<'_, 's> {
                         .element_around("code", vec![("className", class)], at, text),
                 )
             }
-            MKind::Definition { .. } | MKind::FootnoteDefinition { .. } => EMPTY,
+            mdast::NodeKind::Definition { .. } | mdast::NodeKind::FootnoteDefinition { .. } => {
+                EMPTY
+            }
             // Rows and cells are handled by their table; the unknown handler's `div`.
-            MKind::TableRow | MKind::TableCell => self.element("div", ix, Vec::new()),
+            mdast::NodeKind::TableRow | mdast::NodeKind::TableCell => {
+                self.element("div", ix, Vec::new())
+            }
         }
     }
 
@@ -819,21 +845,21 @@ impl<'s> ToHast<'_, 's> {
         at: At,
     ) -> Chain {
         let mut props = vec![
-            ("src", Val::Str(normalize_uri(url))),
-            ("alt", Val::Str(Cow::Owned(alt.to_owned()))),
+            ("src", Value::Str(normalize_uri(url))),
+            ("alt", Value::Str(Cow::Owned(alt.to_owned()))),
         ];
         if let Some(title) = title {
-            props.push(("title", Val::Str(title)));
+            props.push(("title", Value::Str(title)));
         }
         Chain::one(self.hast.element("img", props, at))
     }
 
-    fn link(&mut self, ix: Ix, url: Cow<'s, str>, title: Option<Cow<'s, str>>) -> Chain {
+    fn link(&mut self, ix: NodeId, url: Cow<'s, str>, title: Option<Cow<'s, str>>) -> Chain {
         // Room for the title and rehype-harden's `target` and `rel`.
         let mut props = Vec::with_capacity(4);
-        props.push(("href", Val::Str(normalize_uri(url))));
+        props.push(("href", Value::Str(normalize_uri(url))));
         if let Some(title) = title {
-            props.push(("title", Val::Str(title)));
+            props.push(("title", Value::Str(title)));
         }
         if self.link_depth > 0 {
             self.raw_boundary = true;
@@ -844,10 +870,16 @@ impl<'s> ToHast<'_, 's> {
         chain
     }
 
-    fn list_item(&mut self, ix: Ix, parent: Ix, spread: bool, checked: Option<bool>) -> Chain {
+    fn list_item(
+        &mut self,
+        ix: NodeId,
+        parent: NodeId,
+        spread: bool,
+        checked: Option<bool>,
+    ) -> Chain {
         let mut results = self.all(ix);
         let loose = match &self.mdast.node(parent).kind {
-            MKind::List {
+            mdast::NodeKind::List {
                 spread: list_spread,
                 ..
             } => {
@@ -855,7 +887,7 @@ impl<'s> ToHast<'_, 's> {
                     || self.mdast.children(parent).any(|item| {
                         matches!(
                             self.mdast.node(item).kind,
-                            MKind::ListItem { spread: true, .. }
+                            mdast::NodeKind::ListItem { spread: true, .. }
                         )
                     })
             }
@@ -876,15 +908,15 @@ impl<'s> ToHast<'_, 's> {
             let input = self.hast.element(
                 "input",
                 vec![
-                    ("type", Val::Str(Cow::Borrowed("checkbox"))),
-                    ("checked", Val::Bool(checked)),
-                    ("disabled", Val::Bool(true)),
+                    ("type", Value::Str(Cow::Borrowed("checkbox"))),
+                    ("checked", Value::Bool(checked)),
+                    ("disabled", Value::Bool(true)),
                 ],
                 At::None,
             );
             self.hast.prepend(&mut children, input);
             self.hast.set_children(paragraph, children);
-            props.push(("className", Val::Class("task-list-item")));
+            props.push(("className", Value::Class("task-list-item")));
         }
         let tail_is_paragraph =
             results.last != NIL && self.hast.tag_name(results.last) == Some("p");
@@ -916,7 +948,7 @@ impl<'s> ToHast<'_, 's> {
         )
     }
 
-    fn table(&mut self, ix: Ix, align: &[AlignKind], at: At) -> Chain {
+    fn table(&mut self, ix: NodeId, align: &[AlignKind], at: At) -> Chain {
         let mut rows = EMPTY;
         for (index, row) in self.mdast.children(ix).enumerate() {
             let row = self.table_row(row, index, align);
@@ -960,7 +992,7 @@ impl<'s> ToHast<'_, 's> {
         Chain::one(self.hast.element_with("table", Vec::new(), at, children))
     }
 
-    fn table_row(&mut self, row: Ix, index: usize, align: &[AlignKind]) -> Ix {
+    fn table_row(&mut self, row: NodeId, index: usize, align: &[AlignKind]) -> NodeId {
         let tag = if index == 0 { "th" } else { "td" };
         let mut cells = EMPTY;
         let mut source = self.mdast.node(row).first;
@@ -972,7 +1004,7 @@ impl<'s> ToHast<'_, 's> {
                 AlignKind::None => None,
             };
             let props = value.map_or_else(Vec::new, |value| {
-                vec![("align", Val::Str(Cow::Borrowed(value)))]
+                vec![("align", Value::Str(Cow::Borrowed(value)))]
             });
             let cell = if source == NIL {
                 self.hast.element(tag, props, At::None)
@@ -991,7 +1023,7 @@ impl<'s> ToHast<'_, 's> {
             .element_with("tr", Vec::new(), self.mdast.node(row).at, children)
     }
 
-    fn footer(&mut self) -> Option<Ix> {
+    fn footer(&mut self) -> Option<NodeId> {
         let mut items = EMPTY;
         // Rendering a definition can cite footnotes not seen yet, which join the order
         // and get their own item, so the length is read on every pass.
@@ -1027,17 +1059,19 @@ impl<'s> ToHast<'_, 's> {
                     vec![
                         (
                             "href",
-                            Val::Str(Cow::Owned(format!("#user-content-fnref-{safe_id}{suffix}"))),
+                            Value::Str(Cow::Owned(format!(
+                                "#user-content-fnref-{safe_id}{suffix}"
+                            ))),
                         ),
-                        ("dataFootnoteBackref", Val::Str(Cow::Borrowed(""))),
+                        ("dataFootnoteBackref", Value::Str(Cow::Borrowed(""))),
                         (
                             "ariaLabel",
-                            Val::Str(Cow::Owned(format!(
+                            Value::Str(Cow::Owned(format!(
                                 "Back to reference {}{suffix}",
                                 reference_index + 1
                             ))),
                         ),
-                        ("className", Val::Class("data-footnote-backref")),
+                        ("className", Value::Class("data-footnote-backref")),
                     ],
                     At::None,
                     children,
@@ -1050,7 +1084,7 @@ impl<'s> ToHast<'_, 's> {
                 let tail_text =
                     (inner.last != NIL).then(|| &mut self.hast.nodes[inner.last as usize].kind);
                 match tail_text {
-                    Some(HKind::Text(value)) => push_cow(value, " "),
+                    Some(NodeKind::Text(value)) => push_cow(value, " "),
                     _ => {
                         let space = self.hast.text(" ");
                         self.hast.append(&mut inner, space);
@@ -1066,7 +1100,7 @@ impl<'s> ToHast<'_, 's> {
                 "li",
                 vec![(
                     "id",
-                    Val::Str(Cow::Owned(format!("user-content-fn-{safe_id}"))),
+                    Value::Str(Cow::Owned(format!("user-content-fn-{safe_id}"))),
                 )],
                 self.mdast.node(definition).at,
                 children,
@@ -1080,8 +1114,8 @@ impl<'s> ToHast<'_, 's> {
         let label = self.hast.element_around(
             "h2",
             vec![
-                ("className", Val::Class("sr-only")),
-                ("id", Val::Str(Cow::Borrowed("footnote-label"))),
+                ("className", Value::Class("sr-only")),
+                ("id", Value::Str(Cow::Borrowed("footnote-label"))),
             ],
             At::None,
             label_text,
@@ -1099,8 +1133,8 @@ impl<'s> ToHast<'_, 's> {
         Some(self.hast.element_with(
             "section",
             vec![
-                ("dataFootnotes", Val::Bool(true)),
-                ("className", Val::Class("footnotes")),
+                ("dataFootnotes", Value::Bool(true)),
+                ("className", Value::Class("footnotes")),
             ],
             At::None,
             children,
@@ -1110,16 +1144,16 @@ impl<'s> ToHast<'_, 's> {
 
 /// HAST plus what the native raw stage must leave to JavaScript.
 pub struct Converted<'s> {
-    pub tree: HTree<'s>,
-    pub root: Ix,
+    pub tree: Tree<'s>,
+    pub root: NodeId,
     pub raw_boundary: bool,
     pub math: bool,
 }
 
-pub fn to_hast<'s>(mdast: &MTree<'s>) -> Converted<'s> {
+pub fn to_hast<'s>(mdast: &mdast::Tree<'s>) -> Converted<'s> {
     let mut state = ToHast {
         mdast,
-        hast: HTree {
+        hast: Tree {
             // Prose and chat Markdown make 1.3 to 1.8 HAST nodes per MDAST node.
             nodes: Vec::with_capacity(mdast.nodes.len() * 7 / 4 + 16),
             quirks: false,
@@ -1132,8 +1166,8 @@ pub fn to_hast<'s>(mdast: &MTree<'s>) -> Converted<'s> {
         link_depth: 0,
         math: false,
     };
-    state.collect(MTree::ROOT);
-    let root = state.one(MTree::ROOT, MTree::ROOT).first;
+    state.collect(mdast::Tree::ROOT);
+    let root = state.one(mdast::Tree::ROOT, mdast::Tree::ROOT).first;
     if let Some(section) = state.footer() {
         let mut children = state.hast.children_of(root);
         let newline = state.hast.text("\n");
@@ -1216,9 +1250,9 @@ fn paired_tag(name: &str) -> Option<&'static str> {
 }
 
 /// The simple raw node at `ix`, if it is one.
-fn simple_raw_at(tree: &HTree<'_>, ix: Ix) -> Option<SimpleRaw> {
+fn simple_raw_at(tree: &Tree<'_>, ix: NodeId) -> Option<SimpleRaw> {
     match &tree.nodes[ix as usize].kind {
-        HKind::Raw(value) => SimpleRaw::parse(value),
+        NodeKind::Raw(value) => SimpleRaw::parse(value),
         _ => None,
     }
 }
@@ -1226,7 +1260,7 @@ fn simple_raw_at(tree: &HTree<'_>, ix: Ix) -> Option<SimpleRaw> {
 /// Turns the simple raw HTML under `parent` into elements, as parse5 would. Returns
 /// `false`, leaving the tree as it was, when a start or end tag has no partner among
 /// its siblings (parse5 would then close or ignore it by rules this does not model).
-fn pair_simple_raw(tree: &mut HTree<'_>, parent: Ix) -> bool {
+fn pair_simple_raw(tree: &mut Tree<'_>, parent: NodeId) -> bool {
     if !raw_tags_pair(tree, parent) {
         return false;
     }
@@ -1234,7 +1268,7 @@ fn pair_simple_raw(tree: &mut HTree<'_>, parent: Ix) -> bool {
     true
 }
 
-fn raw_tags_pair(tree: &HTree<'_>, parent: Ix) -> bool {
+fn raw_tags_pair(tree: &Tree<'_>, parent: NodeId) -> bool {
     let mut open = Vec::new();
     for child in tree.children(parent) {
         match simple_raw_at(tree, child) {
@@ -1255,7 +1289,7 @@ fn raw_tags_pair(tree: &HTree<'_>, parent: Ix) -> bool {
     open.is_empty()
 }
 
-fn rewrite_simple_raw(tree: &mut HTree<'_>, parent: Ix) {
+fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
     // The element each open tag started, with the children gathered for it so far; the
     // first entry gathers `parent`'s own.
     let mut levels = vec![(parent, EMPTY)];
@@ -1277,7 +1311,7 @@ fn rewrite_simple_raw(tree: &mut HTree<'_>, parent: Ix) {
                 keep = Some(element);
             }
             Some(SimpleRaw::Break) => {
-                tree.nodes[cursor as usize].kind = HKind::Element {
+                tree.nodes[cursor as usize].kind = NodeKind::Element {
                     tag: "br",
                     props: Vec::new(),
                     data: None,
@@ -1308,33 +1342,33 @@ fn one_token(value: &str) -> bool {
 }
 
 /// hast-util-to-parse5 attribute serialization then hastscript property parsing.
-fn round_trip<'s>(key: &str, value: Val<'s>) -> Option<Val<'s>> {
+fn round_trip<'s>(key: &str, value: Value<'s>) -> Option<Value<'s>> {
     let space_separated = matches!(key, "className" | "ariaDescribedBy");
     let attribute: Cow<'s, str> = match value {
-        Val::Class(name) if space_separated => return Some(Val::Class(name)),
-        Val::Class(name) => return Some(Val::Str(Cow::Borrowed(name))),
+        Value::Class(name) if space_separated => return Some(Value::Class(name)),
+        Value::Class(name) => return Some(Value::Str(Cow::Borrowed(name))),
         // Joining then splitting gives the list back.
-        Val::List(list) if space_separated && list.iter().all(|item| one_token(item)) => {
-            return Some(Val::List(list));
+        Value::List(list) if space_separated && list.iter().all(|item| one_token(item)) => {
+            return Some(Value::List(list));
         }
-        Val::Bool(false) => return None,
-        Val::Bool(true) => Cow::Borrowed(""),
-        Val::Num(number) => Cow::Owned(number.to_string()),
-        Val::Str(string) => string,
-        Val::List(mut list) if list.len() == 1 => list.pop().expect("the guard saw one item"),
-        Val::List(list) => Cow::Owned(list.join(" ")),
+        Value::Bool(false) => return None,
+        Value::Bool(true) => Cow::Borrowed(""),
+        Value::Num(number) => Cow::Owned(number.to_string()),
+        Value::Str(string) => string,
+        Value::List(mut list) if list.len() == 1 => list.pop().expect("the guard saw one item"),
+        Value::List(list) => Cow::Owned(list.join(" ")),
     };
     Some(match key {
-        "checked" | "disabled" => Val::Bool(true),
+        "checked" | "disabled" => Value::Bool(true),
         "start" => match attribute.trim().parse::<i64>() {
-            Ok(number) => Val::Num(number),
-            Err(_) => Val::Str(attribute),
+            Ok(number) => Value::Num(number),
+            Err(_) => Value::Str(attribute),
         },
         _ if space_separated => {
             if one_token(&attribute) {
-                Val::List(vec![attribute])
+                Value::List(vec![attribute])
             } else {
-                Val::List(
+                Value::List(
                     attribute
                         .split(|c: char| c.is_ascii_whitespace())
                         .filter(|part| !part.is_empty())
@@ -1343,7 +1377,7 @@ fn round_trip<'s>(key: &str, value: Val<'s>) -> Option<Val<'s>> {
                 )
             }
         }
-        _ => Val::Str(attribute),
+        _ => Value::Str(attribute),
     })
 }
 
@@ -1526,28 +1560,28 @@ fn safe_protocol(key: &str, url: &str) -> bool {
         .any(|protocol| colon == protocol.len() && url.starts_with(protocol))
 }
 
-fn primitive_ok(allowed: &Allowed, key: &str, value: &Val<'_>) -> bool {
+fn primitive_ok(allowed: &Allowed, key: &str, value: &Value<'_>) -> bool {
     let string: Cow<'_, str> = match value {
-        Val::Str(string) => Cow::Borrowed(string.as_ref()),
-        Val::Num(number) => Cow::Owned(number.to_string()),
-        Val::Bool(boolean) => Cow::Borrowed(if *boolean { "true" } else { "false" }),
-        Val::List(_) | Val::Class(_) => return false,
+        Value::Str(string) => Cow::Borrowed(string.as_ref()),
+        Value::Num(number) => Cow::Owned(number.to_string()),
+        Value::Bool(boolean) => Cow::Borrowed(if *boolean { "true" } else { "false" }),
+        Value::List(_) | Value::Class(_) => return false,
     };
     if !safe_protocol(key, &string) {
         return false;
     }
     match allowed {
         Allowed::Any => true,
-        Allowed::True => matches!(value, Val::Bool(true)),
+        Allowed::True => matches!(value, Value::Bool(true)),
         Allowed::Values(values) => {
-            matches!(value, Val::Str(string) if values.contains(&string.as_ref()))
+            matches!(value, Value::Str(string) if values.contains(&string.as_ref()))
         }
         Allowed::Language(values) => {
             let language = string
                 .strip_prefix("language-")
                 .and_then(|rest| rest.chars().next())
                 .is_some_and(|first| !matches!(first, '\n' | '\r' | '\u{2028}' | '\u{2029}'));
-            language || matches!(value, Val::Str(string) if values.contains(&string.as_ref()))
+            language || matches!(value, Value::Str(string) if values.contains(&string.as_ref()))
         }
     }
 }
@@ -1556,35 +1590,39 @@ fn clobbered(key: &str) -> bool {
     matches!(key, "ariaDescribedBy" | "ariaLabelledBy" | "id" | "name")
 }
 
-fn clobber(value: Val<'_>) -> Val<'_> {
+fn clobber(value: Value<'_>) -> Value<'_> {
     match value {
-        Val::Str(string) => Val::Str(Cow::Owned(format!("user-content-{string}"))),
-        Val::Num(number) => Val::Str(Cow::Owned(format!("user-content-{number}"))),
-        Val::Bool(boolean) => Val::Str(Cow::Owned(format!("user-content-{boolean}"))),
-        Val::List(list) => Val::List(
+        Value::Str(string) => Value::Str(Cow::Owned(format!("user-content-{string}"))),
+        Value::Num(number) => Value::Str(Cow::Owned(format!("user-content-{number}"))),
+        Value::Bool(boolean) => Value::Str(Cow::Owned(format!("user-content-{boolean}"))),
+        Value::List(list) => Value::List(
             list.into_iter()
                 .map(|item| Cow::Owned(format!("user-content-{item}")))
                 .collect(),
         ),
-        Val::Class(name) => Val::List(vec![Cow::Owned(format!("user-content-{name}"))]),
+        Value::Class(name) => Value::List(vec![Cow::Owned(format!("user-content-{name}"))]),
     }
 }
 
 /// `Err` hands the value back so the `*` definitions can try it.
-fn sanitize_value<'s>(allowed: &Allowed, key: &str, value: Val<'s>) -> Result<Val<'s>, Val<'s>> {
-    if let Val::Class(name) = value {
+fn sanitize_value<'s>(
+    allowed: &Allowed,
+    key: &str,
+    value: Value<'s>,
+) -> Result<Value<'s>, Value<'s>> {
+    if let Value::Class(name) = value {
         return Ok(
-            if primitive_ok(allowed, key, &Val::Str(Cow::Borrowed(name))) {
-                Val::Class(name)
+            if primitive_ok(allowed, key, &Value::Str(Cow::Borrowed(name))) {
+                Value::Class(name)
             } else {
-                Val::List(Vec::new())
+                Value::List(Vec::new())
             },
         );
     }
     match value {
-        Val::List(list) => Ok(Val::List(
+        Value::List(list) => Ok(Value::List(
             list.into_iter()
-                .filter(|item| primitive_ok(allowed, key, &Val::Str(Cow::Borrowed(item))))
+                .filter(|item| primitive_ok(allowed, key, &Value::Str(Cow::Borrowed(item))))
                 .collect(),
         )),
         primitive if primitive_ok(allowed, key, &primitive) => Ok(primitive),
@@ -1621,10 +1659,10 @@ fn sanitize_props<'s>(
         .collect();
     if tag == "input" {
         if get(&result, "disabled").is_none() {
-            result.push(("disabled", Val::Bool(true)));
+            result.push(("disabled", Value::Bool(true)));
         }
         if get(&result, "type").is_none() {
-            result.push(("type", Val::Str(Cow::Borrowed("checkbox"))));
+            result.push(("type", Value::Str(Cow::Borrowed("checkbox"))));
         }
     }
     result
@@ -1736,7 +1774,7 @@ impl Default for Harden {
 // ---------------------------------------------------------------------------
 
 struct Finisher<'a, 's> {
-    tree: &'a mut HTree<'s>,
+    tree: &'a mut Tree<'s>,
     code_classes: &'static [&'static str],
     harden: &'a Harden,
     /// How many `table` elements enclose the current one.
@@ -1749,14 +1787,14 @@ fn table_section(tag: &str) -> bool {
 
 impl<'s> Finisher<'_, 's> {
     /// Removes text parse5 foster-parents out of table structure, in document order.
-    fn take_foster(&mut self, element: Ix, out: &mut Vec<Ix>) {
+    fn take_foster(&mut self, element: NodeId, out: &mut Vec<NodeId>) {
         let mut kept = EMPTY;
         let mut cursor = self.tree.nodes[element as usize].first;
         while cursor != NIL {
             let next = self.tree.nodes[cursor as usize].next;
             match &self.tree.nodes[cursor as usize].kind {
-                HKind::Text(_) => out.push(cursor),
-                HKind::Element { tag, .. } if table_section(tag) => {
+                NodeKind::Text(_) => out.push(cursor),
+                NodeKind::Element { tag, .. } if table_section(tag) => {
                     self.take_foster(cursor, out);
                     self.tree.append(&mut kept, cursor);
                 }
@@ -1769,28 +1807,28 @@ impl<'s> Finisher<'_, 's> {
 
     /// Appends `ix`, merging adjacent text with parse5's location rule: the merged node
     /// keeps the first start and takes the last end.
-    fn push_merged(&mut self, level: &mut Chain, ix: Ix) {
+    fn push_merged(&mut self, level: &mut Chain, ix: NodeId) {
         let mergeable = level.last != NIL
-            && matches!(self.tree.nodes[ix as usize].kind, HKind::Text(_))
-            && matches!(self.tree.nodes[level.last as usize].kind, HKind::Text(_));
+            && matches!(self.tree.nodes[ix as usize].kind, NodeKind::Text(_))
+            && matches!(self.tree.nodes[level.last as usize].kind, NodeKind::Text(_));
         if !mergeable {
             self.tree.append(level, ix);
             return;
         }
         let end = self.tree.nodes[ix as usize].end;
-        let HKind::Text(value) = &mut self.tree.nodes[ix as usize].kind else {
+        let NodeKind::Text(value) = &mut self.tree.nodes[ix as usize].kind else {
             unreachable!("mergeable nodes are text");
         };
         let value = std::mem::take(value);
         let into = &mut self.tree.nodes[level.last as usize];
-        let HKind::Text(existing) = &mut into.kind else {
+        let NodeKind::Text(existing) = &mut into.kind else {
             unreachable!("mergeable nodes are text");
         };
         push_cow(existing, &value);
         into.end = end;
     }
 
-    fn children(&mut self, parent: Ix) {
+    fn children(&mut self, parent: NodeId) {
         // parse5: fostered table text and adjacent text merge at this level.
         let mut level = EMPTY;
         let mut cursor = self.tree.nodes[parent as usize].first;
@@ -1813,23 +1851,23 @@ impl<'s> Finisher<'_, 's> {
         while cursor != NIL {
             let next = self.tree.nodes[cursor as usize].next;
             match self.tree.nodes[cursor as usize].kind {
-                HKind::Text(_) => self.text(cursor, &mut out),
-                HKind::Element { .. } => self.element(cursor, &mut out),
+                NodeKind::Text(_) => self.text(cursor, &mut out),
+                NodeKind::Element { .. } => self.element(cursor, &mut out),
                 // `raw_boundary` keeps raw nodes out of this walk.
-                HKind::Raw(_) | HKind::Root => {}
+                NodeKind::Raw(_) | NodeKind::Root => {}
             }
             cursor = next;
         }
         self.tree.set_children(parent, out);
     }
 
-    fn text(&mut self, ix: Ix, out: &mut Chain) {
+    fn text(&mut self, ix: NodeId, out: &mut Chain) {
         self.tree.nodes[ix as usize].drop_partial_position();
         self.tree.append(out, ix);
     }
 
-    fn element(&mut self, ix: Ix, out: &mut Chain) {
-        let HKind::Element { tag, props, data } = &mut self.tree.nodes[ix as usize].kind else {
+    fn element(&mut self, ix: NodeId, out: &mut Chain) {
+        let NodeKind::Element { tag, props, data } = &mut self.tree.nodes[ix as usize].kind else {
             unreachable!("children() sends only elements here");
         };
         let tag = *tag;
@@ -1863,7 +1901,7 @@ impl<'s> Finisher<'_, 's> {
 
     /// `rehype-harden` for one sanitized element whose children are final; `false`
     /// removes it.
-    fn harden(&mut self, ix: Ix, tag: &'static str, harden: &Harden) -> bool {
+    fn harden(&mut self, ix: NodeId, tag: &'static str, harden: &Harden) -> bool {
         let (key, resource) = match tag {
             "a" => ("href", Resource::Link),
             "img" => ("src", Resource::Image),
@@ -1871,7 +1909,7 @@ impl<'s> Finisher<'_, 's> {
         };
         let props = self.tree.properties_mut(ix).expect("an element");
         let transformed = match get(props, key) {
-            Some(Val::Str(url)) => transform_url(url, resource),
+            Some(Value::Str(url)) => transform_url(url, resource),
             _ => Err(Blocked),
         };
         let changed = match transformed {
@@ -1879,18 +1917,22 @@ impl<'s> Finisher<'_, 's> {
             Err(Blocked) => return self.blocked(ix, resource, harden),
         };
         if let Some(changed) = changed {
-            set(props, key, Val::Str(Cow::Owned(changed)));
+            set(props, key, Value::Str(Cow::Owned(changed)));
         }
         if resource == Resource::Link {
-            set(props, "target", Val::Str(Cow::Borrowed("_blank")));
-            set(props, "rel", Val::Str(Cow::Borrowed("noopener noreferrer")));
+            set(props, "target", Value::Str(Cow::Borrowed("_blank")));
+            set(
+                props,
+                "rel",
+                Value::Str(Cow::Borrowed("noopener noreferrer")),
+            );
         }
         true
     }
 
     /// harden's `resolveLinkBlockPolicy` / `resolveImageBlockPolicy`: the replacement is a
     /// new, unpositioned span.
-    fn blocked(&mut self, ix: Ix, resource: Resource, harden: &Harden) -> bool {
+    fn blocked(&mut self, ix: NodeId, resource: Resource, harden: &Harden) -> bool {
         let policy = match resource {
             Resource::Link => harden.link_policy,
             Resource::Image => harden.image_policy,
@@ -1898,24 +1940,24 @@ impl<'s> Finisher<'_, 's> {
         if policy == BlockPolicy::Remove {
             return false;
         }
-        let shown = |value: Option<&Val<'_>>| match value {
-            Some(Val::Str(text)) => text.to_string(),
-            Some(Val::Num(number)) => number.to_string(),
-            Some(Val::Bool(boolean)) => boolean.to_string(),
+        let shown = |value: Option<&Value<'_>>| match value {
+            Some(Value::Str(text)) => text.to_string(),
+            Some(Value::Num(number)) => number.to_string(),
+            Some(Value::Bool(boolean)) => boolean.to_string(),
             _ => "undefined".to_owned(),
         };
         let props = std::mem::take(self.tree.properties_mut(ix).expect("an element"));
-        let (props, children): (Props<'s>, Option<Ix>) = match (resource, policy) {
+        let (props, children): (Props<'s>, Option<NodeId>) = match (resource, policy) {
             (Resource::Link, BlockPolicy::TextOnly) => (Vec::new(), None),
             (Resource::Link, _) => {
                 let title = format!("Blocked URL: {}", shown(get(&props, "href")));
                 let suffix = self.tree.text(Cow::Borrowed(" [blocked]"));
                 (
                     vec![
-                        ("title", Val::Str(Cow::Owned(title))),
+                        ("title", Value::Str(Cow::Owned(title))),
                         (
                             "class",
-                            Val::Str(Cow::Owned(harden.blocked_link_class.clone())),
+                            Value::Str(Cow::Owned(harden.blocked_link_class.clone())),
                         ),
                     ],
                     Some(suffix),
@@ -1924,9 +1966,9 @@ impl<'s> Finisher<'_, 's> {
             (Resource::Image, policy) => {
                 // `String(node.properties.alt || fallback)`.
                 let alt = match get(&props, "alt") {
-                    Some(Val::Str(alt)) if !alt.is_empty() => Some(alt.to_string()),
-                    Some(Val::Num(number)) if *number != 0 => Some(number.to_string()),
-                    Some(Val::Bool(true)) => Some("true".to_owned()),
+                    Some(Value::Str(alt)) if !alt.is_empty() => Some(alt.to_string()),
+                    Some(Value::Num(number)) if *number != 0 => Some(number.to_string()),
+                    Some(Value::Bool(true)) => Some("true".to_owned()),
                     _ => None,
                 };
                 let (text, props) = if policy == BlockPolicy::TextOnly {
@@ -1940,7 +1982,7 @@ impl<'s> Finisher<'_, 's> {
                         format!("[Image blocked: {alt}]"),
                         vec![(
                             "class",
-                            Val::Str(Cow::Owned(harden.blocked_image_class.clone())),
+                            Value::Str(Cow::Owned(harden.blocked_image_class.clone())),
                         )],
                     )
                 };
@@ -1955,7 +1997,7 @@ impl<'s> Finisher<'_, 's> {
             self.tree.set_children(ix, children);
         }
         let node = &mut self.tree.nodes[ix as usize];
-        node.kind = HKind::Element {
+        node.kind = NodeKind::Element {
             tag: "span",
             props,
             data: None,
@@ -1971,22 +2013,22 @@ impl<'s> Finisher<'_, 's> {
 // ---------------------------------------------------------------------------
 
 struct Json<'a, 's> {
-    tree: &'a HTree<'s>,
+    tree: &'a Tree<'s>,
     points: &'a Points,
     out: String,
 }
 
 impl Json<'_, '_> {
     fn point(&mut self, edge: Edge) {
-        let Some(pt) = edge.point(self.points) else {
+        let Some(point) = edge.point(self.points) else {
             return;
         };
         self.out.push_str("{\"line\":");
-        json_u32(&mut self.out, pt.line);
+        json_u32(&mut self.out, point.line);
         self.out.push_str(",\"column\":");
-        json_u32(&mut self.out, pt.column);
+        json_u32(&mut self.out, point.column);
         self.out.push_str(",\"offset\":");
-        json_u32(&mut self.out, pt.offset);
+        json_u32(&mut self.out, point.offset);
         self.out.push('}');
     }
 
@@ -2009,7 +2051,7 @@ impl Json<'_, '_> {
         self.out.push('}');
     }
 
-    fn children(&mut self, ix: Ix) {
+    fn children(&mut self, ix: NodeId) {
         self.out.push('[');
         let tree = self.tree;
         for (index, child) in tree.children(ix).enumerate() {
@@ -2021,19 +2063,19 @@ impl Json<'_, '_> {
         self.out.push(']');
     }
 
-    fn value(&mut self, value: &Val<'_>) {
+    fn value(&mut self, value: &Value<'_>) {
         match value {
-            Val::Str(string) => json_string(&mut self.out, string),
-            Val::Bool(boolean) => self.out.push_str(if *boolean { "true" } else { "false" }),
-            Val::Num(number) => {
+            Value::Str(string) => json_string(&mut self.out, string),
+            Value::Bool(boolean) => self.out.push_str(if *boolean { "true" } else { "false" }),
+            Value::Num(number) => {
                 let _ = write!(self.out, "{number}");
             }
-            Val::Class(name) => {
+            Value::Class(name) => {
                 self.out.push_str("[\"");
                 self.out.push_str(name);
                 self.out.push_str("\"]");
             }
-            Val::List(list) => {
+            Value::List(list) => {
                 self.out.push('[');
                 for (index, item) in list.iter().enumerate() {
                     if index > 0 {
@@ -2046,18 +2088,18 @@ impl Json<'_, '_> {
         }
     }
 
-    fn node(&mut self, ix: Ix) {
+    fn node(&mut self, ix: NodeId) {
         let tree = self.tree;
         let node = &tree.nodes[ix as usize];
         match &node.kind {
-            HKind::Root => {
+            NodeKind::Root => {
                 self.out.push_str("{\"type\":\"root\",\"children\":");
                 self.children(ix);
                 if tree.quirks {
                     self.out.push_str(",\"data\":{\"quirksMode\":false}");
                 }
             }
-            HKind::Element { tag, props, data } => {
+            NodeKind::Element { tag, props, data } => {
                 self.out.push_str("{\"type\":\"element\",\"tagName\":\"");
                 self.out.push_str(tag);
                 self.out.push_str("\",\"properties\":{");
@@ -2078,11 +2120,11 @@ impl Json<'_, '_> {
                     self.out.push('}');
                 }
             }
-            HKind::Text(value) => {
+            NodeKind::Text(value) => {
                 self.out.push_str("{\"type\":\"text\",\"value\":");
                 json_string(&mut self.out, value);
             }
-            HKind::Raw(value) => {
+            NodeKind::Raw(value) => {
                 self.out.push_str("{\"type\":\"raw\",\"value\":");
                 json_string(&mut self.out, value);
             }
@@ -2124,7 +2166,7 @@ impl Context<'_> {
     /// A node edge's offset in UTF-16 units, as JavaScript counts it.
     #[must_use]
     pub fn offset(&self, edge: Edge) -> Option<u32> {
-        edge.point(self.points).map(|pt| pt.offset)
+        edge.point(self.points).map(|point| point.offset)
     }
 }
 
@@ -2135,15 +2177,15 @@ impl Context<'_> {
 /// Run the JavaScript form of a plugin in those tails (see [`Kind`]).
 pub trait Plugin {
     /// After parsing, before mdast-util-to-hast: where remark plugins run.
-    fn mdast(&self, _tree: &mut MTree<'_>) -> Result<(), Error> {
+    fn mdast(&self, _tree: &mut mdast::Tree<'_>) -> Result<(), Error> {
         Ok(())
     }
 
     /// Before rehype-sanitize: a rehype plugin placed ahead of it.
-    fn hast_unsanitized(&self, _tree: &mut HTree<'_>, _root: Ix, _context: &Context<'_>) {}
+    fn hast_unsanitized(&self, _tree: &mut Tree<'_>, _root: NodeId, _context: &Context<'_>) {}
 
     /// The final tree: a rehype plugin after the chain.
-    fn hast(&self, _tree: &mut HTree<'_>, _root: Ix, _context: &Context<'_>) {}
+    fn hast(&self, _tree: &mut Tree<'_>, _root: NodeId, _context: &Context<'_>) {}
 }
 
 /// How far [`render`] took the tree.
@@ -2241,7 +2283,7 @@ pub struct Encoded {
 }
 
 struct Encoder<'a, 's> {
-    tree: &'a HTree<'s>,
+    tree: &'a Tree<'s>,
     points: &'a Points,
     source: &'s str,
     ops: Vec<u32>,
@@ -2288,10 +2330,10 @@ impl Encoder<'_, '_> {
     }
 
     fn point(&mut self, edge: Edge) {
-        let Some(pt) = edge.point(self.points) else {
+        let Some(point) = edge.point(self.points) else {
             return;
         };
-        self.ops.extend([pt.line, pt.column, pt.offset]);
+        self.ops.extend([point.line, point.column, point.offset]);
     }
 
     fn position(&mut self, start: Edge, end: Edge) {
@@ -2302,7 +2344,7 @@ impl Encoder<'_, '_> {
     }
 
     /// The child count, then the children: the count is patched in after them.
-    fn children(&mut self, ix: Ix) {
+    fn children(&mut self, ix: NodeId) {
         let count_slot = self.ops.len();
         self.ops.push(0);
         let mut count = 0;
@@ -2314,20 +2356,20 @@ impl Encoder<'_, '_> {
         self.ops[count_slot] = count;
     }
 
-    fn value(&mut self, value: &Val<'_>) {
+    fn value(&mut self, value: &Value<'_>) {
         match value {
-            Val::Str(string) => {
+            Value::Str(string) => {
                 self.ops.push(op::STRING);
                 self.string(string);
             }
-            Val::Bool(true) => self.ops.push(op::TRUE),
-            Val::Bool(false) => self.ops.push(op::FALSE),
-            Val::Num(number) => self.ops.extend([op::NUMBER, *number as u32]),
-            Val::Class(name) => {
+            Value::Bool(true) => self.ops.push(op::TRUE),
+            Value::Bool(false) => self.ops.push(op::FALSE),
+            Value::Num(number) => self.ops.extend([op::NUMBER, *number as u32]),
+            Value::Class(name) => {
                 self.ops.extend([op::LIST, 1]);
                 self.name(name);
             }
-            Val::List(list) => {
+            Value::List(list) => {
                 self.ops.extend([op::LIST, list.len() as u32]);
                 for item in list {
                     self.string(item);
@@ -2336,15 +2378,15 @@ impl Encoder<'_, '_> {
         }
     }
 
-    fn node(&mut self, ix: Ix) {
+    fn node(&mut self, ix: NodeId) {
         let tree = self.tree;
         let node = &tree.nodes[ix as usize];
         match &node.kind {
-            HKind::Root => {
+            NodeKind::Root => {
                 self.ops.extend([op::ROOT, u32::from(tree.quirks)]);
                 self.children(ix);
             }
-            HKind::Element { tag, props, data } => {
+            NodeKind::Element { tag, props, data } => {
                 self.ops.push(op::ELEMENT);
                 self.name(tag);
                 self.ops.push(props.len() as u32);
@@ -2361,17 +2403,17 @@ impl Encoder<'_, '_> {
                 }
                 self.children(ix);
             }
-            HKind::Text(value)
+            NodeKind::Text(value)
                 if value == "\n" && node.start == Edge::None && node.end == Edge::None =>
             {
                 self.ops.push(op::NEWLINE);
                 return;
             }
-            HKind::Text(value) => {
+            NodeKind::Text(value) => {
                 self.ops.push(op::TEXT);
                 self.string(value);
             }
-            HKind::Raw(value) => {
+            NodeKind::Raw(value) => {
                 self.ops.push(op::RAW);
                 self.string(value);
             }
@@ -2384,8 +2426,8 @@ impl Encoder<'_, '_> {
 struct Built<'s> {
     kind: Kind,
     points: Points,
-    tree: HTree<'s>,
-    root: Ix,
+    tree: Tree<'s>,
+    root: NodeId,
 }
 
 impl Built<'_> {
@@ -2419,7 +2461,7 @@ fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
         math,
     } = to_hast(&mdast);
     // HAST owns or borrows the source for every string, so only the positions stay.
-    let MTree { points, .. } = mdast;
+    let mdast::Tree { points, .. } = mdast;
     if raw_boundary {
         return Ok(Built {
             kind: Kind::Raw,
