@@ -37,8 +37,9 @@ markup becomes one React element with its HTML, and React only builds the intera
 parts (code block shells, tables, images, link buttons) from Streamdown's own exported
 components. A code block's copy and download buttons start as their markup and become
 Streamdown's own buttons when first pressed (which then get that click). With
-`@streamdown/code`, code is tokenized by rill-highlight (Shiki's tokenizer ported to
-Rust, the same tokens) in a Web Worker, which `setHighlightWasm` (or
+`@streamdown/code`, code is tokenized by
+[rill-highlight](https://github.com/2018kguo/rill-highlight) (`@2018kguo/rill-highlight`,
+Shiki's tokenizer ported to Rust, the same tokens) in a Web Worker, which `setHighlightWasm` (or
 `preloadHighlighting()`) starts with its WebAssembly and themes before the first code
 block; finished code blocks ask for their tokens as they render, and the replies of a
 batch land in one React render.
@@ -169,8 +170,10 @@ source text instead of copying it.
 
 - `@2018kguo/rill/streamdown`: `Streamdown` and `Block`, the drop-in above, plus everything
   `streamdown` exports. `setRillHighlight(false)` keeps Shiki for code;
-  `setHighlightWasm(url)` points at `rill_highlight.wasm` where a bundler can't place it
-  (and starts the highlighting worker); `preloadHighlighting()` starts it without one.
+  `setHighlightWasm(url)` points at `rill_highlight.wasm` (from
+  `@2018kguo/rill-highlight/dist/`) where a bundler doesn't place it by itself, as bun
+  doesn't (Vite and webpack do), and starts the highlighting worker;
+  `preloadHighlighting()` starts it without one.
 - `@2018kguo/rill/react`: `useRill(plugins?)`, plugins for Streamdown's own component.
 - `@2018kguo/rill/plugins`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
   and `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
@@ -356,8 +359,6 @@ node conformance/bench.mjs                     # the JavaScript pipeline, same d
   plugins), `autolink.rs`, and `wasm` (the boundary the JavaScript package reads).
 - `crates/rill/src/markup.rs`: Streamdown's DOM as HTML segments for the drop-in;
   `remend.rs`: remend 1.4.0.
-- `crates/rill-highlight`: Shiki's TextMate tokenizer in Rust (`highlight/` builds its
-  data and tests it against Shiki).
 - `js/`: the `@2018kguo/rill` npm package (the drop-in component, loader, opcode
   decoder, Streamdown plugins, React hook) and its test against Streamdown's pipeline.
 - `conformance/`: the differential harnesses (trees, DOM, SSR, interactions, remend), the

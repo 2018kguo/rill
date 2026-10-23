@@ -1,3 +1,0 @@
-const greeting = '你好，世界'; // 🌍
-const ünïcode = `${'𝒳'}`;
-class Ä { 𝓍 = 1 }

@@ -42,22 +42,21 @@
       "types": "./dist/react.d.ts",
       "default": "./dist/react.js"
     },
-    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm",
-    "./wasm/rill_highlight.wasm": "./wasm/rill_highlight.wasm"
+    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm"
   },
   "files": [
     "dist",
     "wasm",
-    "src",
-    "highlight"
+    "src"
   ],
   "scripts": {
-    "build": "sh ../scripts/build-wasm.sh && node ../highlight/scripts/build-grammars.mjs && sh ../highlight/scripts/build-wasm.sh && node ../scripts/build-highlight-data.mjs && tsc -p .",
+    "build": "sh ../scripts/build-wasm.sh && tsc -p .",
     "prepack": "npm run build",
     "test": "node --test test/*.test.ts",
     "typecheck": "tsc -p . --noEmit"
   },
   "dependencies": {
+    "@2018kguo/rill-highlight": "file:../vendor/2018kguo-rill-highlight-0.1.0.tgz",
     "clsx": "^2.1.1",
     "hast-util-to-jsx-runtime": "^2.3.6",
     "marked": "^18.0.11",

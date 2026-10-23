@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/rill", "crates/rill-cmark", "crates/rill-highlight"]
+members = ["crates/rill", "crates/rill-cmark"]
+# CI checks @2018kguo/rill-highlight out here to build the package rill depends on.
+exclude = ["rill-highlight"]
 
 [profile.release]
 debug = "line-tables-only"

@@ -31,6 +31,16 @@ jobs:
           curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP/bin" --strip-components=1
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      # rill depends on @2018kguo/rill-highlight, packed from its repository until the
+      # two are published together.
+      - uses: actions/checkout@v6
+        with:
+          repository: 2018kguo/rill-highlight
+          path: rill-highlight
+      - name: rill-highlight
+        run: |
+          (cd rill-highlight/js && npm ci --no-audit --no-fund && npm run build)
+          sh scripts/pack-highlight.sh rill-highlight
       - run: npm install --no-audit --no-fund
       - run: cargo test --workspace
       - name: Conformance against Streamdown's JavaScript pipeline
@@ -80,7 +90,6 @@ jobs:
       - name: JavaScript package
         working-directory: js
         run: |
-          npm install --prefix ../highlight --no-audit --no-fund
           npm run build
           npm test
       - name: The drop-in <Streamdown> against Streamdown 2.7.1 (DOM, SSR)

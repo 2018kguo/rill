@@ -9,4 +9,5 @@ conformance/real/
 conformance/real.jsonl
 conformance/dom/dist/
 demo/perf/dist/
-js/highlight/
+vendor/
+rill-highlight/

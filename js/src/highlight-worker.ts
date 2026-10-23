@@ -6,7 +6,7 @@ import type { Options, Result } from "./rill-highlight.ts";
 import { highlightCounts, preloadRill, setRillHighlightWasm, withRill } from "./rill-highlight.ts";
 
 type Message =
-  | { type: "init"; wasm: string }
+  | { type: "init"; wasm: string | null }
   | { type: "highlight"; id: number; options: Options }
   | { type: "cancel"; id: number };
 
@@ -79,7 +79,7 @@ function schedule() {
 
 scope.onmessage = ({ data }) => {
   if (data.type === "init") {
-    setRillHighlightWasm(new URL(data.wasm));
+    if (data.wasm) setRillHighlightWasm(new URL(data.wasm));
     // Load the WebAssembly and Streamdown's default themes before the first request.
     preloadRill(["github-light", "github-dark"]);
   } else if (data.type === "cancel") {

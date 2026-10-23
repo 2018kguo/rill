@@ -24,16 +24,19 @@ export type Highlighter = {
 };
 
 let enabled = true;
-let wasmUrl = new URL("../wasm/rill_highlight.wasm", import.meta.url);
+/** Where rill-highlight's WebAssembly is served, when the page says (else its package
+ * finds it). */
+let wasmUrl: URL | undefined;
 
 /** Whether rill-highlight replaces Shiki for the stock code plugin (default `true`). */
 export function setRillHighlight(value: boolean) {
   enabled = value;
 }
 
-/** Where rill-highlight's WebAssembly is served from (default: the package's
- * `wasm/rill_highlight.wasm`, next to this module). Call before the first code block:
- * the highlighting worker starts then, and loads it and the default themes. */
+/** Where rill-highlight's WebAssembly is served from (default: @2018kguo/rill-highlight's
+ * `dist/rill_highlight.wasm`, where bundlers that rewrite `new URL(..., import.meta.url)`
+ * put it; with others, serve that file and pass its URL). Call before the first code
+ * block: the highlighting worker starts then, and loads it and the default themes. */
 export function setHighlightWasm(url: URL) {
   wasmUrl = url;
   setRillHighlightWasm(url);
@@ -99,7 +102,7 @@ function startWorker(): Worker | null {
     worker = null;
     return null;
   }
-  worker.postMessage({ type: "init", wasm: wasmUrl.href });
+  worker.postMessage({ type: "init", wasm: wasmUrl?.href ?? null });
   type Reply =
     | { id: number; channel: string; result: Result; counts: typeof workerCounts }
     | { id: number; fallback: true };

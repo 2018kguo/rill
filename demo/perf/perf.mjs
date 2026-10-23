@@ -52,7 +52,7 @@ function build(entry) {
   }
   copyFileSync(join(here, "perf.html"), join(dist, "perf.html"));
   copyFileSync(join(here, "../../js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
-  copyFileSync(join(here, "../../js/wasm/rill_highlight.wasm"), join(dist, "rill_highlight.wasm"));
+  copyFileSync(join(here, "../../node_modules/@2018kguo/rill-highlight/dist/rill_highlight.wasm"), join(dist, "rill_highlight.wasm"));
 }
 
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".wasm": "application/wasm" };
