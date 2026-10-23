@@ -1128,6 +1128,47 @@ impl<'s> Builder<'s> {
             .collect()
     }
 
+    /// A label's source (`start..end`, inside its brackets) as micromark slices it: each
+    /// line past the first starts after the prefixes of the containers it continues (a
+    /// lazy line's failed item indentation stays). `None` unless that drops anything.
+    fn label_source(&self, start: usize, end: usize) -> Option<String> {
+        let source = self.tree.source;
+        let label = &source[start..end];
+        if !label.contains(['\n', '\r']) {
+            return None;
+        }
+        let prefixes = self.prefixes();
+        let mut out = String::with_capacity(label.len());
+        let mut at = start;
+        while let Some(eol) = source[at..end].find(['\n', '\r']).map(|found| at + found) {
+            let line_start = eol + line_ending_len(source, eol);
+            out.push_str(&source[at..line_start]);
+            at = (0..=prefixes.len())
+                .rev()
+                .map(|depth| prefix_end(source, &prefixes[..depth], line_start))
+                .find_map(|(prefix_end, continued)| continued.then_some(prefix_end))
+                .unwrap_or(line_start)
+                .min(end);
+        }
+        out.push_str(&source[at..end]);
+        (out.len() != label.len()).then_some(out)
+    }
+
+    /// A reference's identifier and label from its label source (see `label_source`), or
+    /// from pulldown's `id` (whitespace already collapsed) when the source is not found.
+    fn reference_label(&self, id: &str, range: Option<(usize, usize)>) -> (Box<str>, Box<str>) {
+        let source = self.tree.source;
+        let raw = range.map(|(start, end)| {
+            self.label_source(start, end)
+                .map_or(Cow::Borrowed(&source[start..end]), Cow::Owned)
+        });
+        let raw = raw.as_deref().unwrap_or(id);
+        (
+            normalize_identifier(raw).into(),
+            rill_cmark::decode_string(raw).into(),
+        )
+    }
+
     fn continued_prefix_end(&self, line_start: usize) -> (usize, bool) {
         prefix_end(self.tree.source, &self.prefixes(), line_start)
     }
@@ -1380,13 +1421,18 @@ impl<'s> Builder<'s> {
                 bytes(start, trim_line_ending(source, start, end)),
             ),
             Event::Definition { label, dest, title } => {
+                // pulldown's label is the source inside the brackets.
+                let range = (source.as_bytes().get(start) == Some(&b'[')
+                    && source[start + 1..].starts_with(&*label))
+                .then(|| (start + 1, start + 1 + label.len()));
+                let (identifier, label) = self.reference_label(&label, range);
                 let end = skip_blanks(source.as_bytes(), end);
                 self.leaf(
                     MKind::Definition(Box::new(Definition {
                         url: Cow::from(dest),
                         title: title.map(Cow::from),
-                        identifier: normalize_identifier(&label).into(),
-                        label: rill_cmark::decode_string(&label).into(),
+                        identifier,
+                        label,
                     })),
                     bytes(start, end),
                 )
@@ -1489,12 +1535,16 @@ impl<'s> Builder<'s> {
                 title,
                 id,
             } => match reference_kind(link_type) {
-                Some(kind) => MKind::LinkReference(Box::new(Reference {
-                    kind,
-                    identifier: normalize_identifier(&id).into(),
-                    label: rill_cmark::decode_string(&id).into(),
-                    alt: String::new(),
-                })),
+                Some(kind) => {
+                    let range = reference_label_range(source, start, end, kind, 1);
+                    let (identifier, label) = self.reference_label(&id, range);
+                    MKind::LinkReference(Box::new(Reference {
+                        kind,
+                        identifier,
+                        label,
+                        alt: String::new(),
+                    }))
+                }
                 None => MKind::Link(Box::new(Resource {
                     url: if link_type == LinkType::Email {
                         Cow::Owned(format!("mailto:{dest_url}"))
@@ -1513,12 +1563,16 @@ impl<'s> Builder<'s> {
             } => {
                 self.alt = Some(String::new());
                 match reference_kind(link_type) {
-                    Some(kind) => MKind::ImageReference(Box::new(Reference {
-                        kind,
-                        identifier: normalize_identifier(&id).into(),
-                        label: rill_cmark::decode_string(&id).into(),
-                        alt: String::new(),
-                    })),
+                    Some(kind) => {
+                        let range = reference_label_range(source, start, end, kind, 2);
+                        let (identifier, label) = self.reference_label(&id, range);
+                        MKind::ImageReference(Box::new(Reference {
+                            kind,
+                            identifier,
+                            label,
+                            alt: String::new(),
+                        }))
+                    }
                     None => MKind::Image(Box::new(Resource {
                         url: Cow::from(dest_url),
                         title: (!title.is_empty()).then(|| Cow::from(title)),
@@ -1533,6 +1587,39 @@ impl<'s> Builder<'s> {
 
 fn bytes(start: usize, end: usize) -> At {
     At::Bytes(start as u32, end as u32)
+}
+
+/// Where a reference's label lies in its source (`start..end`, without a collapsed `[]`):
+/// a full reference's second brackets, otherwise its text's, which open `open` bytes in
+/// (`[` or `![`). A label holds no unescaped bracket.
+fn reference_label_range(
+    source: &str,
+    start: usize,
+    end: usize,
+    kind: ReferenceKind,
+    open: usize,
+) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let close = end.checked_sub(1).filter(|close| bytes[*close] == b']')?;
+    let escaped = |at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    let label_start = match kind {
+        ReferenceKind::Full => {
+            (start..close)
+                .rev()
+                .find(|&at| bytes[at] == b'[' && !escaped(at))?
+                + 1
+        }
+        _ => start + open,
+    };
+    (label_start <= close).then_some((label_start, close))
 }
 
 fn reference_kind(link_type: LinkType) -> Option<ReferenceKind> {
