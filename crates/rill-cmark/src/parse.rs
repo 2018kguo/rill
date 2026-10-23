@@ -1896,7 +1896,7 @@ fn body_to_tag_end(body: &ItemBody) -> TagEnd {
         ItemBody::TableRow => TagEnd::TableRow,
         ItemBody::Table(..) => TagEnd::Table,
         ItemBody::FootnoteDefinition(..) => TagEnd::FootnoteDefinition,
-        _ => panic!("unexpected item body {:?}", body),
+        _ => unreachable!("an item body with no end tag"),
     }
 }
 
@@ -1969,7 +1969,7 @@ fn item_to_event<'a>(item: Item, text: &'a str, allocs: &mut Allocations<'a>) ->
         ItemBody::Table(alignment_ix) => Tag::Table(allocs.take_alignment(alignment_ix)),
         ItemBody::FootnoteDefinition(cow_ix) => Tag::FootnoteDefinition(allocs.take_cow(cow_ix)),
         ItemBody::Math(cow_ix) => return Event::InlineMath(allocs.take_cow(cow_ix)),
-        _ => panic!("unexpected item body {:?}", item.body),
+        _ => unreachable!("an item body with no event"),
     };
 
     Event::Start(tag)
