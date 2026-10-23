@@ -650,9 +650,17 @@ struct Builder<'s> {
     /// Nodes that start past a line ending (see `task_paragraph`), with that line ending.
     starts: Vec<(Ix, u32)>,
     exits: Vec<Exit>,
+    /// Where plain text (image alts included) holds a code run micromark gave up on.
+    failed_runs: Vec<u32>,
 }
 
 impl<'s> Builder<'s> {
+    /// Notes the code runs in plain text: micromark tried each as code and gave up.
+    fn note_failed_run(&mut self, start: usize, end: usize) {
+        let runs = code_runs(&self.tree.source[start..end]).map(|at| (start + at) as u32);
+        self.failed_runs.extend(runs);
+    }
+
     fn parent(&self) -> Result<Ix, Error> {
         self.stack
             .last()
@@ -1120,6 +1128,47 @@ impl<'s> Builder<'s> {
             .collect()
     }
 
+    /// A label's source (`start..end`, inside its brackets) as micromark slices it: each
+    /// line past the first starts after the prefixes of the containers it continues (a
+    /// lazy line's failed item indentation stays). `None` unless that drops anything.
+    fn label_source(&self, start: usize, end: usize) -> Option<String> {
+        let source = self.tree.source;
+        let label = &source[start..end];
+        if !label.contains(['\n', '\r']) {
+            return None;
+        }
+        let prefixes = self.prefixes();
+        let mut out = String::with_capacity(label.len());
+        let mut at = start;
+        while let Some(eol) = source[at..end].find(['\n', '\r']).map(|found| at + found) {
+            let line_start = eol + line_ending_len(source, eol);
+            out.push_str(&source[at..line_start]);
+            at = (0..=prefixes.len())
+                .rev()
+                .map(|depth| prefix_end(source, &prefixes[..depth], line_start))
+                .find_map(|(prefix_end, continued)| continued.then_some(prefix_end))
+                .unwrap_or(line_start)
+                .min(end);
+        }
+        out.push_str(&source[at..end]);
+        (out.len() != label.len()).then_some(out)
+    }
+
+    /// A reference's identifier and label from its label source (see `label_source`), or
+    /// from pulldown's `id` (whitespace already collapsed) when the source is not found.
+    fn reference_label(&self, id: &str, range: Option<(usize, usize)>) -> (Box<str>, Box<str>) {
+        let source = self.tree.source;
+        let raw = range.map(|(start, end)| {
+            self.label_source(start, end)
+                .map_or(Cow::Borrowed(&source[start..end]), Cow::Owned)
+        });
+        let raw = raw.as_deref().unwrap_or(id);
+        (
+            normalize_identifier(raw).into(),
+            rill_cmark::decode_string(raw).into(),
+        )
+    }
+
     fn continued_prefix_end(&self, line_start: usize) -> (usize, bool) {
         prefix_end(self.tree.source, &self.prefixes(), line_start)
     }
@@ -1241,6 +1290,9 @@ impl<'s> Builder<'s> {
                 | Event::InlineMath(text)
                 | Event::InlineHtml(text) => {
                     alt.push_str(text);
+                    if matches!(event, Event::Text(_)) {
+                        self.note_failed_run(start, end);
+                    }
                     return Ok(());
                 }
                 Event::SoftBreak | Event::HardBreak => {
@@ -1335,6 +1387,7 @@ impl<'s> Builder<'s> {
                     && start > previous_end
                     && bytes[start - 1] == b'\\'
                     && bytes.get(start).is_some_and(u8::is_ascii_punctuation);
+                self.note_failed_run(start - usize::from(escaped), end);
                 self.push_text(Cow::from(text), start - usize::from(escaped), end);
                 Ok(())
             }
@@ -1368,13 +1421,18 @@ impl<'s> Builder<'s> {
                 bytes(start, trim_line_ending(source, start, end)),
             ),
             Event::Definition { label, dest, title } => {
+                // pulldown's label is the source inside the brackets.
+                let range = (source.as_bytes().get(start) == Some(&b'[')
+                    && source[start + 1..].starts_with(&*label))
+                .then(|| (start + 1, start + 1 + label.len()));
+                let (identifier, label) = self.reference_label(&label, range);
                 let end = skip_blanks(source.as_bytes(), end);
                 self.leaf(
                     MKind::Definition(Box::new(Definition {
                         url: Cow::from(dest),
                         title: title.map(Cow::from),
-                        identifier: normalize_identifier(&label).into(),
-                        label: rill_cmark::decode_string(&label).into(),
+                        identifier,
+                        label,
                     })),
                     bytes(start, end),
                 )
@@ -1477,12 +1535,16 @@ impl<'s> Builder<'s> {
                 title,
                 id,
             } => match reference_kind(link_type) {
-                Some(kind) => MKind::LinkReference(Box::new(Reference {
-                    kind,
-                    identifier: normalize_identifier(&id).into(),
-                    label: rill_cmark::decode_string(&id).into(),
-                    alt: String::new(),
-                })),
+                Some(kind) => {
+                    let range = reference_label_range(source, start, end, kind, 1);
+                    let (identifier, label) = self.reference_label(&id, range);
+                    MKind::LinkReference(Box::new(Reference {
+                        kind,
+                        identifier,
+                        label,
+                        alt: String::new(),
+                    }))
+                }
                 None => MKind::Link(Box::new(Resource {
                     url: if link_type == LinkType::Email {
                         Cow::Owned(format!("mailto:{dest_url}"))
@@ -1501,12 +1563,16 @@ impl<'s> Builder<'s> {
             } => {
                 self.alt = Some(String::new());
                 match reference_kind(link_type) {
-                    Some(kind) => MKind::ImageReference(Box::new(Reference {
-                        kind,
-                        identifier: normalize_identifier(&id).into(),
-                        label: rill_cmark::decode_string(&id).into(),
-                        alt: String::new(),
-                    })),
+                    Some(kind) => {
+                        let range = reference_label_range(source, start, end, kind, 2);
+                        let (identifier, label) = self.reference_label(&id, range);
+                        MKind::ImageReference(Box::new(Reference {
+                            kind,
+                            identifier,
+                            label,
+                            alt: String::new(),
+                        }))
+                    }
                     None => MKind::Image(Box::new(Resource {
                         url: Cow::from(dest_url),
                         title: (!title.is_empty()).then(|| Cow::from(title)),
@@ -1521,6 +1587,39 @@ impl<'s> Builder<'s> {
 
 fn bytes(start: usize, end: usize) -> At {
     At::Bytes(start as u32, end as u32)
+}
+
+/// Where a reference's label lies in its source (`start..end`, without a collapsed `[]`):
+/// a full reference's second brackets, otherwise its text's, which open `open` bytes in
+/// (`[` or `![`). A label holds no unescaped bracket.
+fn reference_label_range(
+    source: &str,
+    start: usize,
+    end: usize,
+    kind: ReferenceKind,
+    open: usize,
+) -> Option<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let close = end.checked_sub(1).filter(|close| bytes[*close] == b']')?;
+    let escaped = |at: usize| {
+        bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\\')
+            .count()
+            % 2
+            == 1
+    };
+    let label_start = match kind {
+        ReferenceKind::Full => {
+            (start..close)
+                .rev()
+                .find(|&at| bytes[at] == b'[' && !escaped(at))?
+                + 1
+        }
+        _ => start + open,
+    };
+    (label_start <= close).then_some((label_start, close))
 }
 
 fn reference_kind(link_type: LinkType) -> Option<ReferenceKind> {
@@ -1559,6 +1658,7 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
         task: None,
         starts: Vec::new(),
         exits: Vec::new(),
+        failed_runs: Vec::new(),
     };
     let events = Parser::new(source).into_offset_iter();
     for (event, range) in events {
@@ -1569,6 +1669,7 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
     if builder.stack.len() != 1 {
         return Err(Error::Unbalanced);
     }
+    let mut failed_runs = builder.failed_runs;
     let mut tree = builder.tree;
     for (ix, line_ending) in builder.starts {
         if let At::Bytes(_, end) = tree.nodes[ix as usize].at {
@@ -1576,20 +1677,40 @@ pub fn parse_arena(source: &str) -> Result<MTree<'_>, Error> {
         }
     }
     autolink_transform(&mut tree);
-    crossed_line_endings(&mut tree, MTree::ROOT, &mut Vec::new());
+    if !failed_runs.is_empty() {
+        // An autolink's text, literal ones included, was never tried as code.
+        let autolinks: Vec<(u32, u32)> = (0..tree.nodes.len() as Ix)
+            .filter(|ix| matches!(tree.nodes[*ix as usize].kind, MKind::Link(_)))
+            .filter_map(|ix| tree.bytes(ix))
+            .filter(|(start, _)| source.as_bytes()[*start as usize] != b'[')
+            .collect();
+        failed_runs.retain(|at| {
+            !autolinks
+                .iter()
+                .any(|(start, end)| (*start..*end).contains(at))
+        });
+        crossed_line_endings(&mut tree, MTree::ROOT, &mut Vec::new(), &failed_runs);
+    }
     Ok(tree)
 }
 
 /// micromark: a failed code text attempt (an unclosed `` ` `` or `$$` run) scans on to the
 /// paragraph's end, and inside containers every line ending it crossed then ends past the
 /// next line's container prefixes. Only a text or break node that ends with one, before
-/// another node, shows it.
-fn crossed_line_endings(tree: &mut MTree<'_>, ix: Ix, prefixes: &mut Vec<Prefix>) {
+/// another node, shows it. `failed_runs` (ascending) are those runs: only plain text
+/// holds one, as a run inside code, HTML, a link destination, or an autolink was never
+/// tried as code.
+fn crossed_line_endings(
+    tree: &mut MTree<'_>,
+    ix: Ix,
+    prefixes: &mut Vec<Prefix>,
+    failed_runs: &[u32],
+) {
     let source = tree.source;
     let prefix = match tree.nodes[ix as usize].kind {
         MKind::Paragraph => {
             if !prefixes.is_empty() {
-                crossed_in_paragraph(tree, ix, prefixes);
+                crossed_in_paragraph(tree, ix, prefixes, failed_runs);
             }
             return;
         }
@@ -1603,7 +1724,7 @@ fn crossed_line_endings(tree: &mut MTree<'_>, ix: Ix, prefixes: &mut Vec<Prefix>
     prefixes.extend(prefix);
     let mut cursor = tree.nodes[ix as usize].first;
     while cursor != NIL {
-        crossed_line_endings(tree, cursor, prefixes);
+        crossed_line_endings(tree, cursor, prefixes, failed_runs);
         cursor = tree.nodes[cursor as usize].next;
     }
     if prefix.is_some() {
@@ -1611,20 +1732,29 @@ fn crossed_line_endings(tree: &mut MTree<'_>, ix: Ix, prefixes: &mut Vec<Prefix>
     }
 }
 
-fn crossed_in_paragraph(tree: &mut MTree<'_>, paragraph: Ix, prefixes: &[Prefix]) {
+fn crossed_in_paragraph(
+    tree: &mut MTree<'_>,
+    paragraph: Ix,
+    prefixes: &[Prefix],
+    failed_runs: &[u32],
+) {
     let source = tree.source;
-    let mut crossed = false;
+    let Some((paragraph_start, _)) = tree.bytes(paragraph) else {
+        return;
+    };
+    let first_run = failed_runs[failed_runs.partition_point(|at| *at < paragraph_start)..]
+        .first()
+        .copied();
     let mut cursor = tree.nodes[paragraph as usize].first;
     while cursor != NIL {
         let next = tree.nodes[cursor as usize].next;
-        if let Some((start, end)) = tree.bytes(cursor) {
-            let text = &source[start as usize..end as usize];
-            let kind = &tree.nodes[cursor as usize].kind;
-            if !matches!(kind, MKind::InlineCode(_) | MKind::InlineMath(_)) {
-                crossed = crossed || failed_code_run(text);
-            }
-            if matches!(kind, MKind::Text(_) | MKind::Break)
-                && crossed
+        if let Some((_, end)) = tree.bytes(cursor) {
+            let text = &source[..end as usize];
+            let crossed = first_run.is_some_and(|at| at < end);
+            if matches!(
+                tree.nodes[cursor as usize].kind,
+                MKind::Text(_) | MKind::Break
+            ) && crossed
                 && next != NIL
                 && text.ends_with(['\n', '\r'])
                 && let At::Bytes(_, node_end) = &mut tree.nodes[cursor as usize].at
@@ -1636,18 +1766,18 @@ fn crossed_in_paragraph(tree: &mut MTree<'_>, paragraph: Ix, prefixes: &[Prefix]
     }
 }
 
-/// Whether `text` (source) holds a `` ` `` or `$$` that no backslash escapes.
-fn failed_code_run(text: &str) -> bool {
+/// Where `text` (source) holds a `` ` `` or `$$` that no backslash escapes.
+fn code_runs(text: &str) -> impl Iterator<Item = usize> + '_ {
     let bytes = text.as_bytes();
-    bytes.iter().enumerate().any(|(at, &byte)| {
-        let run = (byte == b'`' || byte == b'$' && bytes.get(at + 1) == Some(&b'$')).then(|| {
-            bytes[..at]
-                .iter()
-                .rev()
-                .take_while(|b| **b == b'\\')
-                .count()
-        });
-        run.is_some_and(|backslashes| backslashes % 2 == 0)
+    (0..bytes.len()).filter(move |&at| {
+        let run = bytes[at] == b'`' || bytes[at] == b'$' && bytes.get(at + 1) == Some(&b'$');
+        run && bytes[..at]
+            .iter()
+            .rev()
+            .take_while(|b| **b == b'\\')
+            .count()
+            % 2
+            == 0
     })
 }
 
