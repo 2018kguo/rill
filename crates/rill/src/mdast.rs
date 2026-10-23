@@ -2595,17 +2595,107 @@ pub fn root_definitions(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32)>>
     (all == ranges.len() && !footnotes).then_some(ranges)
 }
 
-/// Whether `source` parses into root children none of which spans UTF-16 offset `at`:
-/// the text before it and the text after it then parse into the same blocks on their
-/// own.
+/// Whether `source` parses into root children none of which spans UTF-16 offset `at`,
+/// and the text from `at` parses on its own into the same blocks as it does after the
+/// text before it: the text before it and the text after it then render on their own as
+/// they do together. (Without the second test, what the text before `at` leaves open can
+/// still change the text after it: after a definition's content, or a list's item, an
+/// empty list item cannot interrupt, so it is a paragraph there and a list alone.)
 #[must_use]
 pub fn splits_at(source: &str, syntax: Syntax, at: u32) -> bool {
     let Ok(tree) = parse_arena(source, syntax) else {
         return false;
     };
-    tree.children(Tree::ROOT)
-        .all(|child| match tree.node(child).at {
-            At::Bytes(start, end) => tree.points.units(end) <= at || tree.points.units(start) >= at,
-            _ => false,
+    let mut first_after = None;
+    for child in tree.children(Tree::ROOT) {
+        let At::Bytes(start, end) = tree.node(child).at else {
+            return false;
+        };
+        if tree.points.units(start) >= at {
+            first_after.get_or_insert(child);
+        } else if tree.points.units(end) > at {
+            return false;
+        }
+    }
+    // The byte offset of `at`.
+    let mut units = 0;
+    let split = source
+        .char_indices()
+        .find_map(|(byte, ch)| {
+            let here = units;
+            units += ch.len_utf16() as u32;
+            (here >= at).then_some(byte)
         })
+        .unwrap_or(source.len());
+    let Ok(alone) = parse_arena(&source[split..], syntax) else {
+        return false;
+    };
+    same_nodes(
+        &tree,
+        first_after,
+        &alone,
+        alone.node(Tree::ROOT).first,
+        split as u32,
+    )
+}
+
+/// Whether two nodes are of the same kind, down to what their source alone does not
+/// settle (a list's looseness, indented code on a lazy line, which ends it).
+fn same_kind(x: &NodeKind<'_>, y: &NodeKind<'_>) -> bool {
+    match (x, y) {
+        (NodeKind::Code(a), NodeKind::Code(b)) | (NodeKind::Math(a), NodeKind::Math(b)) => {
+            a.fenced == b.fenced && a.lazy == b.lazy
+        }
+        (
+            NodeKind::List {
+                ordered,
+                start,
+                spread,
+            },
+            NodeKind::List {
+                ordered: other_ordered,
+                start: other_start,
+                spread: other_spread,
+            },
+        ) => ordered == other_ordered && start == other_start && spread == other_spread,
+        (
+            NodeKind::ListItem { spread, checked },
+            NodeKind::ListItem {
+                spread: other_spread,
+                checked: other_checked,
+            },
+        ) => spread == other_spread && checked == other_checked,
+        (NodeKind::Heading(a), NodeKind::Heading(b)) => a == b,
+        _ => std::mem::discriminant(x) == std::mem::discriminant(y),
+    }
+}
+
+/// Whether the siblings from `left` in `a` and from `right` in `b` are the same blocks,
+/// at the same places (`b`'s shifted by `shift` bytes).
+fn same_nodes(a: &Tree<'_>, left: Option<NodeId>, b: &Tree<'_>, right: NodeId, shift: u32) -> bool {
+    let mut left = left.unwrap_or(NIL);
+    let mut right = right;
+    while left != NIL && right != NIL {
+        let (x, y) = (a.node(left), b.node(right));
+        let place = |at: At, by: u32| match at {
+            At::None => None,
+            At::Bytes(start, end) => Some((0, start + by, end + by)),
+            At::PastLineEnding { line_ending, end } => Some((1, line_ending + by, end + by)),
+        };
+        // Only blocks: inline content depends on its own text and the definitions, which
+        // each piece renders with.
+        let container = matches!(
+            x.kind,
+            NodeKind::Blockquote | NodeKind::List { .. } | NodeKind::ListItem { .. }
+        );
+        if !same_kind(&x.kind, &y.kind)
+            || place(x.at, 0) != place(y.at, shift)
+            || container && !same_nodes(a, Some(x.first), b, y.first, shift)
+        {
+            return false;
+        }
+        left = x.next;
+        right = y.next;
+    }
+    left == NIL && right == NIL
 }

@@ -594,8 +594,10 @@ export const Block = memo(function Block(props: BlockProps) {
 // ---------------------------------------------------------------------------------
 
 type Piece = {
-  /** The definitions it was rendered with ("" for a piece with no `]`, which has no
-   * reference). */
+  /** Its text. */
+  chunk: string;
+  /** The definitions it was rendered with: those whose label its text may hold ("" for
+   * a piece with no `]`, which has no reference). */
   definitions: string;
   last: boolean;
   /** The block's `isIncomplete` when it holds a code block (each one reads it). */
@@ -608,18 +610,140 @@ type Piece = {
 };
 
 type Pieces = {
-  rendered: Map<string, Piece>;
+  /** The pieces rendered last time, in order. */
+  rendered: Piece[];
   /** Each piece's root-level definitions, `null` when it holds one elsewhere. */
   definitions: Map<string, string[] | null>;
-  /** A piece and the next piece it was found to end before (no block spans them). */
-  joins: Map<string, string>;
+  /** Per place between two pieces, the pieces found to split there (no block spans
+   * them). */
+  joins: [string, string][];
+  references: References;
 };
 
 const newPieces = (): Pieces => ({
-  rendered: new Map(),
+  rendered: [],
   definitions: new Map(),
-  joins: new Map(),
+  joins: [],
+  references: newReferences(),
 });
+
+// A piece renders with the definitions whose label its text may reference, so that a
+// definition arriving late renders again only the pieces that may use it. A reference
+// matches a definition by its label, compared as micromark's `normalizeIdentifier`
+// does (whitespace collapsed, case folded by `toLowerCase().toUpperCase()`), on the
+// label's source text. So a piece may reference a label only when each of the label's
+// words is in its text, normalized the same way: a word never spans a line (where a
+// container's markers sit), and with backslashes dropped on both sides (a table cell's
+// `\|` is a `|` in its label) the test only grows more permissive.
+
+/** A piece's text as the label test reads it. */
+type Referrer = {
+  text: string;
+  /** The labels it may reference. */
+  labels: string[];
+  /** The update it was last part of. */
+  seen: number;
+};
+
+type References = {
+  /** Each definition's label words (normalized), keyed by the definition's text. */
+  labels: Map<string, string>;
+  referrers: Map<string, Referrer>;
+  /** The referrers each label's words are all found in. */
+  byLabel: Map<string, Set<Referrer>>;
+  update: number;
+};
+
+const newReferences = (): References => ({
+  labels: new Map(),
+  referrers: new Map(),
+  byLabel: new Map(),
+  update: 0,
+});
+
+const normalizeForLabels = (text: string) =>
+  text.replace(/\\/g, "").replace(/[\t\n\r ]+/g, " ").toLowerCase().toUpperCase();
+
+/** A definition's label, normalized (see above). */
+function labelOf(definition: string): string {
+  const start = definition.indexOf("[") + 1;
+  let end = start;
+  while (end < definition.length && definition[end] !== "]") {
+    end += definition[end] === "\\" ? 2 : 1;
+  }
+  return normalizeForLabels(definition.slice(start, end)).trim();
+}
+
+const mayReference = (referrer: Referrer, label: string) =>
+  label.split(" ").every((word) => referrer.text.includes(word));
+
+/** For each piece text with a `]`, the definitions (in order) whose label it may
+ * reference, joined as they go before it. */
+function definitionsFor(
+  references: References,
+  chunks: string[],
+  definitions: string[]
+): Map<string, string> {
+  const update = (references.update += 1);
+  const labels = definitions.map((definition) => {
+    let label = references.labels.get(definition);
+    if (label === undefined) {
+      label = labelOf(definition);
+      references.labels.set(definition, label);
+    }
+    return label;
+  });
+  const current: Referrer[] = [];
+  for (const chunk of chunks) {
+    if (!chunk.includes("]")) continue;
+    let referrer = references.referrers.get(chunk);
+    if (!referrer) {
+      referrer = { text: normalizeForLabels(chunk), labels: [], seen: update };
+      references.referrers.set(chunk, referrer);
+      for (const [label, found] of references.byLabel) {
+        if (mayReference(referrer, label)) {
+          found.add(referrer);
+          referrer.labels.push(label);
+        }
+      }
+    }
+    referrer.seen = update;
+    current.push(referrer);
+  }
+  for (const label of labels) {
+    if (references.byLabel.has(label)) continue;
+    const found = new Set<Referrer>();
+    for (const referrer of current) {
+      if (mayReference(referrer, label)) {
+        found.add(referrer);
+        referrer.labels.push(label);
+      }
+    }
+    references.byLabel.set(label, found);
+  }
+  // Pieces that are gone (the last piece's text changes as it grows).
+  for (const [chunk, referrer] of references.referrers) {
+    if (referrer.seen === update) continue;
+    references.referrers.delete(chunk);
+    for (const label of referrer.labels) references.byLabel.get(label)?.delete(referrer);
+  }
+  if (references.labels.size > 4 * definitions.length + 64) {
+    references.labels = new Map(definitions.map((definition, index) => [definition, labels[index]!]));
+  }
+  const used = new Map<Referrer, string>();
+  for (const [index, definition] of definitions.entries()) {
+    for (const referrer of references.byLabel.get(labels[index]!) ?? []) {
+      used.set(referrer, `${used.get(referrer) ?? ""}${definition}\n\n`);
+    }
+  }
+  const out = new Map<string, string>();
+  for (const chunk of chunks) {
+    const referrer = references.referrers.get(chunk);
+    const usable = referrer && used.get(referrer);
+    if (usable) out.set(chunk, usable);
+  }
+  return out;
+}
 
 const countsKey = (counts: Map<string, number>) => {
   let key = "";
@@ -630,15 +754,16 @@ const countsKey = (counts: Map<string, number>) => {
 /** `chunks` merged where micromark's blocks run across marked's (a lazy line). */
 function joinChunks(chunks: string[], rill: Rill, plan: Plan, pieces: Pieces): string[] {
   const joined: string[] = [];
-  const joins = new Map<string, string>();
+  const joins: [string, string][] = [];
   let current = chunks[0]!;
   for (let index = 1; index < chunks.length; index += 1) {
     const next = chunks[index]!;
+    const known = pieces.joins[index - 1];
     const clean =
-      pieces.joins.get(current) === next ||
+      (known !== undefined && known[0] === current && known[1] === next) ||
       rill.splitsAt!(current + next, plan, current.length);
     if (clean) {
-      joins.set(current, next);
+      joins[index - 1] = [current, next];
       joined.push(current);
       current = next;
     } else {
@@ -683,22 +808,23 @@ function renderChunks(
     definitions.push(...found);
   }
   pieces.definitions = known;
-  const before = definitions.length > 0 ? `${definitions.join("\n\n")}\n\n` : "";
+  const usableBy = definitionsFor(pieces.references, chunks, definitions);
   const out: ReactNode[] = [];
   const counts = new Map<string, number>();
-  const rendered = new Map<string, Piece>();
+  const rendered: Piece[] = [];
   /** Root children so far, and whether the last one was removed (it rendered nothing). */
   let slots = 0;
   let barrier = false;
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index]!;
     const last = index === chunks.length - 1;
-    const usable = chunk.includes("]") ? before : "";
+    const usable = usableBy.get(chunk) ?? "";
     const at = countsKey(counts);
-    let piece = pieces.rendered.get(chunk);
+    let piece: Piece | undefined = pieces.rendered[index];
     if (
       !(
         piece &&
+        piece.chunk === chunk &&
         piece.definitions === usable &&
         piece.last === last &&
         piece.before === at &&
@@ -718,9 +844,9 @@ function renderChunks(
       const nodes = segments(reader, env, own, coded);
       for (const [tag, count] of counts) own.set(tag, (own.get(tag) ?? 0) - count);
       const incomplete = coded.code ? env.isIncomplete : null;
-      piece = { definitions: usable, last, incomplete, before: at, nodes, counts: own };
+      piece = { chunk, definitions: usable, last, incomplete, before: at, nodes, counts: own };
     }
-    rendered.set(chunk, piece);
+    rendered.push(piece);
     for (const [tag, count] of piece.counts) counts.set(tag, (counts.get(tag) ?? 0) + count);
     // A piece of definitions alone has no node in the whole text's root; one whose
     // nodes sanitize removed (an HTML comment) had one, with a line ending on each side.
