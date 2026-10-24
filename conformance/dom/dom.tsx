@@ -132,6 +132,11 @@ for (const type of ["load", "error"]) {
 const imageDone = (image: HTMLImageElement) =>
   image.complete && (!image.getAttribute("src") || firedImages.get(image) === image.src);
 
+// A code block still showing its raw text (Streamdown's Suspense fallback, or its body
+// before the highlight lands): every token "inherit". Highlighted tokens always carry
+// the theme's colors, so with a code plugin no settled block looks like this.
+const UNHIGHLIGHTED = '[data-streamdown="code-block-body"] span[style*="--sdm-c: inherit"]';
+
 /** Resolves once `element` has not changed for `quietMs`, its images are done, and no
  * highlighting is in flight in rill's worker (whose answers can outlast the quiet period). */
 function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promise<void> {
@@ -152,7 +157,8 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
     function done() {
       // An image whose (aborted) request has not failed yet still flips to `hidden`.
       const loading = [...element.querySelectorAll("img")].some((image) => !imageDone(image));
-      if ((loading || pendingHighlights() > 0 || codePending() > 0) && performance.now() < started + timeoutMs) {
+      const unhighlighted = plugins?.code !== undefined && element.querySelector(UNHIGHLIGHTED) !== null;
+      if ((loading || unhighlighted || pendingHighlights() > 0 || codePending() > 0) && performance.now() < started + timeoutMs) {
         timer = setTimeout(done, quietMs);
         return;
       }
