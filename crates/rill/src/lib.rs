@@ -103,7 +103,7 @@ pub mod wasm {
 
     /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
     /// `linkSafety.enabled`, bit 1 server rendering, bit 2 the streaming spine, bit 3
-    /// KaTeX available; `overrides`: the tag names with components of the page's own,
+    /// KaTeX available, bit 4 an incomplete code fence; `overrides`: the tag names with components of the page's own,
     /// space-separated.
     #[doc(hidden)]
     pub fn render_markup(
@@ -121,6 +121,7 @@ pub mod wasm {
             overrides: overrides.split_whitespace().map(str::to_owned).collect(),
             math: false,
             katex: flags & 8 != 0,
+            incomplete: flags & 16 != 0,
             spine: flags & 4 != 0,
         };
         let encoded = crate::render_markup(source, &options, &markup)

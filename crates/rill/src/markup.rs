@@ -42,6 +42,10 @@ pub struct MarkupOptions {
     /// JavaScript renders math with KaTeX: without it, a tree with math is
     /// [`Unsupported`].
     pub katex: bool,
+    /// The block ends in a code fence still streaming, whose state Streamdown's
+    /// components read from a context only its own `Block` provides: a tree with an
+    /// element the page gives its own component is [`Unsupported`].
+    pub incomplete: bool,
     /// While an answer streams: the last element of the block, its last element, and so
     /// on down are React elements (with their other children static), so an update that
     /// grows the end changes only text nodes there, as React does, instead of replacing
@@ -369,6 +373,15 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             (Some(text), None) if self.text(text).is_some() => Some(code),
             _ => None,
         }
+    }
+
+    /// Whether `ix` or an element under it renders through hast-util-to-jsx-runtime.
+    fn holds_jsx(&mut self, ix: NodeId) -> bool {
+        if self.need(ix) == Need::Jsx {
+            return true;
+        }
+        let children: Vec<NodeId> = self.tree.children(ix).collect();
+        children.into_iter().any(|child| self.holds_jsx(child))
     }
 
     fn need(&mut self, ix: NodeId) -> Need {
@@ -1053,6 +1066,13 @@ fn encode<'t, 's>(
         footnote_items: HashMap::new(),
     };
     markup.prepare(root);
+    if options.incomplete
+        && tree
+            .children(root)
+            .any(|ix| markup.need(ix) >= Need::React && markup.holds_jsx(ix))
+    {
+        return Err(Unsupported);
+    }
     let children: Vec<NodeId> = tree.children(root).collect();
     markup.segments(
         &children,
