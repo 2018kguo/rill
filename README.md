@@ -1,13 +1,16 @@
 # rill
 
-**Render AI chat Markdown 10× faster, with the exact same output.**
+**Streamdown, without the wait. Same DOM, byte for byte.**
 
-rill is a drop-in engine for [Streamdown](https://github.com/vercel/streamdown), the
-Markdown renderer behind a lot of AI chat UIs. It's written in Rust, runs in the browser
-through WebAssembly, and produces the same result as Streamdown down to every node and
-character position. You get the same page, just much sooner.
+rill is a drop-in for [Streamdown](https://github.com/vercel/streamdown) 2.7.1, the
+Markdown component behind a lot of AI chat UIs. Change one import and the same component
+renders the same page, down to every class, attribute and text node, with most of the
+work moved into Rust and WebAssembly. On a throttled phone, a long chat opens 4.7× sooner
+and answers stream at full frame rate instead of stuttering.
 
-![rill and Streamdown rendering the same answer side by side as it streams in](docs/demo.gif)
+[![Streamdown and rill streaming the Rust Book's ownership chapter side by side at 10× CPU throttle: 29 fps vs 74 fps](docs/rill-0.2.jpg)](https://github.com/2018kguo/rill/releases/tag/v0.2.0)
+
+*The launch film (70 s, real recordings): [watch it on the release page](https://github.com/2018kguo/rill/releases/tag/v0.2.0).*
 
 ## Use it
 
@@ -80,14 +83,32 @@ export default { optimizeDeps: { exclude: ["@2018kguo/rill"] } };
 
 ## Why
 
-When a chatbot streams an answer, the screen updates many times a second. Each update
-re-renders the whole answer so far, because a half-written `**bold` or table can change
-meaning when the next few characters arrive. Long answers make every update slower,
-and that cost lands right where users notice it: while the text is still coming in.
+When a chatbot streams an answer, the screen updates many times a second, and each
+update re-renders the answer so far, because a half-written `**bold` or table can change
+meaning when the next characters arrive. Opening a chat renders every past answer at once.
+On a phone, that work is what users feel: stutter while text arrives, a blank screen
+while a conversation opens.
 
-Streamdown does this well, but it's built from dozens of small JavaScript packages
-(remark and rehype plugins) that each walk the document again. rill does the same work in
-one compiled pass:
+rill keeps Streamdown's component and does its work in one compiled pass. Measured in
+Chromium with production React, a 412×915 phone screen and 10× CPU throttling (≈ a budget
+Android phone); every number is a median of trace-based runs, Streamdown 2.7.1 vs rill
+0.2.0, with byte-identical final HTML:
+
+| Scenario | Finished sooner | Less main-thread JS + GC | Heap after |
+|---|---:|---:|---:|
+| Open a chat of 18 long answers (231 KB of text, code, tables) | 4.7× | 6.8× | 40.9 → 13.4 MB |
+| Open a code-heavy chat | 7.5× | 10.8× | |
+| Stream the 118-element periodic table as one table | 4.1× | 15.7× | |
+| Stream the Rust Book's ownership chapter (56 KB) | 5.5× | 13.3× | |
+
+Layout and paint are the same on both sides (it's the same DOM), so "finished sooner" is
+bounded by what the browser itself spends; "less JS + GC" is rill's own share. Streaming at
+a realistic 2,000–3,000 characters a second, recorded live at 10× throttle, Streamdown
+drops to 15–29 fps with frames up to 262 ms; rill holds 63–74 fps with its worst frame
+under 100 ms on the chapter.
+
+The Markdown pipeline alone (remark, rehype, sanitize, harden, Streamdown's plugins) is a
+smaller tier of the same story:
 
 | 97 KB answer | Streamdown (JavaScript) | rill |
 |---|---:|---:|
@@ -95,8 +116,8 @@ one compiled pass:
 | Native (Rust) | 29.2 ms | 0.31 ms |
 
 "Same output" is the whole point. Switching renderers usually means subtly different
-lists, links or emphasis. rill is checked against Streamdown's own pipeline, so
-switching changes nothing on the page.
+lists, links or emphasis. rill is checked against Streamdown's own pipeline and its DOM,
+so switching changes nothing on the page.
 
 ## How it works
 
@@ -365,7 +386,7 @@ node conformance/bench.mjs                     # the JavaScript pipeline, same d
 - `conformance/`: the differential harnesses (trees, DOM, SSR, interactions, remend), the
   probe and the benchmark.
 - `demo/perf`: the main-thread benchmark (production React, CPU throttling).
-- `demo/`: the page in the GIF.
+- `demo/`: the demo page.
 
 ## License
 
