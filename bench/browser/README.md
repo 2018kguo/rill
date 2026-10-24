@@ -31,7 +31,7 @@ runs any other stage query; `--engine name=<dist>` compares other builds.
 
 An engine of your own (a custom build, other props per answer such as `mode="static"`)
 is a module like `stage/engine.rill.ts` exporting `Streamdown`, `engineName` and
-`answerProps(settled)`: `bun build.ts mine=path/to/engine.ts` builds it into
+`answerProps(settled, text)`: `bun build.ts mine=path/to/engine.ts` builds it into
 `dist/mine`, then `--engine mine=dist/mine`.
 
 Each scenario's final HTML is the same in both engines:

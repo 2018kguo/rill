@@ -1,6 +1,6 @@
 // The recording stage: one engine (`./engine.ts`, which build.ts points at
 // engine.streamdown.ts, engine.rill.ts or a file of your own, exports a `Streamdown`
-// component and `answerProps(settled)`, the props each answer adds), production
+// component and `answerProps(settled, text)`, the props each answer adds), production
 // React, real content, a chat-style page that follows the newest text.
 //   stage.html?scene=stream&doc=lru-cache&rate=1200  |  stage.html?scene=history
 // The overlay is written outside React: frames painted in the last second, the worst
@@ -125,7 +125,7 @@ function Stream() {
     };
     return () => cancelAnimationFrame(frame);
   }, []);
-  return createElement(Streamdown, { plugins, ...answerProps(done), isAnimating: !done }, shown);
+  return createElement(Streamdown, { plugins, ...answerProps(done, shown), isAnimating: !done }, shown);
 }
 
 const asked: Record<string, string> = {
@@ -148,7 +148,7 @@ function History() {
         "div",
         { key: index, className: "turn" },
         createElement("p", { className: "question" }, questions[index % questions.length]),
-        createElement(Streamdown, { plugins, ...answerProps(true) }, answers[index % answers.length]),
+        createElement(Streamdown, { plugins, ...answerProps(true, answers[index % answers.length]!) }, answers[index % answers.length]),
       ),
     ),
   );

@@ -9,5 +9,5 @@ setHighlightWasm(new URL("rill_highlight.wasm", location.href));
 export { Streamdown } from "../../../js/src/streamdown.ts";
 export const engineName = "rill drop-in";
 
-/** Props each answer adds (`settled`: it is not streaming). */
-export const answerProps = (_settled: boolean): Record<string, unknown> => ({});
+/** Props each answer adds (`settled`: it is not streaming; `text`: what it shows). */
+export const answerProps = (_settled: boolean, _text: string): Record<string, unknown> => ({});
