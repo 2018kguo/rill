@@ -3,7 +3,7 @@
 // download a table, open a link through the safety modal), and links are plain anchors
 // with linkSafety off. Run after dom-diff.mjs --build (it serves conformance/dom/dist).
 //
-//   node conformance/dom/interactions.mjs [--candidate rill|self]
+//   node conformance/dom/interactions.mjs [--candidate rill|self] [--static]
 //
 // `--candidate self` runs the same checks on Streamdown itself, which must pass too.
 import assert from "node:assert/strict";
@@ -17,6 +17,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, "dist");
 const args = process.argv.slice(2);
 const candidate = args.includes("--candidate") ? args[args.indexOf("--candidate") + 1] : "rill";
+// `--static`: every mount in mode="static".
+const base = args.includes("--static") ? { mode: "static" } : {};
 const types = { ".html": "text/html", ".js": "text/javascript", ".wasm": "application/wasm" };
 const server = createServer(async (request, response) => {
   const path = join(dist, decodeURIComponent(new URL(request.url, "http://x").pathname));
@@ -62,7 +64,7 @@ async function check(name, run) {
   await context.close();
 }
 const mount = (page, props = {}) =>
-  page.evaluate(([markdown, extra]) => window.mount(markdown, extra), [DOCUMENT, props]);
+  page.evaluate(([markdown, extra]) => window.mount(markdown, extra), [DOCUMENT, { ...base, ...props }]);
 
 await check("the code block's copy button copies its code", async (page) => {
   await mount(page);
@@ -126,7 +128,7 @@ await check("a link opens the safety modal, and confirming opens the URL", async
 });
 
 await check("onLinkCheck allowing a link opens it without the modal", async (page) => {
-  await page.evaluate(() => {
+  await page.evaluate((base) => {
     window.opened = [];
     window.open = (...args) => {
       window.opened.push(args);
@@ -134,9 +136,9 @@ await check("onLinkCheck allowing a link opens it without the modal", async (pag
     };
     window.mount(
       "See [docs](https://example.com/docs).",
-      { linkSafety: { enabled: true, onLinkCheck: (url) => url.startsWith("https://example.com") } }
+      { ...base, linkSafety: { enabled: true, onLinkCheck: (url) => url.startsWith("https://example.com") } }
     );
-  });
+  }, base);
   await page.click('button[data-streamdown="link"]');
   await page.waitForFunction(() => window.opened.length > 0);
   assert.deepEqual(await page.evaluate(() => window.opened), [["https://example.com/docs", "_blank", "noreferrer"]]);

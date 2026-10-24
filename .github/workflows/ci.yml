@@ -109,4 +109,7 @@ jobs:
           bun conformance/dom/ssr.tsx --config code
           node conformance/dom/interactions.mjs --candidate self
           node conformance/dom/interactions.mjs
+          node conformance/dom/interactions.mjs --static
+          bun conformance/dom/ssr.tsx --config code --variant static
+          bun conformance/dom/ssr.tsx --config code --variant engine
           node conformance/blocks.mjs --fuzz 3000
