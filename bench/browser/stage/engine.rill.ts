@@ -7,4 +7,7 @@ await initRill(await (await fetch("rill_bg.wasm")).arrayBuffer());
 setHighlightWasm(new URL("rill_highlight.wasm", location.href));
 
 export { Streamdown } from "../../../js/src/streamdown.ts";
-export const engineName = "rill 0.2 drop-in";
+export const engineName = "rill drop-in";
+
+/** Props each answer adds (`settled`: it is not streaming). */
+export const answerProps = (_settled: boolean): Record<string, unknown> => ({});

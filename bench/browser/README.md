@@ -29,6 +29,11 @@ Options go after `--`, for example `npm run bench:hist-distinct -- --runs 3 --wa
 at 2.625× (a budget Android phone), results in `results.json`. `--scenario name=query`
 runs any other stage query; `--engine name=<dist>` compares other builds.
 
+An engine of your own (a custom build, other props per answer such as `mode="static"`)
+is a module like `stage/engine.rill.ts` exporting `Streamdown`, `engineName` and
+`answerProps(settled)`: `bun build.ts mine=path/to/engine.ts` builds it into
+`dist/mine`, then `--engine mine=dist/mine`.
+
 Each scenario's final HTML is the same in both engines:
 
 ```sh
