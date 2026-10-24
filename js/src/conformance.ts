@@ -47,18 +47,33 @@ export type EngineReport = {
 
 type Component = ComponentType<Record<string, unknown>>;
 
-/** The host's HTML, and its text nodes' lengths: HTML parsing joins adjacent text that
- * React keeps as separate nodes, which innerHTML does not show. */
+/**
+ * The host's DOM: each text node a JSON string (where one ends and the next begins
+ * shows), each element's attributes sorted. The order attributes were set in depends on
+ * which elements React reused across updates, and DOM implementations keep it
+ * differently, so it is not compared.
+ */
 function snapshot(host: HTMLElement): string {
-  const lengths: number[] = [];
-  const walk = (node: Node) => {
+  const write = (node: Node): string => {
+    let out = "";
     for (let child = node.firstChild; child; child = child.nextSibling) {
-      if (child.nodeType === 3) lengths.push((child as Text).length);
-      else walk(child);
+      if (child.nodeType === 3) {
+        out += JSON.stringify((child as Text).data);
+      } else if (child.nodeType === 1) {
+        const element = child as Element;
+        const tag = element.localName;
+        const attributes = Array.from(
+          element.attributes,
+          (attribute) => `${attribute.name}=${JSON.stringify(attribute.value)}`
+        ).sort();
+        out += `<${[tag, ...attributes].join(" ")}>${write(element)}</${tag}>`;
+      } else if (child.nodeType === 8) {
+        out += `<!--${(child as Comment).data}-->`;
+      }
     }
+    return out;
   };
-  walk(host);
-  return `${host.innerHTML}\n<!-- text nodes: ${lengths.join(" ")} -->`;
+  return write(host);
 }
 
 /** Resolves once `host` has not changed for `quietMs` (at most 10 s). */

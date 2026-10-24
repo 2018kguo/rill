@@ -40,6 +40,10 @@ pub struct Emoji;
 const EMOJI: [(&str, &str); 3] = [(":smile:", "😄"), (":tada:", "🎉"), (":rocket:", "🚀")];
 
 impl Plugin for Emoji {
+    fn piecewise(&self) -> bool {
+        true
+    }
+
     fn mdast(&self, tree: &mut mdast::Tree<'_>) -> Result<(), Error> {
         for node in &mut tree.nodes {
             if let mdast::NodeKind::Text(value) = &mut node.kind
@@ -103,6 +107,10 @@ pub struct Mentions {
 }
 
 impl Plugin for Mentions {
+    fn piecewise(&self) -> bool {
+        true
+    }
+
     fn hast_unsanitized(&self, tree: &mut Tree<'_>, root: NodeId, _: &Context<'_>) {
         edit_text(tree, root, &mut |tree, text| {
             let bytes = text.as_bytes();
@@ -167,6 +175,10 @@ fn hashtag(text: &str, start: usize) -> Option<usize> {
 }
 
 impl Plugin for Hashtags {
+    fn piecewise(&self) -> bool {
+        true
+    }
+
     /// The JavaScript form runs after KaTeX, on its output too: math that could hold a
     /// hashtag is left to JavaScript.
     fn mdast(&self, tree: &mut mdast::Tree<'_>) -> Result<(), Error> {

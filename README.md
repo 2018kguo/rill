@@ -324,9 +324,10 @@ export const myEngine = defineEngine({
 `engineArgs` compare by value (a new array each render is fine), and with an engine
 `remarkPlugins`/`rehypePlugins` are a type error: the engine's are the ones. Until the
 WebAssembly loads, and on the server unless you `await myEngine.init(bytes)`, Streamdown
-renders with the engine's plugins, so hydration matches either way. A plugin whose
-output depends on the whole text (counting markers, say) keeps rill from rendering a
-long block as pieces; nothing else changes.
+renders with the engine's plugins, so hydration matches either way. A plugin that says
+it is `piecewise` (its output for a block depends on that block alone) lets rill render a
+long block that link definitions made one as pieces while it streams; one that counts
+across the whole text (positions, markers) leaves such a block whole, as Streamdown does.
 
 `checkEngine` (`@2018kguo/rill/conformance`) renders documents with Streamdown and your
 engine's plugins and with your build, streamed and static, and compares the DOMs, in

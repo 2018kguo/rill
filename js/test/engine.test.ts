@@ -30,6 +30,7 @@ const DOCUMENTS = [
   "Math with a hash: $$a #b$$ #tag",
   "```js\n// @user #tag\n```\n\n:smile: a@b.co #x",
   "A note[^1] for @ann.\n\n[^1]: Footnote #tagged.",
+  "See [the docs][d] with @ann #x.\n\n- more [docs][d]\n- and #y\n\nA [late] one.\n\n[d]: https://example.com/docs\n\n[late]: /late",
 ];
 
 for (const args of [["/users", true], [null, false], ["https://x.com/u", false]] as const) {

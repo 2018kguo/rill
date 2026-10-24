@@ -2839,6 +2839,14 @@ pub trait Plugin {
 
     /// The final tree (but for KaTeX): a rehype plugin after the chain.
     fn hast(&self, _tree: &mut Tree<'_>, _root: NodeId, _context: &Context<'_>) {}
+
+    /// Whether what the plugin makes of a block depends only on that block's text and
+    /// the link definitions before it, not on the rest of the text (positions included).
+    /// rill then renders a long block that link definitions made one (Streamdown keeps
+    /// such a text in one block) as pieces, of which a streaming update renders the last.
+    fn piecewise(&self) -> bool {
+        false
+    }
 }
 
 /// How far [`render`] took the tree.

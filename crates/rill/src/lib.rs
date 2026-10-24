@@ -256,15 +256,15 @@ macro_rules! wasm_exports {
             )
         }
 
-        /// Whether rill may render a long block as pieces: only without plugins, whose
-        /// output may depend on the whole text.
+        /// Whether rill may render a long block as pieces: when every plugin is
+        /// `piecewise`.
         #[$crate::wasm::wasm_bindgen::prelude::wasm_bindgen(
             js_name = pieces,
             wasm_bindgen = $crate::wasm::wasm_bindgen
         )]
         pub fn __rill_pieces($($arg: $ty),*) -> bool {
             let options: $crate::Options = $options;
-            options.plugins.is_empty()
+            options.plugins.iter().all(|plugin| plugin.piecewise())
         }
 
         /// The root-level link definitions of `source` (see `rill::wasm::definitions`).
