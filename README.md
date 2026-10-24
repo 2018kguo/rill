@@ -373,6 +373,11 @@ cargo run --release -p rill --example bench    # rill, native
 node conformance/bench.mjs                     # the JavaScript pipeline, same document
 ```
 
+The browser numbers at the top come from `bench/browser`: a chat page built with each
+engine, traced in Chromium at 10× CPU throttle on a phone-sized screen, with interleaved
+runs and bootstrap intervals. Its README has a script per scenario and the check that the
+final HTML is byte-identical.
+
 ### Layout
 
 - `crates/rill-cmark`: the pulldown-cmark 0.13.4 fork, with every change from upstream
@@ -386,6 +391,7 @@ node conformance/bench.mjs                     # the JavaScript pipeline, same d
 - `conformance/`: the differential harnesses (trees, DOM, SSR, interactions, remend), the
   probe and the benchmark.
 - `demo/perf`: the main-thread benchmark (production React, CPU throttling).
+- `bench/browser`: the trace-based browser benchmark behind the README's table.
 - `demo/`: the demo page.
 
 ## License

@@ -1,0 +1,9 @@
+Excerpts of The Rust Programming Language (https://github.com/rust-lang/book), dual
+licensed MIT or Apache-2.0, Copyright (c) 2010 The Rust Project Developers:
+stage/ownership.md, stage/ownership-chapter.md, the Rust answers in stage/chat.json, and
+stage/img/trpl04-*.svg.
+
+stage/elements-118.md is a derived work of Periodic-Table-JSON
+(https://github.com/Bowserinator/Periodic-Table-JSON) by Bowserinator, licensed CC BY-SA
+3.0 (https://creativecommons.org/licenses/by-sa/3.0/); the derived file is licensed CC
+BY-SA 3.0 as well.

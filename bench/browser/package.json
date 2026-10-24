@@ -1,0 +1,24 @@
+{
+  "name": "rill-browser-bench",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build.ts",
+    "bench": "node bench.mjs",
+    "bench:hist-distinct": "node bench.mjs --scenario hist-distinct",
+    "bench:hist-code": "node bench.mjs --scenario hist-code",
+    "bench:table118": "node bench.mjs --scenario table118",
+    "bench:chapter": "node bench.mjs --scenario chapter",
+    "domcheck": "node domcheck.mjs"
+  },
+  "devDependencies": {
+    "@paulirish/trace_engine": "0.0.67",
+    "@streamdown/code": "2.0.0",
+    "@tailwindcss/cli": "4.3.3",
+    "playwright": "1.64.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "streamdown": "2.7.1",
+    "tailwindcss": "4.3.3"
+  }
+}

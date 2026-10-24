@@ -1,0 +1,16 @@
+@import "tailwindcss";
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@import "streamdown/styles.css";
+
+/* A dark shadcn-style theme: the tokens Streamdown's classes refer to. */
+@theme inline {
+  --color-background: #0e0f11;
+  --color-foreground: #e8e8ea;
+  --color-muted: #1b1d22;
+  --color-muted-foreground: #8b8d94;
+  --color-border: #26282e;
+  --color-sidebar: #15171b;
+  --color-primary: #7aa2ff;
+}
+@custom-variant dark (&:where(.dark, .dark *));
