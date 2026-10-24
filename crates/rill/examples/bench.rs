@@ -58,6 +58,7 @@ fn main() {
     });
     let markup = rill::MarkupOptions {
         link_safety: true,
+        katex: true,
         ..rill::MarkupOptions::default()
     };
     time("Streamdown DOM markup", &|| {

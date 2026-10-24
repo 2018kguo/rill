@@ -13,6 +13,7 @@ fn main() {
     let options = rill::Options::default();
     let markup = rill::MarkupOptions {
         link_safety: true,
+        katex: true,
         ..rill::MarkupOptions::default()
     };
     let time = |label: &str, run: &dyn Fn()| {

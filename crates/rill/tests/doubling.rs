@@ -68,6 +68,7 @@ type Stage<'a> = (&'static str, &'a dyn Fn(&str));
 fn every_stage_grows_linearly() {
     let markup = rill::MarkupOptions {
         link_safety: true,
+        katex: true,
         ..rill::MarkupOptions::default()
     };
     let mut failures = Vec::new();

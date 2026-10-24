@@ -16,7 +16,11 @@ fn readme() -> Result<(), rill::Error> {
 fn examples_render() -> Result<(), rill::Error> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../examples");
     for entry in std::fs::read_dir(dir).expect("examples") {
-        let source = std::fs::read_to_string(entry.expect("entry").path()).expect("read");
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|extension| extension != "md") {
+            continue;
+        }
+        let source = std::fs::read_to_string(path).expect("read");
         for (math, cjk) in [(false, false), (true, false), (false, true), (true, true)] {
             let options = Options {
                 math,

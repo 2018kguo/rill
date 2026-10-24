@@ -30,6 +30,7 @@ fn main() {
     let sizes = [base, base * 2, base * 4, base * 8];
     let markup = rill::MarkupOptions {
         link_safety: true,
+        katex: true,
         ..rill::MarkupOptions::default()
     };
     for family in families::FAMILIES {

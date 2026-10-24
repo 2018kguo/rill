@@ -39,6 +39,9 @@ pub struct MarkupOptions {
     pub overrides: Vec<String>,
     /// Math elements are left for KaTeX (a [`crate::Kind::Math`] tree).
     pub math: bool,
+    /// JavaScript renders math with KaTeX: without it, a tree with math is
+    /// [`Unsupported`].
+    pub katex: bool,
     /// While an answer streams: the last element of the block, its last element, and so
     /// on down are React elements (with their other children static), so an update that
     /// grows the end changes only text nodes there, as React does, instead of replacing
@@ -154,6 +157,55 @@ const LINK_CLASS: &str = "wrap-anywhere font-medium text-primary underline";
 /// remend's sentinel for a link whose URL has not arrived.
 const INCOMPLETE_LINK: &str = "streamdown:incomplete-link";
 
+/// `data-` and lowercase letters, digits and dashes: a name hast-util-to-jsx-runtime
+/// passes on as it is.
+fn data_attribute(key: &str) -> bool {
+    key.strip_prefix("data-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
+/// The elements KaTeX's output is made of (with `trust` off, as rehype-katex runs it: no
+/// links or images).
+fn katex_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "span"
+            | "svg"
+            | "path"
+            | "line"
+            | "math"
+            | "semantics"
+            | "annotation"
+            | "mrow"
+            | "mi"
+            | "mn"
+            | "mo"
+            | "ms"
+            | "mtext"
+            | "mspace"
+            | "msup"
+            | "msub"
+            | "msubsup"
+            | "mfrac"
+            | "msqrt"
+            | "mroot"
+            | "mover"
+            | "munder"
+            | "munderover"
+            | "mtable"
+            | "mtr"
+            | "mtd"
+            | "mpadded"
+            | "mphantom"
+            | "mstyle"
+            | "menclose"
+    )
+}
+
 fn void(tag: &str) -> bool {
     matches!(tag, "br" | "hr" | "img" | "input")
 }
@@ -187,8 +239,10 @@ fn js_blank(value: &str) -> bool {
     })
 }
 
-/// React's attribute and text escaping (`escapeTextForBrowser`).
-fn escape(out: &mut String, value: &str) {
+/// React's attribute and text escaping (`escapeTextForBrowser`). Outside `ssr`, the HTML
+/// is parsed in the browser, which reads a carriage return as a line feed: it is written as
+/// a reference, so the DOM keeps it as React's text and attributes do.
+fn escape(out: &mut String, value: &str, ssr: bool) {
     let mut run = 0;
     for (index, byte) in value.bytes().enumerate() {
         let entity = match byte {
@@ -197,6 +251,7 @@ fn escape(out: &mut String, value: &str) {
             b'\'' => "&#x27;",
             b'<' => "&lt;",
             b'>' => "&gt;",
+            b'\r' if !ssr => "&#13;",
             _ => continue,
         };
         out.push_str(&value[run..index]);
@@ -213,7 +268,8 @@ enum Need {
     Html,
     /// Through React: it, or something in it, is interactive.
     React,
-    /// Through hast-util-to-jsx-runtime, from the top-level element holding it.
+    /// Through hast-util-to-jsx-runtime: an element the page gives its own component (or
+    /// math whose output holds one), with what it holds. Its ancestors are React elements.
     Jsx,
 }
 
@@ -322,23 +378,33 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         let need = match self.tag(ix) {
             None => Need::Html,
             Some(tag) if self.overridden(tag) => Need::Jsx,
-            Some(_) if self.math(ix) => Need::Html,
+            // KaTeX's output renders through Streamdown's components too.
+            Some(_) if self.math(ix) => {
+                if self.options.overrides.iter().any(|tag| katex_tag(tag)) {
+                    Need::Jsx
+                } else {
+                    Need::Html
+                }
+            }
             Some("pre") => match self.code_block(ix) {
                 Some(_) if !self.overridden("code") => Need::React,
                 _ => Need::Jsx,
             },
             Some("img") => Need::React,
             Some(tag) => {
-                let children: Vec<NodeId> = self.tree.children(ix).collect();
-                // Adjacent text (harden's ` [blocked]` after a link's text) is one text
-                // node in parsed HTML, but React makes one per string.
+                // The children as React renders them (a footnote list without its empty
+                // items, a list item's lone paragraph unwrapped).
+                let children = self.children(ix);
+                // Adjacent text (harden's ` [blocked]` after a link's text, the line
+                // endings around a dropped footnote) is one text node in parsed HTML, but
+                // React makes one per string.
                 let adjacent_text = !self.options.ssr
                     && children
                         .windows(2)
                         .any(|pair| self.text(pair[0]).is_some() && self.text(pair[1]).is_some());
                 let inner = children
                     .into_iter()
-                    .map(|child| self.need(child))
+                    .map(|child| self.need(child).min(Need::React))
                     .max()
                     .unwrap_or(Need::Html)
                     .max(if adjacent_text {
@@ -377,9 +443,12 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 "align" if matches!(tag, "td" | "th") => "align",
                 "href" | "title" | "alt" | "src" | "id" | "start" | "type" | "checked"
                 | "disabled" | "metastring" | "target" | "rel" | "width" | "height" => key,
+                // A plugin's data attributes, named as in HTML: React's prop name too.
+                _ if data_attribute(key) => key,
                 _ => return Err(Unsupported),
             };
             let value = match value {
+                Value::List(_) if name.starts_with("data-") => return Err(Unsupported),
                 Value::Str(value) => Prop::Str(value.clone()),
                 Value::Bool(value) => Prop::Bool(*value),
                 Value::Num(value) => Prop::Num(*value),
@@ -665,7 +734,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             out.push(' ');
             out.push_str(name);
             out.push_str("=\"");
-            escape(out, &text);
+            escape(out, &text, ssr);
             out.push('"');
         };
         if tag == "input" {
@@ -705,7 +774,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 html.out.push_str("<!-- -->");
             }
             match text {
-                Some(text) => escape(&mut html.out, text),
+                Some(text) => escape(&mut html.out, text, self.options.ssr),
                 None => self.html_node(html, child)?,
             }
             if text.is_none_or(|text| !text.is_empty()) {
@@ -841,12 +910,12 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         let Some(tag) = self.tag(ix) else {
             return Err(Unsupported);
         };
-        if self.math(ix) {
+        let need = self.need(ix);
+        if self.math(ix) && need != Need::Jsx {
             self.encoder.push(seg::MATH);
             self.encoder.node(ix);
             return Ok(1);
         }
-        let need = self.need(ix);
         if need == Need::Jsx || tag == "img" {
             self.encoder.push(seg::HAST);
             self.encoder.node(ix);
@@ -950,8 +1019,11 @@ pub fn render_markup(
     options: &Options,
     markup: &MarkupOptions,
 ) -> Result<Option<EncodedMarkup>, Error> {
-    let built = hast::build(source, options)?;
-    if built.kind == Kind::Raw {
+    let built = match hast::build(source, options) {
+        Err(Error::Unsupported) => return Ok(None),
+        built => built?,
+    };
+    if built.kind == Kind::Raw || built.kind == Kind::Math && !markup.katex {
         return Ok(None);
     }
     let markup = MarkupOptions {
