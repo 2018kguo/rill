@@ -8,7 +8,7 @@ renders the same page, down to every class, attribute and text node, with most o
 work moved into Rust and WebAssembly. On a throttled phone, a long chat opens 4.7× sooner
 and answers stream at full frame rate instead of stuttering.
 
-[![Streamdown and rill streaming the Rust Book's ownership chapter side by side at 10× CPU throttle: 29 fps vs 74 fps](docs/rill-0.2.jpg)](https://github.com/2018kguo/rill/releases/tag/v0.2.0)
+[![Streamdown and rill streaming the Rust Book's ownership chapter side by side at 10× CPU throttle: 28 fps vs 65 fps](docs/rill-0.2.jpg)](https://github.com/2018kguo/rill/releases/tag/v0.2.0)
 
 *The launch film (70 s, real recordings): [watch it on the release page](https://github.com/2018kguo/rill/releases/tag/v0.2.0).*
 
@@ -104,8 +104,8 @@ Android phone); every number is a median of trace-based runs, Streamdown 2.7.1 v
 Layout and paint are the same on both sides (it's the same DOM), so "finished sooner" is
 bounded by what the browser itself spends; "less JS + GC" is rill's own share. Streaming at
 a realistic 2,000–3,000 characters a second, recorded live at 10× throttle, Streamdown
-drops to 15–29 fps with frames up to 262 ms; rill holds 63–74 fps with its worst frame
-under 100 ms on the chapter.
+averages 15–28 fps with 95th-percentile frames of 155–185 ms; rill averages 60–65 fps
+with 95th-percentile frames of 26–36 ms.
 
 The Markdown pipeline alone (remark, rehype, sanitize, harden, Streamdown's plugins) is a
 smaller tier of the same story:
