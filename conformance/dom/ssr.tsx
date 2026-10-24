@@ -16,6 +16,7 @@ import { createElement, type ComponentType } from "react";
 import { renderToString } from "react-dom/server";
 import { Streamdown } from "streamdown";
 
+import { customEngine } from "../../examples/custom-build/engine.ts";
 import { initRill } from "../../js/src/index.ts";
 import { blockRenders, Streamdown as RillStreamdown } from "../../js/src/streamdown.ts";
 
@@ -35,6 +36,11 @@ const variants: Record<string, Record<string, unknown>> = {
   nosafety: { linkSafety: { enabled: false } },
   rtl: { dir: "rtl" },
   streaming: { isAnimating: true, caret: "block" },
+  static: { mode: "static" },
+  // The custom build (examples/custom-build), initialized on the server, against
+  // Streamdown with its JavaScript plugins.
+  engine: {},
+  "engine-static": { mode: "static" },
 };
 const variant = option("--variant", "default");
 const props = { plugins, ...variants[variant] };
@@ -76,8 +82,20 @@ for (const [name, documents] of Object.entries(corpora)) {
   corpora[name] = list;
 }
 
+const ENGINE_ARGS: [string, boolean] = ["/users", true];
+if (variant.startsWith("engine")) {
+  await customEngine.init(readFileSync(join(repo, "examples/custom-build/pkg/custom_bg.wasm")));
+}
+const sideProps = (component: unknown) =>
+  !variant.startsWith("engine")
+    ? {}
+    : component === Streamdown
+      ? customEngine.plugins(...ENGINE_ARGS)
+      : { engine: customEngine, engineArgs: ENGINE_ARGS };
 const render = (component: unknown, source: string) =>
-  renderToString(createElement(component as ComponentType<Record<string, unknown>>, props, source));
+  renderToString(
+    createElement(component as ComponentType<Record<string, unknown>>, { ...props, ...sideProps(component) }, source)
+  );
 
 // Streamdown's code block loads its highlighted body lazily: render everything once
 // and let it load, so both sides see the same module state.

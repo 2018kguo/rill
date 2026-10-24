@@ -72,6 +72,10 @@ jobs:
             node conformance/diff.mjs --config "$config" --pieces '["**","*","_","~~","中","」","「","a",".","。"," "]' --length 5
             node conformance/diff.mjs --config "$config" --pieces '["*","_","~","\uFE0E","\uFE01","“","中","😀","a"," "]' --length 5
           done
+          # Streamdown 1.x's default plugins (legacy CJK flanking, default sanitize schema).
+          node conformance/diff.mjs --config classic
+          node conformance/diff.mjs --config classic --pieces '["**","*","_","~~","中","」","「","a",".","。"," "]' --length 5
+          node conformance/diff.mjs --config classic --pieces '["_","__","a@b.co","x","*","[t](tel:+1)","<a id=\"x\">","</a>","[^a]","\n\n[^a]: n"]' --length 4
           # Indented code on micromark's lazy line: after a container that did not continue.
           node conformance/diff.mjs --pieces '["> ","- ","1. ",">\n","    a\n","a\n","\n","```\n"]' --length 5
           # @streamdown/cjk: autolink literals end at CJK punctuation; the rest is relinked.
@@ -79,6 +83,7 @@ jobs:
       - name: remend (Streamdown's streaming repair) against the package
         run: |
           sh scripts/build-wasm.sh
+          sh examples/custom-build/build.sh
           node conformance/remend.mjs --fuzz 100000
       - name: JavaScript package
         working-directory: js
@@ -95,6 +100,11 @@ jobs:
             node conformance/dom/dom-diff.mjs --config code --variant "$variant"
           done
           node conformance/dom/dom-diff.mjs --config code --stream every=60,short=1
+          # A custom build (examples/custom-build) against Streamdown with its JavaScript plugins.
+          for variant in engine engine-static; do
+            node conformance/dom/dom-diff.mjs --config code --variant "$variant"
+          done
+          node conformance/dom/dom-diff.mjs --config code --variant engine --stream every=60,short=1
           bun conformance/dom/ssr.tsx --config default
           bun conformance/dom/ssr.tsx --config code
           node conformance/dom/interactions.mjs --candidate self

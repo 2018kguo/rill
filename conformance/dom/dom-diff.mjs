@@ -39,6 +39,7 @@ function buildAll() {
   for (const entry of [join(here, "dom.tsx"), join(here, "../../js/src/highlight-worker.ts")]) build(entry);
   copyFileSync(join(here, "dom.html"), join(dist, "dom.html"));
   copyFileSync(join(repo, "js/wasm/rill_bg.wasm"), join(dist, "rill_bg.wasm"));
+  copyFileSync(join(repo, "examples/custom-build/pkg/custom_bg.wasm"), join(dist, "custom_bg.wasm"));
   copyFileSync(join(repo, "node_modules/@2018kguo/rill-highlight/dist/rill_highlight.wasm"), join(dist, "rill_highlight.wasm"));
 }
 

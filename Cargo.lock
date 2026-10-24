@@ -207,6 +207,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rill-custom-build"
+version = "0.0.0"
+dependencies = [
+ "rill",
+]
+
+[[package]]
 name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,6 +1,6 @@
-// rill's JavaScript core: wraps a rill WebAssembly export (the prebuilt one, or a build
-// with your own Rust plugins) and decodes what it returns into HAST. Nothing here loads
-// WebAssembly, so a custom build imports this and `streamdown.ts` only.
+// rill's JavaScript core: wraps a rill build's WebAssembly (the prebuilt one, or a build
+// with your own Rust plugins, both made by `rill::wasm_exports!`) and decodes what it
+// returns into HAST. Nothing here loads WebAssembly (see `defineEngine`).
 import { decodeHast, HastReader, type HastNode } from "./decode.ts";
 import { Lru, noteKept } from "./prefix.ts";
 import { encodeLoneSurrogates, restoreLoneSurrogates } from "./surrogates.ts";
@@ -15,8 +15,13 @@ export { decodeHast, HastReader, type HastNode } from "./decode.ts";
 export type RillKind = "complete" | "raw" | "math";
 
 /** The Streamdown `plugins` a render follows: `plugins.math` (`@streamdown/math` with
- * `singleDollarTextMath: false`) and `plugins.cjk` (`@streamdown/cjk`). */
+ * `singleDollarTextMath: false`) and `plugins.cjk` (`@streamdown/cjk`), on top of what the
+ * build turns on itself. */
 export type Syntax = { math?: boolean; cjk?: boolean };
+
+/** A build's extra arguments (`engineArgs`): values `wasm-bindgen` takes and that
+ * compare by value. */
+export type Args = readonly (string | number | boolean | null | undefined)[];
 
 /** What a rill WebAssembly export returns (`rill::wasm::RenderedHast`). */
 export type RenderedHast = {
@@ -26,36 +31,51 @@ export type RenderedHast = {
   free(): void;
 };
 
-export type Rill<A extends unknown[] = []> = {
+/** The exports `rill::wasm_exports!` makes, from a build's `wasm-bindgen` glue. */
+export type Glue<A extends Args = []> = {
+  rillAbi(): number;
+  renderHast(source: string, math: boolean, cjk: boolean, ...args: A): RenderedHast;
+  renderMarkup(
+    source: string,
+    math: boolean,
+    cjk: boolean,
+    prefix: string,
+    flags: number,
+    overrides: string,
+    ...args: A
+  ): RenderedHast;
+  pieces(...args: A): boolean;
+  definitions(source: string, math: boolean, cjk: boolean, ...args: A): Uint32Array;
+  splitsAt(source: string, math: boolean, cjk: boolean, at: number, ...args: A): boolean;
+  remendStream(appended: string, reset: boolean): number;
+  remendMiddle(): string;
+};
+
+/** The `rill::wasm::ABI` this package reads. */
+export const ABI = 3;
+
+/** rill for one set of a build's arguments. */
+export type Rill = {
   /**
    * The HAST for `source` with `syntax` (default: Streamdown with no `plugins`), or
    * `null` when it cannot cross into Rust (it holds lone surrogates and already uses
-   * U+E000–E7FF, the range that carries them).
+   * U+E000–E7FF, the range that carries them) or a plugin leaves it to JavaScript.
    */
-  render(
-    source: string,
-    syntax?: Syntax,
-    ...args: A
-  ): { kind: RillKind; tree: HastNode } | null;
+  render(source: string, syntax?: Syntax): { kind: RillKind; tree: HastNode } | null;
   /**
    * Streamdown's DOM for one block as segments (see crates/rill/src/markup.rs), read
-   * with the returned reader; `null` where only Streamdown renders it exactly. Only
-   * builds with a markup export have it (the prebuilt one does).
+   * with the returned reader; `null` where only Streamdown renders it exactly.
    */
-  markup?: (
-    source: string,
-    syntax: Syntax,
-    options: MarkupOptions
-  ) => HastReader | null;
+  markup?: (source: string, syntax: Syntax, options: MarkupOptions) => HastReader | null;
   /** The link definitions at the root of `source`, as UTF-16 `[start, end)` ranges, or
-   * `null` when one sits in a container or `source` has a footnote definition. Builds
-   * with the export only. */
+   * `null` when one sits in a container or `source` has a footnote definition. Only
+   * builds without plugins of their own (a plugin may read the whole text) have it. */
   definitions?: (source: string, syntax: Syntax) => [number, number][] | null;
-  /** Whether no root-level block of `source` spans UTF-16 offset `at`. Builds with the
-   * export only. */
+  /** Whether no root-level block of `source` spans UTF-16 offset `at`. With
+   * `definitions` only. */
   splitsAt?: (source: string, syntax: Syntax, at: number) => boolean;
   /** remend 1.4.0 with its default options (Streamdown's streaming repair), or `null`
-   * for text it cannot take (lone surrogates). Builds with the export only. */
+   * for text it cannot take (lone surrogates). */
   remend?: (text: string) => string | null;
 };
 
@@ -69,17 +89,20 @@ export type MarkupOptions = {
   overrides: string;
   /** While streaming: React elements down the block's last element (`rill::MarkupOptions::spine`). */
   spine?: boolean;
+  /** JavaScript renders the build's math with KaTeX; without it, a block with math
+   * renders through Streamdown. */
+  katex?: boolean;
+  /** The block ends in a code fence still streaming: one holding an element the page
+   * gives its own component renders through Streamdown (its components read the fence's
+   * state from a context only Streamdown's Block provides). */
+  incomplete?: boolean;
 };
 
-/** What a markup export takes: `rill::wasm::render_markup`'s arguments. */
-export type RenderMarkup = (
-  source: string,
-  math: boolean,
-  cjk: boolean,
-  prefix: string,
-  flags: number,
-  overrides: string
-) => RenderedHast;
+/** A build's instance: its `Rill` for each set of arguments. */
+export type RillBuild<A extends Args = []> = {
+  /** The `Rill` for `args`: the same object for the same values. */
+  bind(...args: A): Rill;
+};
 
 const KINDS = new Set<string>(["complete", "raw", "math"]);
 
@@ -90,31 +113,24 @@ function isRillKind(kind: string): kind is RillKind {
   return KINDS.has(kind);
 }
 
+/** `args` by value: the key rill caches by. */
+export function argsKey(args: Args): string {
+  return args.length === 0 ? "" : JSON.stringify(args);
+}
+
 /**
- * Wraps a WebAssembly export that returns `rill::wasm::render`'s result. It takes the
- * source, then `math` and `cjk` (for `rill::Options`); extra arguments pass through, so
- * a custom build can take per-render options.
+ * Wraps a build's glue (an instantiated module made by `rill::wasm_exports!`). Each
+ * `bind(...args)` passes those arguments to every export, so a build can take
+ * per-render options.
  */
-export function createRill<A extends unknown[]>(
-  renderHast: (
-    source: string,
-    math: boolean,
-    cjk: boolean,
-    ...args: A
-  ) => RenderedHast,
-  renderMarkup?: RenderMarkup,
-  definitions?: {
-    ranges(source: string, math: boolean, cjk: boolean): Uint32Array;
-    splitsAt(source: string, math: boolean, cjk: boolean, at: number): boolean;
-  },
-  remend?: {
-    /** Heals the text so far plus `appended` (or just `appended`, with `reset`):
-     * how many units of the last healed text the new one keeps, then `middle()`; or
-     * `u32::MAX` when, with `reset`, the healed text is `appended` itself. */
-    stream(appended: string, reset: boolean): number;
-    middle(): string;
+export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
+  const abi = glue.rillAbi?.();
+  if (abi !== ABI) {
+    throw new Error(
+      `rill: this WebAssembly speaks boundary ${abi ?? "(none)"}, the package ${ABI}; ` +
+        "rebuild it with the rill crate of the same version"
+    );
   }
-): Rill<A> {
   // A trap (a stack overflow, a bug) leaves the instance unusable: its stack pointer
   // and allocator stay wherever the trap left them. From then on nothing calls into it,
   // and Streamdown renders everything in JavaScript.
@@ -131,167 +147,169 @@ export function createRill<A extends unknown[]>(
         throw error;
       }
     }) as F;
-  renderHast = guard(renderHast);
-  if (renderMarkup) renderMarkup = guard(renderMarkup);
-  if (definitions) {
-    definitions = {
-      ranges: guard(definitions.ranges),
-      splitsAt: guard(definitions.splitsAt),
-    };
-  }
-  if (remend) remend = { stream: guard(remend.stream), middle: guard(remend.middle) };
-  // The text remend last healed in Rust, which keeps it (a text that extends it sends
-  // only what was appended), and what it healed it into (an update sends only the
-  // healed text that changed).
+  const renderHast = guard(glue.renderHast.bind(glue));
+  const renderMarkup = guard(glue.renderMarkup.bind(glue));
+  const ranges = guard(glue.definitions.bind(glue));
+  const splitsAt = guard(glue.splitsAt.bind(glue));
+  const pieces = guard(glue.pieces.bind(glue));
+  const remendStream = guard(glue.remendStream.bind(glue));
+  const remendMiddle = guard(glue.remendMiddle.bind(glue));
+
+  // remend does not depend on the arguments, and there is one stream in Rust: the text
+  // it last healed, which it keeps (a text that extends it sends only what was
+  // appended), and what it healed it into (an update sends only the healed text that
+  // changed).
   let last: string | null = null;
   let lastHealed = "";
   // Texts healed whole (a message that does not stream, mounted again or repeated).
   const healedWhole = new Lru<string, string>(64);
-  const heal = remend
-    ? (text: string): string | null => {
-        // A slice compared with === is V8's bulk comparison; startsWith goes unit by unit.
-        const appended =
-          last !== null && text.length >= last.length && text.slice(0, last.length) === last
-            ? text.slice(last.length)
-            : null;
-        if (appended === null) {
-          const known = healedWhole.get(text);
-          if (known !== undefined) return known;
-        }
-        // The text so far was well formed (it ends on no lone half of a pair), so the
-        // text is well formed when what it appends is.
-        if (!(appended ?? text).isWellFormed()) {
-          last = null;
-          return null;
-        }
-        // Unknown until this call returns (it may throw).
-        last = null;
-        const keep = remend.stream(appended ?? text, appended === null);
-        // A whole text with nothing to heal (the usual finished answer) is itself.
-        const unchanged = keep === UNCHANGED;
-        // Appending keeps the last healed text whole (no copy of it).
-        const middle = unchanged ? "" : remend.middle();
-        const healed = unchanged
-          ? text
-          : keep === lastHealed.length
-            ? lastHealed + middle
-            : lastHealed.slice(0, keep) + middle;
-        noteKept(lastHealed, healed, unchanged ? 0 : keep);
-        last = text;
-        lastHealed = healed;
-        if (appended === null) healedWhole.set(text, healed);
-        return healed;
-      }
-    : undefined;
-  // Blocks rendered when not streaming (a message mounted again, or repeated).
-  const rendered = new Lru<string, Map<string, [Uint32Array, string] | null>>(512);
-  const markup = renderMarkup
-    ? (source: string, syntax: Syntax, options: MarkupOptions) => {
-        // Lone surrogates and NUL take the exact path (Streamdown's own Block).
-        if (!source.isWellFormed() || source.includes("\0")) {
-          return null;
-        }
-        const flags =
-          (options.linkSafety ? 1 : 0) |
-          (options.ssr ? 2 : 0) |
-          (options.spine ? 4 : 0) |
-          (syntax.math === true ? 8 : 0) |
-          (syntax.cjk === true ? 16 : 0);
-        const key = `${flags} ${options.prefix} ${options.overrides}`;
-        const known = options.spine ? undefined : rendered.get(source);
-        let output = known?.get(key);
-        if (output === undefined) {
-          const result = renderMarkup(
-            source,
-            syntax.math === true,
-            syntax.cjk === true,
-            options.prefix,
-            flags & 7,
-            options.overrides
-          );
-          try {
-            output = result.kind === "markup" ? [result.ops(), result.strings()] : null;
-          } finally {
-            result.free();
-          }
-          if (!options.spine) {
-            const byKey = known ?? new Map();
-            byKey.set(key, output);
-            if (!known) rendered.set(source, byKey);
-          }
-        }
-        return output && new HastReader(output[0], output[1], source);
-      }
-    : undefined;
-  return {
-    ...(markup ? { markup } : {}),
-    ...(definitions
-      ? {
-          definitions: (source: string, syntax: Syntax) => {
-            if (!source.isWellFormed() || source.includes("\0")) return null;
-            let flat: Uint32Array;
-            try {
-              flat = definitions.ranges(source, syntax.math === true, syntax.cjk === true);
-            } catch {
-              return null;
-            }
-            if (flat.length === 1) return null;
-            const ranges: [number, number][] = [];
-            for (let index = 0; index < flat.length; index += 2) {
-              ranges.push([flat[index]!, flat[index + 1]!]);
-            }
-            return ranges;
-          },
-          splitsAt: (source: string, syntax: Syntax, at: number) => {
-            if (!source.isWellFormed() || source.includes("\0")) return false;
-            try {
-              return definitions.splitsAt(source, syntax.math === true, syntax.cjk === true, at);
-            } catch {
-              return false;
-            }
-          },
-        }
-      : {}),
-    ...(heal
-      ? {
-          remend: (text: string) => {
-            try {
-              return heal(text);
-            } catch {
-              last = null;
-              return null;
-            }
-          },
-        }
-      : {}),
-    render(raw, syntax = {}, ...args) {
-      const encoded = encodeLoneSurrogates(raw);
-      if (encoded === null) {
+  const heal = (text: string): string | null => {
+    // A slice compared with === is V8's bulk comparison; startsWith goes unit by unit.
+    const appended =
+      last !== null && text.length >= last.length && text.slice(0, last.length) === last
+        ? text.slice(last.length)
+        : null;
+    if (appended === null) {
+      const known = healedWhole.get(text);
+      if (known !== undefined) return known;
+    }
+    // The text so far was well formed (it ends on no lone half of a pair), so the
+    // text is well formed when what it appends is.
+    if (!(appended ?? text).isWellFormed()) {
+      last = null;
+      return null;
+    }
+    // Unknown until this call returns (it may throw).
+    last = null;
+    const keep = remendStream(appended ?? text, appended === null);
+    // A whole text with nothing to heal (the usual finished answer) is itself.
+    const unchanged = keep === UNCHANGED;
+    // Appending keeps the last healed text whole (no copy of it).
+    const middle = unchanged ? "" : remendMiddle();
+    const healed = unchanged
+      ? text
+      : keep === lastHealed.length
+        ? lastHealed + middle
+        : lastHealed.slice(0, keep) + middle;
+    noteKept(lastHealed, healed, unchanged ? 0 : keep);
+    last = text;
+    lastHealed = healed;
+    if (appended === null) healedWhole.set(text, healed);
+    return healed;
+  };
+  const remend = (text: string) => {
+    try {
+      return heal(text);
+    } catch {
+      last = null;
+      return null;
+    }
+  };
+
+  const bound = new Lru<string, Rill>(256);
+
+  function bind(...args: A): Rill {
+    const key = argsKey(args);
+    const known = bound.get(key);
+    if (known) return known;
+    // Blocks rendered when not streaming (a message mounted again, or repeated).
+    const rendered = new Lru<string, Map<string, [Uint32Array, string] | null>>(512);
+    const markup = (source: string, syntax: Syntax, options: MarkupOptions) => {
+      // Lone surrogates and NUL take the exact path (Streamdown's own Block).
+      if (!source.isWellFormed() || source.includes("\0")) {
         return null;
       }
-      // Rust replaces NUL like micromark; source slices then read the same string.
-      const sliced = raw.includes("\0") ? raw.replaceAll("\0", "�") : raw;
-      const transport = encoded.source.includes("\0")
-        ? encoded.source.replaceAll("\0", "�")
-        : encoded.source;
-      const result = renderHast(
-        transport,
-        syntax.math === true,
-        syntax.cjk === true,
-        ...args
-      );
-      try {
-        const kind = result.kind;
-        if (!isRillKind(kind)) {
-          throw new Error(`Unknown rill kind ${kind}`);
+      const flags =
+        (options.linkSafety ? 1 : 0) |
+        (options.ssr ? 2 : 0) |
+        (options.spine ? 4 : 0) |
+        (options.katex ? 8 : 0) |
+        (options.incomplete ? 16 : 0) |
+        (syntax.math === true ? 32 : 0) |
+        (syntax.cjk === true ? 64 : 0);
+      const flagsKey = `${flags} ${options.prefix} ${options.overrides}`;
+      const known = options.spine ? undefined : rendered.get(source);
+      let output = known?.get(flagsKey);
+      if (output === undefined) {
+        const result = renderMarkup(
+          source,
+          syntax.math === true,
+          syntax.cjk === true,
+          options.prefix,
+          flags & 31,
+          options.overrides,
+          ...args
+        );
+        try {
+          output = result.kind === "markup" ? [result.ops(), result.strings()] : null;
+        } finally {
+          result.free();
         }
-        const table = encoded.mapped
-          ? restoreLoneSurrogates(result.strings())
-          : result.strings();
-        return { kind, tree: decodeHast(result.ops(), table, sliced) };
-      } finally {
-        result.free();
+        if (!options.spine) {
+          const byKey = known ?? new Map();
+          byKey.set(flagsKey, output);
+          if (!known) rendered.set(source, byKey);
+        }
       }
-    },
-  };
+      return output && new HastReader(output[0], output[1], source);
+    };
+    const rill: Rill = {
+      markup,
+      remend,
+      render(raw, syntax = {}) {
+        const encoded = encodeLoneSurrogates(raw);
+        if (encoded === null) {
+          return null;
+        }
+        // Rust replaces NUL like micromark; source slices then read the same string.
+        const sliced = raw.includes("\0") ? raw.replaceAll("\0", "�") : raw;
+        const transport = encoded.source.includes("\0")
+          ? encoded.source.replaceAll("\0", "�")
+          : encoded.source;
+        const result = renderHast(transport, syntax.math === true, syntax.cjk === true, ...args);
+        try {
+          const kind = result.kind;
+          if (kind === "unsupported") return null;
+          if (!isRillKind(kind)) {
+            throw new Error(`Unknown rill kind ${kind}`);
+          }
+          const table = encoded.mapped
+            ? restoreLoneSurrogates(result.strings())
+            : result.strings();
+          return { kind, tree: decodeHast(result.ops(), table, sliced) };
+        } finally {
+          result.free();
+        }
+      },
+    };
+    if (pieces(...args)) {
+      rill.definitions = (source: string, syntax: Syntax) => {
+        if (!source.isWellFormed() || source.includes("\0")) return null;
+        let flat: Uint32Array;
+        try {
+          flat = ranges(source, syntax.math === true, syntax.cjk === true, ...args);
+        } catch {
+          return null;
+        }
+        if (flat.length === 1) return null;
+        const out: [number, number][] = [];
+        for (let index = 0; index < flat.length; index += 2) {
+          out.push([flat[index]!, flat[index + 1]!]);
+        }
+        return out;
+      };
+      rill.splitsAt = (source: string, syntax: Syntax, at: number) => {
+        if (!source.isWellFormed() || source.includes("\0")) return false;
+        try {
+          return splitsAt(source, syntax.math === true, syntax.cjk === true, at, ...args);
+        } catch {
+          return false;
+        }
+      };
+    }
+    bound.set(key, rill);
+    return rill;
+  }
+
+  return { bind };
 }

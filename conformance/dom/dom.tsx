@@ -21,6 +21,7 @@ import {
   Streamdown as RillStreamdown,
 } from "../../js/src/streamdown.ts";
 import { initRill } from "../../js/src/index.ts";
+import { customEngine } from "../../examples/custom-build/engine.ts";
 
 const params = new URLSearchParams(location.search);
 const config = params.get("config") ?? "default";
@@ -92,6 +93,10 @@ const variants: Record<string, Record<string, unknown>> = {
   components: { components: { a: CustomLink } },
   rtl: { dir: "rtl" },
   static: { mode: "static" },
+  // A custom build (examples/custom-build) against Streamdown with the JavaScript plugins
+  // its engine carries; set per side below.
+  engine: {},
+  "engine-static": { mode: "static" },
   caret: { caret: "block" },
   // The code controls' labels (escaped in their markup), and a copy icon of the page's
   // own (the controls render through React from the start).
@@ -100,12 +105,18 @@ const variants: Record<string, Record<string, unknown>> = {
 };
 const variantProps = variants[variant];
 if (!variantProps) throw new Error(`unknown variant ${variant}`);
+const ENGINE_ARGS: [string, boolean] = ["/users", true];
 const sideProps = (component: unknown): Record<string, unknown> =>
   variant === "block"
     ? { BlockComponent: component === Streamdown ? ReferenceBlock : CandidateBlock }
-    : {};
+    : variant.startsWith("engine")
+      ? component === Streamdown
+        ? customEngine.plugins(...ENGINE_ARGS)
+        : { engine: customEngine, engineArgs: ENGINE_ARGS }
+      : {};
 
 await initRill(await (await fetch("rill_bg.wasm")).arrayBuffer());
+if (variant.startsWith("engine")) await customEngine.init(await (await fetch("custom_bg.wasm")).arrayBuffer());
 setHighlightWasm(new URL("rill_highlight.wasm", location.href));
 // `?shiki`: the stock plugin highlights (Shiki on the main thread), for comparisons.
 if (params.has("shiki")) setRillHighlight(false);

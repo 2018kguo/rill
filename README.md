@@ -54,16 +54,17 @@ and a block that link definitions made one (`[1]: https://...` citations keep th
 answer in one block in Streamdown) renders as its pieces, of which only the last changes.
 A message that has not streamed (a conversation opened from history) renders its blocks
 from one component instead of one per block, and what it computes from its text alone is
-cached by content, so mounting it again is cheap.
+cached by content, so mounting it again is cheap. `mode="static"` renders the whole text
+in one pass, as Streamdown's static mode does, through rill too.
 
 Anything rill doesn't reproduce exactly renders with Streamdown's own `Block`, the same
 way: raw HTML that needs the HTML5 parser (rill handles comments, phrasing tags, `<img>`
 and `<br>` with or without attributes, and tags sanitize removes around Markdown, such as
 custom elements or the Rust Book's `<Listing>`), `animated`, `allowedTags`, custom
-`remarkPlugins`/`rehypePlugins`, `urlTransform` and the other Markdown filters,
-`fallbackComponent`, nesting deeper than 256 levels (quotes, lists, emphasis, raw tags),
-and every block until the WebAssembly has loaded (and on the server without
-`initRill`). `mode="static"` is Streamdown's own as well.
+`remarkPlugins`/`rehypePlugins` (bring them as a [custom build](#custom-builds) instead),
+`urlTransform` and the other Markdown filters, `fallbackComponent`, nesting deeper than
+256 levels (quotes, lists, emphasis, raw tags), `mode="static"` with `dir`, and every
+block until the WebAssembly has loaded (and on the server without `initRill`).
 
 The other tiers stay:
 
@@ -197,6 +198,10 @@ source text instead of copying it.
   doesn't (Vite and webpack do), and starts the highlighting worker;
   `preloadHighlighting()` starts it without one.
 - `@2018kguo/rill/react`: `useRill(plugins?)`, plugins for Streamdown's own component.
+- `@2018kguo/rill/engine`: `defineEngine`, a [custom build](#custom-builds) for
+  `<Streamdown engine>`; `rillEngine` is the prebuilt one, defined the same way.
+- `@2018kguo/rill/conformance`: `checkEngine`, a custom build against its JavaScript
+  plugins, DOM against DOM.
 - `@2018kguo/rill/plugins`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
   and `rehypePlugins` to hand `<Streamdown>`, for when you manage loading yourself (memoize
   it). `plugins` is the `plugins` prop you give `<Streamdown>` (its `math` and `cjk`);
@@ -263,6 +268,10 @@ webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
 
 - `math`, `cjk`: Streamdown's `plugins.math` (`@streamdown/math`) and `plugins.cjk`
   (`@streamdown/cjk`).
+- `legacy_cjk`, `code_meta: false`, `sanitize.schema: Schema::Default`: Streamdown 1.x's
+  default plugins, which pages passing their own lists often still run
+  (remark-cjk-friendly 1.2.3 after remark-gfm, no remarkCodeMeta, hast-util-sanitize's
+  `defaultSchema`; `diff.mjs --config classic` checks them).
 - `harden`: link and image block policies, `Indicator` (default), `TextOnly` or `Remove`.
 - `sanitize.code_classes`: extra `className`s `<code>` may keep.
 - `plugins`: your transforms.
@@ -272,12 +281,13 @@ would run:
 
 ```rust
 impl rill::Plugin for HeadingIds {
-    // After parsing, on the syntax tree (remark plugins run here).
-    fn mdast(&self, tree: &mut rill::mdast::MTree<'_>) -> Result<(), rill::Error> { Ok(()) }
+    // After parsing, on the syntax tree (remark plugins run here). Err(Unsupported)
+    // leaves the document to the JavaScript plugins.
+    fn mdast(&self, tree: &mut rill::mdast::Tree<'_>) -> Result<(), rill::Error> { Ok(()) }
     // On the HTML tree before sanitizing.
-    fn hast_unsanitized(&self, tree: &mut rill::hast::HTree<'_>, root: u32, cx: &rill::Context<'_>) {}
-    // On the final HTML tree (rehype plugins after the chain).
-    fn hast(&self, tree: &mut rill::hast::HTree<'_>, root: u32, cx: &rill::Context<'_>) {}
+    fn hast_unsanitized(&self, tree: &mut rill::hast::Tree<'_>, root: u32, cx: &rill::Context<'_>) {}
+    // On the final HTML tree (rehype plugins after the chain), before KaTeX.
+    fn hast(&self, tree: &mut rill::hast::Tree<'_>, root: u32, cx: &rill::Context<'_>) {}
 }
 ```
 
@@ -285,36 +295,54 @@ impl rill::Plugin for HeadingIds {
 rehype plugin also works unchanged on rill's output (`after` above), so a Rust plugin is
 only worth it for work that has to happen earlier, such as on the syntax tree.
 
-To ship Rust plugins, build your own WebAssembly with one export that calls
-`rill::wasm::render` (the `wasm` feature) and hand it to the same JavaScript package:
+### Custom builds
+
+A custom build is your plugins and options in Rust, compiled to WebAssembly, rendered by
+the drop-in exactly as the prebuilt build is: the same markup path, the same speed. You
+define the options once, for every entry point, and the build's engine carries the
+JavaScript plugins it reproduces, which render whatever rill leaves to Streamdown:
 
 ```rust
-use wasm_bindgen::prelude::*;
-
-#[wasm_bindgen(js_name = renderHast)]
-pub fn render_hast(source: &str, math: bool, cjk: bool) -> Result<rill::wasm::RenderedHast, JsError> {
-    rill::wasm::render(source, &rill::Options { math, cjk, ..my_options() })
-}
+// lib.rs of a cdylib crate depending on rill with the `wasm` feature
+rill::wasm_exports!(|base: Option<String>, hashtags: bool| my_options(base, hashtags));
 ```
 
 ```ts
-import init, { renderHast } from "./pkg/my_markdown.js";
-import { createRill } from "@2018kguo/rill/core"; // core: no prebuilt WebAssembly
-import { rillPlugins } from "@2018kguo/rill/plugins";
+import { defineEngine } from "@2018kguo/rill/engine";
 
-await init();
-const plugins = rillPlugins({
-  rill: createRill(renderHast),
-  // The JavaScript pipeline your options mirror: the fallback, and what still runs on
-  // raw HTML (all of `rehypePlugins`).
-  remarkPlugins,
-  rehypePlugins,
+export const myEngine = defineEngine({
+  glue: () => import("./pkg/my_build.js"), // wasm-bindgen --target web
+  wasm: () => new URL("./pkg/my_build_bg.wasm", import.meta.url),
+  // The JavaScript plugins your options reproduce, per set of arguments.
+  plugins: (base: string | null, hashtags: boolean) => ({ remarkPlugins, rehypePlugins }),
+  katex: rehypeKatex, // only if your options turn math on themselves
 });
+
+<Streamdown engine={myEngine} engineArgs={[base, true]}>{markdown}</Streamdown>;
 ```
 
-Extra arguments on your export (after `source`, `math` and `cjk`) pass through:
-`createRill(renderHast)` gives `rill.render(source, { math, cjk }, ...args)`, and `rillPlugins({ args })` (required when your export
-takes any) supplies them per instance.
+`engineArgs` compare by value (a new array each render is fine), and with an engine
+`remarkPlugins`/`rehypePlugins` are a type error: the engine's are the ones. Until the
+WebAssembly loads, and on the server unless you `await myEngine.init(bytes)`, Streamdown
+renders with the engine's plugins, so hydration matches either way. A plugin whose
+output depends on the whole text (counting markers, say) keeps rill from rendering a
+long block as pieces; nothing else changes.
+
+`checkEngine` (`@2018kguo/rill/conformance`) renders documents with Streamdown and your
+engine's plugins and with your build, streamed and static, and compares the DOMs, in
+happy-dom, jsdom or a browser:
+
+```ts
+await myEngine.init(readFileSync("pkg/my_build_bg.wasm"));
+const report = await checkEngine({ engine: myEngine, args: ["/u", true], documents, stream: 20 });
+assert.equal(report.identical, report.renders);
+```
+
+`examples/custom-build` is a complete one (math, three plugins, two arguments), which
+`js/test/engine.test.ts` and the DOM harness (`--variant engine`) check.
+
+The lower tier takes a build too: `myEngine.rill(...args)` is the `Rill` for
+`rillPlugins({ rill })` and `rill.render(source)`.
 
 ### Conformance
 

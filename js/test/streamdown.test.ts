@@ -17,7 +17,7 @@ import {
 } from "streamdown";
 import { unified, type PluggableList } from "unified";
 
-import { createRill, initRill, type Rill } from "../src/index.ts";
+import { ABI, createRill, initRill, type Rill } from "../src/index.ts";
 import { rillPlugins, type RenderKind } from "../src/plugins.ts";
 
 const rill = await initRill(
@@ -153,9 +153,19 @@ test("plugins rill was not told about render in JavaScript, the same", () => {
 
 test("a document rill fails on renders with Streamdown's plugins", () => {
   const errors: unknown[] = [];
-  const failing = createRill((): never => {
+  const boom = (): never => {
     throw new Error("boom");
-  });
+  };
+  const failing = createRill({
+    rillAbi: () => ABI,
+    renderHast: boom,
+    renderMarkup: boom,
+    pieces: () => false,
+    definitions: boom,
+    splitsAt: boom,
+    remendStream: boom,
+    remendMiddle: boom,
+  }).bind();
   sameAsStreamdown(
     failing,
     { math, cjk },

@@ -31,6 +31,7 @@ import {
   type ReactElement,
   type ReactNode,
 } from "react";
+import type { PluggableList } from "unified";
 import { createPortal } from "react-dom";
 import { jsx, jsxs } from "react/jsx-runtime";
 import { toJsxRuntime } from "hast-util-to-jsx-runtime";
@@ -44,20 +45,24 @@ import {
   StreamdownContext,
   type BlockProps,
   type PluginConfig,
-  type StreamdownProps,
+  type StreamdownProps as BaseStreamdownProps,
 } from "streamdown";
 import type { Pluggable } from "unified";
 
 import { parseMarkdownIntoBlocks, splitDefinitionBlock } from "./blocks.ts";
 import { CodeSegment, shellLabels, type ShellLabels } from "./code-block.ts";
-import type { HastNode, HastReader, MarkupOptions, Rill } from "./core.ts";
+import { argsKey, type Args, type HastNode, type HastReader, type MarkupOptions, type Rill } from "./core.ts";
+import type { Engine, Pipeline } from "./engine.ts";
+import { rillEngine } from "./index.ts";
 import { highlighterFor, type Highlighter } from "./highlight.ts";
 import { createCn, hastToHtml, type Cn } from "./html.ts";
 import { mathFragments } from "./math.ts";
 import { DEFAULT_MAX_SOURCE_LENGTH, optionsOf } from "./plugins.ts";
-import { load, pluginsFor, snapshot, subscribe } from "./react.ts";
+import { load, pluginsFor } from "./react.ts";
 
 export * from "streamdown";
+export { defineEngine, type Engine, type EngineDefinition, type Pipeline } from "./engine.ts";
+export { rillEngine } from "./index.ts";
 export {
   DEFAULT_MAX_SOURCE_LENGTH,
   rillPlugins,
@@ -75,8 +80,35 @@ export {
   setRillHighlight,
 } from "./highlight.ts";
 
+/**
+ * Streamdown 2.7.1's props, plus the engine that renders them: `rillEngine` (Streamdown's
+ * own pipeline) by default, or a custom build (`defineEngine`) with `engineArgs`, its
+ * extra arguments, compared by value. An engine brings its remark and rehype plugins,
+ * so `remarkPlugins` and `rehypePlugins` go with the default engine only.
+ */
+export type StreamdownProps<A extends Args = []> =
+  | (BaseStreamdownProps & { engine?: undefined; engineArgs?: undefined })
+  | (Omit<BaseStreamdownProps, "remarkPlugins" | "rehypePlugins"> & {
+      engine: Engine<A>;
+      remarkPlugins?: never;
+      rehypePlugins?: never;
+    } & ([] extends A ? { engineArgs?: A } : { engineArgs: A }));
+
 /** What `Block` needs from `<Streamdown>`'s props that its own props lack. */
 type Settings = {
+  /** rill for the engine and its arguments, once loaded. */
+  rill: Rill | null;
+  /** The remark and rehype plugins Streamdown merges `plugins` around (the engine's). */
+  expected: Merged;
+  /** The engine's plugins are Streamdown's defaults: the blocks rill does not render as
+   * markup render with its plugins tier (`rillPlugins`). */
+  defaults: boolean;
+  /** The rehype plugin that renders math rill leaves to KaTeX (the engine's, or
+   * `plugins.math`'s), if any. */
+  math: Pluggable | undefined;
+  /** `mode="static"`: the whole text renders as one block, as Streamdown's static mode
+   * renders it; `isAnimating` as given. */
+  static: { isAnimating: boolean } | null;
   plugins: PluginConfig | undefined;
   cn: Cn;
   prefix: string;
@@ -98,11 +130,17 @@ const RillContext = createContext<Settings | null>(null);
  * (diagnostics, for tests and benchmarks). */
 export const blockRenders = { rill: 0, streamdown: 0, tableTails: 0 };
 
-type Props = StreamdownProps & Record<string, unknown>;
+type Props = BaseStreamdownProps & {
+  engine?: Engine<Args> | undefined;
+  engineArgs?: Args | undefined;
+} & Record<string, unknown>;
 
-/** Streamdown's memo comparison (index.tsx), so this re-renders exactly when it does. */
+/** Streamdown's memo comparison (index.tsx), so this re-renders exactly when it does,
+ * and for another engine or other engine arguments (by value). */
 function sameStreamdownProps(previous: Props, next: Props): boolean {
   return (
+    previous.engine === next.engine &&
+    argsKey(previous.engineArgs ?? NO_ARGS) === argsKey(next.engineArgs ?? NO_ARGS) &&
     previous.children === next.children &&
     previous.shikiTheme === next.shikiTheme &&
     previous.isAnimating === next.isAnimating &&
@@ -145,9 +183,46 @@ function sameRootAttributes(previous: object, next: object): boolean {
   );
 }
 
+const NO_ARGS: Args = [];
+let warnedOwnLists = false;
+
+/** The props that give Streamdown the engine's plugins: none when they are its own
+ * defaults (Streamdown then keeps its own lists, which some of its props look for). */
+function listProps(pipeline: Pipeline): Partial<BaseStreamdownProps> {
+  return sameList(pipeline.remarkPlugins, REMARK_DEFAULTS) &&
+    sameList(pipeline.rehypePlugins, REHYPE_DEFAULTS)
+    ? {}
+    : { remarkPlugins: pipeline.remarkPlugins, rehypePlugins: pipeline.rehypePlugins };
+}
+
+/** A static text as one block, which `Block` renders whole. */
+const staticBlocks = (text: string): string[] => [text];
+
 /** Streamdown 2.7.1's `<Streamdown>`, rendering its blocks with rill. */
-export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
+export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<Args>) {
+  const props = givenProps as Props;
   const { plugins, prefix, fallbackComponent, translations, icons } = props;
+  const engine = props.engine ?? (rillEngine as Engine<Args>);
+  const args = props.engineArgs ?? NO_ARGS;
+  const pipeline = engine.plugins(...args);
+  const engineMath = engine.math(...args) as Pluggable | undefined;
+  const rill = useSyncExternalStore(
+    engine.subscribe,
+    () => engine.rill(...args),
+    () => engine.rill(...args)
+  );
+  useEffect(() => load(engine), [engine]);
+  const ownLists = props.remarkPlugins !== undefined || props.rehypePlugins !== undefined;
+  if (ownLists && props.engine && !warnedOwnLists) {
+    warnedOwnLists = true;
+    console.warn(
+      "rill: <Streamdown engine> brings its own remarkPlugins and rehypePlugins; the ones " +
+        "given render through Streamdown in JavaScript."
+    );
+  }
+  // Streamdown's static mode renders the whole text in one pass: the same as one block
+  // (no remend, no caret), which rill renders whole. A `dir` sits on the root there.
+  const staticMode = props.mode === "static" && props.dir === undefined;
   // A message that has streamed keeps a Block per block (their state, as Streamdown
   // keeps it); one that has not renders its blocks from one Block. Per-block props
   // (`dir`, animation, a page's own splitter or Block) keep Streamdown's blocks.
@@ -163,8 +238,14 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
   // Streamdown keys its translations by their JSON, so an inline object is the same.
   const translationsKey = translations ? JSON.stringify(translations) : "";
   const ownIcons = Boolean(icons?.CopyIcon || icons?.DownloadIcon);
+  const isAnimating = Boolean(props.isAnimating);
   const settings = useMemo<Settings>(
     () => ({
+      rill,
+      expected: merged(plugins, pipeline),
+      defaults: listProps(pipeline).remarkPlugins === undefined,
+      math: engineMath && plugins?.math ? MATH_TWICE : (engineMath ?? plugins?.math?.rehypePlugin),
+      static: staticMode ? { isAnimating } : null,
       plugins,
       cn: createCn(prefix),
       prefix: prefix ?? "",
@@ -174,12 +255,10 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
       shell: ownIcons ? null : shellLabels(translationsKey),
     }),
     // biome-ignore lint/correctness/useExhaustiveDependencies: translations by value
-    [plugins, prefix, fallbackComponent, whole, ownIcons, translationsKey]
+    [rill, pipeline, engineMath, staticMode, isAnimating, plugins, prefix, fallbackComponent, whole, ownIcons, translationsKey]
   );
-  useEffect(load, []);
   // Streamdown repairs streaming Markdown with remend before splitting it into blocks;
   // rill's port gives the same text, so Streamdown is told not to.
-  const rill = useSyncExternalStore(subscribe, snapshot, snapshot);
   const { children } = props;
   const heals =
     typeof children === "string" &&
@@ -190,11 +269,40 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
     () => (heals && rill?.remend ? rill.remend(children as string) : null),
     [heals, rill, children]
   );
+  const {
+    engine: _engine,
+    engineArgs: _engineArgs,
+    ...streamdownProps
+  } = props;
+  if (staticMode) {
+    // Streamdown's streaming path with one block, no remend and no caret renders what its
+    // static path does; `Block` gives the components the context static mode would.
+    return createElement(
+      RillContext.Provider,
+      { value: settings },
+      createElement(StreamdownComponent, {
+        ...streamdownProps,
+        ...(ownLists ? {} : listProps(pipeline)),
+        ...(plugins ? { plugins: streamdownPlugins(plugins, settings.highlight) } : {}),
+        mode: "streaming",
+        isAnimating: false,
+        caret: undefined,
+        animated: undefined,
+        onAnimationStart: undefined,
+        onAnimationEnd: undefined,
+        parseIncompleteMarkdown: false,
+        normalizeHtmlIndentation: false,
+        parseMarkdownIntoBlocksFn: staticBlocks,
+        BlockComponent: Block,
+      } as unknown as BaseStreamdownProps)
+    );
+  }
   return createElement(
     RillContext.Provider,
     { value: settings },
     createElement(StreamdownComponent, {
-      ...props,
+      ...streamdownProps,
+      ...(ownLists ? {} : listProps(pipeline)),
       ...(plugins ? { plugins: streamdownPlugins(plugins, settings.highlight) } : {}),
       ...(healed === null ? {} : { children: healed, parseIncompleteMarkdown: false }),
       // The same blocks, without Streamdown's whole-text tests on every update.
@@ -205,10 +313,12 @@ export const Streamdown = memo(function Streamdown(props: StreamdownProps) {
           ? props.BlockComponent
           : healingBlock(props.BlockComponent)
         : Block,
-    })
+    } as BaseStreamdownProps)
   );
-}, sameStreamdownProps as never);
-(Streamdown as { displayName?: string }).displayName = "Streamdown";
+}, sameStreamdownProps as never) as unknown as (<A extends Args = []>(
+  props: StreamdownProps<A>
+) => ReactElement) & { displayName?: string };
+Streamdown.displayName = "Streamdown";
 
 /** The text as one block when Streamdown would split it (Block splits it again). */
 const wholeText = (text: string): string[] => {
@@ -274,30 +384,41 @@ const MARKDOWN_OPTIONS = [
   "remarkRehypeOptions",
 ] as const;
 
-type Pipeline = { remark: Pluggable[]; rehype: Pluggable[] };
-const pipelines = new WeakMap<object, Pipeline>();
+type Merged = { remark: Pluggable[]; rehype: Pluggable[] };
+const mergedByPipeline = new WeakMap<Pipeline, WeakMap<object, Merged>>();
 const NO_PLUGINS = {};
+/** A build with math of its own and `plugins.math` too: KaTeX would run twice. */
+const MATH_TWICE: Pluggable = [() => undefined];
 
-/** The plugin lists Streamdown merges for `plugins` with its default pipeline. */
-function pipelineFor(plugins: PluginConfig | undefined): Pipeline {
+/** The plugin lists Streamdown merges for `plugins` around an engine's plugins
+ * (index.tsx `mergedRemarkPlugins`, `mergedRehypePlugins`). */
+function merged(plugins: PluginConfig | undefined, pipeline: Pipeline): Merged {
   const key = plugins ?? NO_PLUGINS;
-  let pipeline = pipelines.get(key);
-  if (!pipeline) {
-    pipeline = {
+  let byPlugins = mergedByPipeline.get(pipeline);
+  if (!byPlugins) {
+    byPlugins = new WeakMap();
+    mergedByPipeline.set(pipeline, byPlugins);
+  }
+  let lists = byPlugins.get(key);
+  if (!lists) {
+    lists = {
       remark: [
         ...(plugins?.cjk?.remarkPluginsBefore ?? []),
-        ...REMARK_DEFAULTS,
+        ...(pipeline.remarkPlugins as Pluggable[]),
         ...(plugins?.cjk?.remarkPluginsAfter ?? []),
         ...(plugins?.math ? [plugins.math.remarkPlugin] : []),
       ],
-      rehype: [...REHYPE_DEFAULTS, ...(plugins?.math ? [plugins.math.rehypePlugin] : [])],
+      rehype: [
+        ...(pipeline.rehypePlugins as Pluggable[]),
+        ...(plugins?.math ? [plugins.math.rehypePlugin] : []),
+      ],
     };
-    pipelines.set(key, pipeline);
+    byPlugins.set(key, lists);
   }
-  return pipeline;
+  return lists;
 }
 
-function sameList(left: readonly unknown[] | undefined, right: readonly unknown[]) {
+function sameList(left: PluggableList | readonly unknown[] | undefined, right: readonly unknown[]) {
   return (
     left !== undefined &&
     left.length === right.length &&
@@ -321,7 +442,13 @@ function overridesOf(components: Record<string, unknown> | undefined): string {
   return found;
 }
 
-type Plan = { overrides: string; math: boolean; cjk: boolean };
+type Plan = {
+  overrides: string;
+  math: boolean;
+  cjk: boolean;
+  katex: boolean;
+  incomplete: boolean;
+};
 
 /** How rill renders this block, or `null` to leave it to Streamdown's own Block. */
 function planFor(
@@ -333,10 +460,10 @@ function planFor(
   if (settings.fallback || props.animatePlugin) return null;
   const record = props as unknown as Record<string, unknown>;
   if (MARKDOWN_OPTIONS.some((name) => record[name] !== undefined)) return null;
-  const pipeline = pipelineFor(plugins);
   if (
-    !sameList(props.remarkPlugins as unknown[], pipeline.remark) ||
-    !sameList(props.rehypePlugins as unknown[], pipeline.rehype)
+    !sameList(props.remarkPlugins as unknown[], settings.expected.remark) ||
+    !sameList(props.rehypePlugins as unknown[], settings.expected.rehype) ||
+    settings.math === MATH_TWICE
   ) {
     return null;
   }
@@ -351,31 +478,41 @@ function planFor(
   // A custom modal renders next to each link button: Streamdown's link component.
   if (renderModal) overrides += " a";
   // Streamdown's components read the incomplete fence from a context only its Block
-  // provides.
-  if (
-    props.isIncomplete &&
-    (overrides.trim() !== "" || plugins?.mermaid || plugins?.renderers?.length)
-  ) {
+  // provides: its diagram renderers always, a page's own components where the block
+  // holds one (Rust checks, see `incomplete`).
+  if (props.isIncomplete && (plugins?.mermaid || plugins?.renderers?.length)) {
     return null;
   }
-  return { overrides, math: Boolean(plugins?.math), cjk: Boolean(plugins?.cjk) };
+  return {
+    overrides,
+    math: Boolean(plugins?.math),
+    cjk: Boolean(plugins?.cjk),
+    katex: settings.math !== undefined,
+    incomplete: props.isIncomplete && overrides.trim() !== "",
+  };
 }
 
-const rillPipelines = new WeakMap<object, Pipeline>();
+const rillPipelines = new WeakMap<Rill, WeakMap<object, Merged>>();
 
 /** Streamdown's `Block` for a block rill does not render: with rill's plugins when the
  * pipeline is Streamdown's default (the same tree), else as it is. */
-function fallback(props: BlockProps, settings: Settings | null, rill: Rill | null) {
+function fallback(props: BlockProps, settings: Settings | null) {
+  const rill = settings?.rill;
   if (
     rill &&
-    settings &&
+    settings.defaults &&
     !props.animatePlugin &&
-    sameList(props.remarkPlugins as unknown[], pipelineFor(settings.plugins).remark) &&
-    sameList(props.rehypePlugins as unknown[], pipelineFor(settings.plugins).rehype)
+    sameList(props.remarkPlugins as unknown[], settings.expected.remark) &&
+    sameList(props.rehypePlugins as unknown[], settings.expected.rehype)
   ) {
     const plugins = settings.plugins;
     const key = plugins ?? NO_PLUGINS;
-    let pipeline = rillPipelines.get(key);
+    let byPlugins = rillPipelines.get(rill);
+    if (!byPlugins) {
+      byPlugins = new WeakMap();
+      rillPipelines.set(rill, byPlugins);
+    }
+    let pipeline = byPlugins.get(key);
     if (!pipeline) {
       const own = pluginsFor(rill, plugins);
       pipeline = {
@@ -390,7 +527,7 @@ function fallback(props: BlockProps, settings: Settings | null, rill: Rill | nul
           ...(plugins?.math ? [plugins.math.rehypePlugin] : []),
         ],
       };
-      rillPipelines.set(key, pipeline);
+      byPlugins.set(key, pipeline);
     }
     return createElement(StreamdownBlock, {
       ...props,
@@ -441,9 +578,20 @@ const useServerFormat = () => {
 /** Streamdown's `Block`, rendered by rill. Same props, same DOM. */
 export const Block = memo(function Block(props: BlockProps) {
   const settings = useContext(RillContext);
-  const { linkSafety, isAnimating } = useContext(StreamdownContext);
-  const rill = useSyncExternalStore(subscribe, snapshot, snapshot);
+  const context = useContext(StreamdownContext);
+  const { linkSafety } = context;
+  const isAnimating = context.isAnimating && !settings?.static;
+  const rill = settings?.rill ?? null;
   const ssr = useServerFormat();
+  // Static mode: the context Streamdown's static path gives its components.
+  const staticContext = settings?.static;
+  const ownContext = useMemo(
+    () =>
+      staticContext
+        ? { ...context, mode: "static" as const, isAnimating: staticContext.isAnimating }
+        : null,
+    [context, staticContext]
+  );
   const [link, setLink] = useState<{ href: string; id: number } | null>(null);
   const host = useRef<HTMLElement | null>(null);
   const openLink = useRef((href: string) =>
@@ -478,6 +626,8 @@ export const Block = memo(function Block(props: BlockProps) {
               ssr,
               overrides: plan.overrides,
               spine: false,
+              katex: plan.katex,
+          incomplete: plan.incomplete,
             });
           } catch {
             reader = null;
@@ -488,7 +638,7 @@ export const Block = memo(function Block(props: BlockProps) {
           return createElement(
             Fragment,
             { key: index },
-            fallback({ ...props, content: block, index }, settings, rill)
+            fallback({ ...props, content: block, index }, settings)
           );
         }
         blockRenders.rill += 1;
@@ -522,12 +672,20 @@ export const Block = memo(function Block(props: BlockProps) {
           ssr,
           overrides: plan.overrides,
           spine: isAnimating,
+          katex: plan.katex,
+          incomplete: plan.incomplete,
         });
       } catch {
         return null;
       }
       return reader ? segments(reader, env) : null;
     };
+    // Static mode renders the whole text in one call.
+    if (settings.static) {
+      tables.current = null;
+      pieces.current = null;
+      return render(content);
+    }
     // A text with link definitions is one block, which a message that streams renders as
     // pieces (an update renders the last one); one that does not renders it in one call.
     const chunks =
@@ -540,6 +698,8 @@ export const Block = memo(function Block(props: BlockProps) {
         ssr,
         overrides: plan.overrides,
         spine: isAnimating,
+        katex: plan.katex,
+          incomplete: plan.incomplete,
       };
       return renderChunks(chunks, rill, plan, markupOptions, env, (pieces.current ??= newPieces()));
     }
@@ -562,7 +722,8 @@ export const Block = memo(function Block(props: BlockProps) {
   ]);
   if (!nodes) {
     blockRenders.streamdown += 1;
-    return fallback(props, settings, rill);
+    const block = fallback(props, settings);
+    return ownContext ? createElement(StreamdownContext.Provider, { value: ownContext }, block) : block;
   }
   blockRenders.rill += 1;
   const activator =
@@ -573,7 +734,7 @@ export const Block = memo(function Block(props: BlockProps) {
           host: (host.current ??= document.createElement("div")),
         })
       : null;
-  return props.dir
+  const out = props.dir
     ? createElement(
         Fragment,
         null,
@@ -581,6 +742,7 @@ export const Block = memo(function Block(props: BlockProps) {
         activator
       )
     : createElement(Fragment, null, ...nodes, activator);
+  return ownContext ? createElement(StreamdownContext.Provider, { value: ownContext }, out) : out;
 }, sameBlockProps);
 (Block as { displayName?: string }).displayName = "Block";
 
@@ -1109,12 +1271,12 @@ function segments(
     if (kind === SEG_TEXT) return reader.string();
     if (kind === SEG_HAST || kind === SEG_MATH) {
       const node = reader.node();
-      const key = keyFor(node.tagName ?? "");
+      const nodes = env.settings.math ? mathOf(env)([node]) : [node];
+      // Keyed as hast-util-to-jsx-runtime keys what KaTeX put in the math's place.
+      const key = keyFor(nodes[0]?.tagName ?? node.tagName ?? "");
       if (kind === SEG_HAST) {
-        const nodes = env.settings.plugins?.math ? mathOf(env)([node]) : [node];
         return createElement(Fragment, { key }, jsxOf(nodes, env.components));
       }
-      const nodes = mathOf(env)([node]);
       if (env.ssr) return createElement(Fragment, { key }, jsxOf(nodes, {}));
       return createElement(
         Fragment,
@@ -1224,12 +1386,12 @@ function staticKatex(node: HastNode, index: number, env: Env): ReactNode {
 const mathByPlugin = new WeakMap<object, ReturnType<typeof mathFragments>>();
 
 function mathOf(env: Env) {
-  const math = env.settings.plugins?.math;
+  const math = env.settings.math;
   if (!math) return (nodes: HastNode[]) => nodes;
-  let rewrite = mathByPlugin.get(math);
+  let rewrite = mathByPlugin.get(math as object);
   if (!rewrite) {
-    rewrite = mathFragments([math.rehypePlugin]);
-    mathByPlugin.set(math, rewrite);
+    rewrite = mathFragments([math]);
+    mathByPlugin.set(math as object, rewrite);
   }
   return rewrite as (nodes: HastNode[]) => HastNode[];
 }
@@ -1238,7 +1400,7 @@ const katexCaches = new WeakMap<object, Map<string, string>>();
 
 /** A math element (inside static HTML) as KaTeX's HTML. */
 function katexHtml(node: HastNode, env: Env): string {
-  const math = env.settings.plugins?.math ?? NO_PLUGINS;
+  const math = (env.settings.math as object | undefined) ?? NO_PLUGINS;
   let katexCache = katexCaches.get(math);
   if (!katexCache) {
     katexCache = new Map();

@@ -20,8 +20,9 @@ export type RenderKind = RillKind | "javascript";
  */
 export const DEFAULT_MAX_SOURCE_LENGTH = 128 * 1024;
 
-type BaseOptions<A extends unknown[]> = {
-  rill: Rill<A>;
+export type RillPluginsOptions = {
+  /** rill for the build's arguments (`engine.rill(...args)`, or `loadRill()`). */
+  rill: Rill;
   /**
    * The `plugins` you pass `<Streamdown>` (the same object): rill parses math and CJK
    * as they configure it, and renders each formula once with `plugins.math`'s KaTeX,
@@ -47,9 +48,6 @@ type BaseOptions<A extends unknown[]> = {
   onError?: (error: unknown) => void;
 };
 
-/** `args` (the custom build's extra arguments) is required when its export takes any. */
-export type RillPluginsOptions<A extends unknown[]> = BaseOptions<A> &
-  ([] extends A ? { args?: A } : { args: A });
 
 type HastRoot = {
   type: "root";
@@ -72,9 +70,7 @@ let instances = 0;
  * `remarkPlugins` and `rehypePlugins` for `<Streamdown>`. Pass them as they are (add
  * rehype plugins of your own with `after`, not by combining props), and memoize.
  */
-export function rillPlugins<A extends unknown[]>(
-  options: RillPluginsOptions<A>
-) {
+export function rillPlugins(options: RillPluginsOptions) {
   const {
     rill,
     plugins = {},
@@ -85,7 +81,6 @@ export function rillPlugins<A extends unknown[]>(
     onRender,
     onError,
   } = options;
-  const args = ("args" in options ? (options.args ?? []) : []) as A;
   const raw = rehypePlugins.find(
     (plugin) => attacherOf(plugin) === attacherOf(defaultRehypePlugins.raw)
   );
@@ -133,7 +128,7 @@ export function rillPlugins<A extends unknown[]>(
       matches ??= supported && configuredAsExpected(processor);
       if (matches && source.length <= maxSourceLength) {
         try {
-          const result = rill.render(source, syntax, ...args);
+          const result = rill.render(source, syntax);
           if (result) {
             return { kind: result.kind, tree: asHastRoot(result.tree) };
           }

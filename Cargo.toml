@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/rill", "crates/rill-cmark"]
+members = ["crates/rill", "crates/rill-cmark", "examples/custom-build"]
 # CI checks @2018kguo/rill-highlight out here to build the package rill depends on.
 exclude = ["rill-highlight"]
 

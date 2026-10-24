@@ -1,0 +1,18 @@
+# A custom rill build: Streamdown's pipeline with math and three plugins of its own
+# (src/lib.rs), the JavaScript equivalents beside it (plugins.ts, engine.ts). `sh
+# build.sh` writes the WebAssembly to pkg/.
+[package]
+name = "rill-custom-build"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rill = { path = "../../crates/rill" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rill = { path = "../../crates/rill", features = ["wasm"] }

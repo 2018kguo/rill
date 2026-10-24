@@ -30,6 +30,14 @@
       "types": "./dist/core.d.ts",
       "default": "./dist/core.js"
     },
+    "./engine": {
+      "types": "./dist/engine.d.ts",
+      "default": "./dist/engine.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance.d.ts",
+      "default": "./dist/conformance.js"
+    },
     "./streamdown": {
       "types": "./dist/streamdown.d.ts",
       "default": "./dist/streamdown.js"
