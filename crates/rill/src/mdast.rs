@@ -54,6 +54,8 @@ pub enum Error {
     /// per level, and WebAssembly's stack is small (and a trap leaves the instance
     /// unusable), so such a document is left to JavaScript.
     TooDeep,
+    /// A [`crate::Plugin`] cannot render this document exactly; JavaScript renders it.
+    Unsupported,
 }
 
 /// How deep [`parse_arena`] nests nodes. Markdown people write nests a dozen levels at
@@ -67,6 +69,7 @@ impl std::fmt::Display for Error {
             Error::LeafParent => "child event inside a leaf node",
             Error::Nul => "source contains NUL",
             Error::TooDeep => "nodes nested too deep",
+            Error::Unsupported => "a plugin left the document to JavaScript",
         })
     }
 }

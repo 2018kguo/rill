@@ -65,6 +65,25 @@ pub struct Syntax {
     /// `plugins.cjk`: remark-cjk-friendly and remark-cjk-friendly-gfm-strikethrough
     /// flanking.
     pub cjk: bool,
+    /// remark-cjk-friendly 1.2.3 and remark-cjk-friendly-gfm-strikethrough 1.2.3 attached
+    /// after remark-gfm, as Streamdown 1.x's default plugins did (and pipelines built on
+    /// them still do), in place of `cjk`'s rules: their flanking, and attention for `_`
+    /// before GFM's email literal.
+    pub legacy_cjk: bool,
+}
+
+impl Syntax {
+    /// The flanking rules for `*`, `_` and `~` runs.
+    pub(crate) fn flanking(self) -> crate::attention::Flanking {
+        use crate::attention::Flanking;
+        if self.legacy_cjk {
+            Flanking::LegacyCjk
+        } else if self.cjk {
+            Flanking::Cjk
+        } else {
+            Flanking::Core
+        }
+    }
 }
 
 /// Codeblock kind.

@@ -520,6 +520,8 @@ struct ToHast<'t, 's> {
     link_depth: usize,
     /// rehype-katex runs (`plugins.math`), so ```math blocks are math too.
     katex: bool,
+    /// remarkCodeMeta runs (see [`Options::code_meta`]).
+    code_meta: bool,
     /// The tree holds math for rehype-katex.
     math: bool,
 }
@@ -660,7 +662,7 @@ impl<'s> ToHast<'_, 's> {
                     ));
                 }
                 let meta = code.meta.clone().filter(|meta| !meta.is_empty());
-                if let Some(meta) = &meta {
+                if let Some(meta) = meta.as_ref().filter(|_| self.code_meta) {
                     // Streamdown's remarkCodeMeta: the meta string as a `metastring` property.
                     props.push(("metastring", Value::Str(Cow::Owned(meta.to_string()))));
                 }
@@ -1164,11 +1166,19 @@ pub struct Converted<'s> {
 }
 
 /// mdast-util-to-hast. `katex`: rehype-katex runs later, so ```math blocks count as math.
+/// With Streamdown's remarkCodeMeta.
 pub fn to_hast<'s>(mdast: &mdast::Tree<'s>, katex: bool) -> Converted<'s> {
-    convert(mdast, katex, false)
+    convert(
+        mdast,
+        &Options {
+            math: katex,
+            ..Options::default()
+        },
+    )
 }
 
-fn convert<'s>(mdast: &mdast::Tree<'s>, katex: bool, close_open_raw: bool) -> Converted<'s> {
+fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
+    let close_open_raw = options.close_open_raw;
     let mut state = ToHast {
         mdast,
         hast: Tree {
@@ -1182,7 +1192,8 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, katex: bool, close_open_raw: bool) -> Co
         raw_boundary: false,
         simple_raw: false,
         link_depth: 0,
-        katex,
+        katex: options.math,
+        code_meta: options.code_meta,
         math: false,
     };
     state.collect(mdast::Tree::ROOT);
@@ -2076,7 +2087,7 @@ const TAG_NAMES: &[&str] = &[
     "var",
 ];
 
-fn specific(tag: &str, key: &str) -> Option<Allowed> {
+fn specific(tag: &str, key: &str, schema: Schema) -> Option<Allowed> {
     let aria = ARIA.contains(&key);
     Some(match (tag, key) {
         ("a", _) if aria => Allowed::Any,
@@ -2084,7 +2095,7 @@ fn specific(tag: &str, key: &str) -> Option<Allowed> {
         ("a", "className") => Allowed::Values(&["data-footnote-backref"]),
         ("blockquote" | "del" | "ins" | "q", "cite") => Allowed::Any,
         ("code", "className") => Allowed::Language(&[]),
-        ("code", "metastring") => Allowed::Any,
+        ("code", "metastring") if schema == Schema::Streamdown => Allowed::Any,
         ("div", "itemScope" | "itemType") => Allowed::Any,
         ("dl" | "summary" | "table", _) if aria => Allowed::Any,
         ("h2", "className") => Allowed::Values(&["sr-only"]),
@@ -2102,9 +2113,11 @@ fn specific(tag: &str, key: &str) -> Option<Allowed> {
     })
 }
 
-fn safe_protocol(key: &str, url: &str) -> bool {
+fn safe_protocol(key: &str, url: &str, schema: Schema) -> bool {
     let protocols: &[&str] = match key {
         "cite" | "longDesc" => &["http", "https"],
+        "src" if schema == Schema::Default => &["http", "https"],
+        "href" if schema == Schema::Default => &["http", "https", "irc", "ircs", "mailto", "xmpp"],
         "src" => &["http", "https", "streamdown"],
         "href" => &[
             "http",
@@ -2131,14 +2144,14 @@ fn safe_protocol(key: &str, url: &str) -> bool {
         .any(|protocol| colon == protocol.len() && url.starts_with(protocol))
 }
 
-fn primitive_ok(allowed: &Allowed, key: &str, value: &Value<'_>) -> bool {
+fn primitive_ok(allowed: &Allowed, key: &str, value: &Value<'_>, schema: Schema) -> bool {
     let string: Cow<'_, str> = match value {
         Value::Str(string) => Cow::Borrowed(string.as_ref()),
         Value::Num(number) => Cow::Owned(number.to_string()),
         Value::Bool(boolean) => Cow::Borrowed(if *boolean { "true" } else { "false" }),
         Value::List(_) | Value::Class(_) => return false,
     };
-    if !safe_protocol(key, &string) {
+    if !safe_protocol(key, &string, schema) {
         return false;
     }
     match allowed {
@@ -2162,10 +2175,11 @@ fn sanitize_value<'s>(
     allowed: &Allowed,
     key: &str,
     value: Value<'s>,
+    schema: Schema,
 ) -> Result<Value<'s>, Value<'s>> {
     if let Value::Class(name) = value {
         return Ok(
-            if primitive_ok(allowed, key, &Value::Str(Cow::Borrowed(name))) {
+            if primitive_ok(allowed, key, &Value::Str(Cow::Borrowed(name)), schema) {
                 Value::Class(name)
             } else {
                 Value::List(Vec::new())
@@ -2175,39 +2189,43 @@ fn sanitize_value<'s>(
     match value {
         Value::List(list) => Ok(Value::List(
             list.into_iter()
-                .filter(|item| primitive_ok(allowed, key, &Value::Str(Cow::Borrowed(item))))
+                .filter(|item| primitive_ok(allowed, key, &Value::Str(Cow::Borrowed(item)), schema))
                 .collect(),
         )),
-        primitive if primitive_ok(allowed, key, &primitive) => Ok(primitive),
+        primitive if primitive_ok(allowed, key, &primitive, schema) => Ok(primitive),
         primitive => Err(primitive),
     }
 }
 
-fn sanitize_props<'s>(
-    tag: &str,
-    props: Props<'s>,
-    code_classes: &'static [&'static str],
-) -> Props<'s> {
+fn sanitize_props<'s>(tag: &str, props: Props<'s>, sanitize: &Sanitize) -> Props<'s> {
+    let schema = sanitize.schema;
     // Collecting into the same element type reuses the input's allocation.
     let mut result: Props<'s> = props
         .into_iter()
         .filter_map(|(key, value)| {
             let allowed = match (tag, key) {
-                ("code", "className") => Some(Allowed::Language(code_classes)),
-                _ => specific(tag, key),
+                ("code", "className") => Some(Allowed::Language(sanitize.code_classes)),
+                _ => specific(tag, key, schema),
             };
             let value = match allowed {
-                Some(allowed) => sanitize_value(&allowed, key, value),
+                Some(allowed) => sanitize_value(&allowed, key, value, schema),
                 None => Err(value),
             };
             let safe = match value {
                 Ok(safe) => safe,
                 Err(value) if GLOBAL.binary_search(&key).is_ok() => {
-                    sanitize_value(&Allowed::Any, key, value).ok()?
+                    sanitize_value(&Allowed::Any, key, value, schema).ok()?
                 }
                 Err(_) => return None,
             };
-            Some((key, safe))
+            Some((
+                key,
+                if schema == Schema::Default && clobbered(key) {
+                    clobber(safe)
+                } else {
+                    safe
+                },
+            ))
         })
         .collect();
     if tag == "input" {
@@ -2219,6 +2237,26 @@ fn sanitize_props<'s>(
         }
     }
     result
+}
+
+/// The properties the default schema's `clobber` names.
+fn clobbered(key: &str) -> bool {
+    matches!(key, "ariaDescribedBy" | "ariaLabelledBy" | "id" | "name")
+}
+
+/// The default schema's `clobberPrefix`, before each value.
+fn clobber(value: Value<'_>) -> Value<'_> {
+    match value {
+        Value::Str(string) => Value::Str(Cow::Owned(format!("user-content-{string}"))),
+        Value::Num(number) => Value::Str(Cow::Owned(format!("user-content-{number}"))),
+        Value::Bool(boolean) => Value::Str(Cow::Owned(format!("user-content-{boolean}"))),
+        Value::List(list) => Value::List(
+            list.into_iter()
+                .map(|item| Cow::Owned(format!("user-content-{item}")))
+                .collect(),
+        ),
+        Value::Class(name) => Value::List(vec![Cow::Owned(format!("user-content-{name}"))]),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2328,7 +2366,7 @@ impl Default for Harden {
 
 struct Finisher<'a, 's> {
     tree: &'a mut Tree<'s>,
-    code_classes: &'static [&'static str],
+    sanitize: &'a Sanitize,
     harden: &'a Harden,
     /// How many `table` elements enclose the current one.
     table_depth: usize,
@@ -2446,7 +2484,7 @@ impl<'s> Finisher<'_, 's> {
         }
         self.tree.nodes[ix as usize].drop_partial_position();
         let props = self.tree.properties_mut(ix).expect("an element");
-        *props = sanitize_props(tag, std::mem::take(props), self.code_classes);
+        *props = sanitize_props(tag, std::mem::take(props), self.sanitize);
         if self.harden(ix, tag, self.harden) {
             self.tree.append(out, ix);
         }
@@ -2691,17 +2729,31 @@ impl Json<'_, '_> {
 // Pipeline
 // ---------------------------------------------------------------------------
 
-/// rehype-sanitize's schema: Streamdown's, plus `className` values `<code>` may keep
-/// beyond `language-*`.
+/// rehype-sanitize's schema, plus `className` values `<code>` may keep beyond
+/// `language-*`.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sanitize {
     /// For example `["math-display", "math-inline"]`, for a rehype plugin after the chain
     /// that reads remark-math's classes.
     pub code_classes: &'static [&'static str],
+    pub schema: Schema,
+}
+
+/// The schema rehype-sanitize runs with.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Schema {
+    /// Streamdown 2.7.1's: hast-util-sanitize's default with no `clobberPrefix`, `tel:`
+    /// and `streamdown:` links, `streamdown:` sources (remend's sentinels for incomplete
+    /// links and images), and `metastring` on `<code>`.
+    #[default]
+    Streamdown,
+    /// hast-util-sanitize 5.0.2's `defaultSchema` as it is (rehype-sanitize with no
+    /// options, or Streamdown 1.x's): `user-content-` before `id`, `name` and the ARIA
+    /// references, and only the default protocols.
+    Default,
 }
 
 /// The pipeline's settings. The default is Streamdown's, with no `plugins` prop.
-#[derive(Default)]
 pub struct Options {
     /// Streamdown's `plugins.math` (`@streamdown/math` with `singleDollarTextMath:
     /// false`): `$$` math, and rehype-katex after the chain (see [`Kind::Math`]).
@@ -2709,6 +2761,12 @@ pub struct Options {
     /// Streamdown's `plugins.cjk` (`@streamdown/cjk`): CJK-friendly emphasis and
     /// strikethrough, and autolink literals that end at CJK punctuation.
     pub cjk: bool,
+    /// remark-cjk-friendly 1.2.3 and its strikethrough after remark-gfm, as Streamdown 1.x
+    /// attached them (see [`Syntax::legacy_cjk`]), in place of `cjk`.
+    pub legacy_cjk: bool,
+    /// Streamdown's remarkCodeMeta: a fence's meta string as `metastring` on `<code>`.
+    /// On by default.
+    pub code_meta: bool,
     pub harden: Harden,
     pub sanitize: Sanitize,
     pub plugins: Vec<Box<dyn Plugin>>,
@@ -2719,6 +2777,21 @@ pub struct Options {
     pub close_open_raw: bool,
 }
 
+impl Default for Options {
+    fn default() -> Self {
+        Options {
+            math: false,
+            cjk: false,
+            legacy_cjk: false,
+            code_meta: true,
+            harden: Harden::default(),
+            sanitize: Sanitize::default(),
+            plugins: Vec::new(),
+            close_open_raw: false,
+        }
+    }
+}
+
 impl Options {
     /// The micromark extensions these options turn on.
     #[must_use]
@@ -2726,6 +2799,7 @@ impl Options {
         Syntax {
             math: self.math,
             cjk: self.cjk,
+            legacy_cjk: self.legacy_cjk,
         }
     }
 }
@@ -2745,13 +2819,17 @@ impl Context<'_> {
     }
 }
 
-/// A transform at a fixed point of the pipeline: rill's remark or rehype plugin.
+/// A transform at a fixed point of the pipeline: rill's remark or rehype plugin. A build
+/// pairs each with its JavaScript form, which renders whatever rill leaves to JavaScript.
 ///
-/// The hooks see a tree only when rill finishes it: a document with raw HTML stops before
-/// `hast_unsanitized` (parse5 runs in JavaScript), and with math `hast` waits for KaTeX.
-/// Run the JavaScript form of a plugin in those tails (see [`Kind`]).
+/// A document with raw HTML stops before `hast_unsanitized` (parse5 runs in JavaScript,
+/// then the JavaScript forms). With math, `hast` runs before KaTeX: math elements are
+/// still `<code class="language-math">` (in a `<pre>` for display math), which KaTeX
+/// replaces afterwards, so a plugin whose JavaScript form would change KaTeX's output
+/// returns [`Error::Unsupported`] from `mdast` for such documents.
 pub trait Plugin {
-    /// After parsing, before mdast-util-to-hast: where remark plugins run.
+    /// After parsing, before mdast-util-to-hast: where remark plugins run. Returning
+    /// [`Error::Unsupported`] leaves the document to JavaScript.
     fn mdast(&self, _tree: &mut mdast::Tree<'_>) -> Result<(), Error> {
         Ok(())
     }
@@ -2759,7 +2837,7 @@ pub trait Plugin {
     /// Before rehype-sanitize: a rehype plugin placed ahead of it.
     fn hast_unsanitized(&self, _tree: &mut Tree<'_>, _root: NodeId, _context: &Context<'_>) {}
 
-    /// The final tree: a rehype plugin after the chain.
+    /// The final tree (but for KaTeX): a rehype plugin after the chain.
     fn hast(&self, _tree: &mut Tree<'_>, _root: NodeId, _context: &Context<'_>) {}
 }
 
@@ -3092,7 +3170,7 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         root,
         raw_boundary,
         math,
-    } = convert(&mdast, options.math, options.close_open_raw);
+    } = convert(&mdast, options);
     // Raw tags paired into elements nest as deep as the text has them.
     if nested_deeper(&tree, root, mdast::MAX_DEPTH) {
         return Err(Error::TooDeep);
@@ -3124,15 +3202,13 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
     // code, and the JavaScript tail renders each one (see js/src/math.ts).
     Finisher {
         tree: &mut tree,
-        code_classes: options.sanitize.code_classes,
+        sanitize: &options.sanitize,
         harden: &options.harden,
         table_depth: 0,
     }
     .children(root);
-    if !math {
-        for plugin in &options.plugins {
-            plugin.hast(&mut tree, root, &context);
-        }
+    for plugin in &options.plugins {
+        plugin.hast(&mut tree, root, &context);
     }
     Ok(Built {
         kind: if math { Kind::Math } else { Kind::Complete },

@@ -29,6 +29,8 @@
     "@tailwindcss/cli": "^4.1.14",
     "binaryen": "132.0.0",
     "playwright": "^1.64.1",
+    "remark-cjk-friendly-1": "npm:remark-cjk-friendly@1.2.3",
+    "remark-cjk-friendly-gfm-strikethrough-1": "npm:remark-cjk-friendly-gfm-strikethrough@1.2.3",
     "shiki": "^4.4.3",
     "tailwindcss": "^4.1.14"
   }

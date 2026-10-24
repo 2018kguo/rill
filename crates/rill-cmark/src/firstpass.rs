@@ -917,6 +917,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     // GFM's email literal comes before attention for `_` (Streamdown attaches
                     // remark-gfm after remark-cjk-friendly): the run is the literal's text.
                     if c == b'_'
+                        && !self.syntax.legacy_cjk
                         && crate::autolink_literal::email(self.text, ix, previous).is_some()
                         && !self.bracket_open(ix)
                     {
@@ -925,7 +926,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     let next = string_suffix[count..].chars().next();
                     let flanking = if c == b'~' {
                         crate::attention::strikethrough(
-                            self.syntax.cjk,
+                            self.syntax.flanking(),
                             count,
                             two_previous,
                             previous,
@@ -933,7 +934,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         )
                     } else {
                         Some(crate::attention::emphasis(
-                            self.syntax.cjk,
+                            self.syntax.flanking(),
                             c,
                             two_previous,
                             previous,

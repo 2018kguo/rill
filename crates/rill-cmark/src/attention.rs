@@ -4,7 +4,9 @@
 //! (micromark-extension-cjk-friendly 2.0.2 `tokenizeAttention`,
 //! micromark-extension-cjk-friendly-util 3.0.1 `classifyCharacter`), over code points: those
 //! extensions recover surrogate pairs. Streamdown's `plugins.cjk` installs both, and they
-//! replace micromark's rules for all text.
+//! replace micromark's rules for all text. `Syntax::legacy_cjk` has remark-cjk-friendly
+//! 1.2.3's rules (micromark-extension-cjk-friendly 1.2.3, util 2.1.1), which differ from
+//! 2.3's only beside other attention markers.
 
 use crate::autolink_literal::{unicode_punctuation, unicode_whitespace};
 use crate::unicode_tables::{in_table, CJK, IVS, PUNCTUATION_OR_SYMBOL, WHITESPACE};
@@ -88,15 +90,23 @@ fn classify_core(code: Option<char>) -> u32 {
     }
 }
 
+/// Whose flanking rules apply (see the module documentation).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Flanking {
+    Core,
+    Cjk,
+    LegacyCjk,
+}
+
 /// `(can_open, can_close)` for an `*` or `_` run between `previous` and `next`.
 pub(crate) fn emphasis(
-    cjk_friendly: bool,
+    rules: Flanking,
     delimiter: u8,
     two_previous: Option<char>,
     previous: Option<char>,
     next: Option<char>,
 ) -> (bool, bool) {
-    if !cjk_friendly {
+    if rules == Flanking::Core {
         let before = classify_core(previous);
         let after = classify_core(next);
         // `~` is in `attentionMarkers` through GFM strikethrough; `*` and `_` are excluded.
@@ -113,17 +123,22 @@ pub(crate) fn emphasis(
     }
     let before = classify_preceding(classify(previous), two_previous, previous);
     let after = classify(next);
-    let core_marker = |code: Option<char>| matches!(code, Some('*' | '_'));
+    // 2.3 counts the core markers beside a run as punctuation; 1.2.3 lets a run open or
+    // close next to any attention marker.
+    let legacy = rules == Flanking::LegacyCjk;
+    let core_marker = |code: Option<char>| !legacy && matches!(code, Some('*' | '_'));
+    let marker =
+        |code: Option<char>| code == Some('~') || legacy && matches!(code, Some('*' | '_'));
     let before_punctuation = non_cjk_punctuation(before);
     let before_space_or_punctuation = before_punctuation || space(before) || core_marker(previous);
     let after_punctuation = non_cjk_punctuation(after);
     let after_space_or_punctuation = after_punctuation || space(after) || core_marker(next);
     let open = !after_space_or_punctuation
         || after_punctuation && (before_space_or_punctuation || before & CJK_OR_IVS != 0)
-        || next == Some('~');
+        || marker(next);
     let close = !before_space_or_punctuation
         || before_punctuation && (after_space_or_punctuation || cjk(after))
-        || previous == Some('~');
+        || marker(previous);
     if delimiter == b'*' {
         (open, close)
     } else {
@@ -136,7 +151,7 @@ pub(crate) fn emphasis(
 
 /// `(can_open, can_close)` for a `~` or `~~` run; longer runs are text.
 pub(crate) fn strikethrough(
-    cjk_friendly: bool,
+    rules: Flanking,
     run_length: usize,
     two_previous: Option<char>,
     previous: Option<char>,
@@ -145,7 +160,7 @@ pub(crate) fn strikethrough(
     if run_length > 2 {
         return None;
     }
-    if !cjk_friendly {
+    if rules == Flanking::Core {
         let before = classify_core(previous);
         let after = classify_core(next);
         return Some((
@@ -174,11 +189,11 @@ mod tests {
     fn cjk_punctuation_closes_strong() {
         // `**粗体**中文`: CJK after the closer still closes.
         assert_eq!(
-            emphasis(true, b'*', None, Some('体'), Some('中')),
+            emphasis(Flanking::Cjk, b'*', None, Some('体'), Some('中')),
             (true, true)
         );
         assert_eq!(
-            emphasis(true, b'_', None, Some(' '), Some('a')),
+            emphasis(Flanking::Cjk, b'_', None, Some(' '), Some('a')),
             (true, false)
         );
     }
@@ -187,11 +202,28 @@ mod tests {
     fn core_flanking_needs_punctuation_or_space_beside_cjk() {
         // `**「括号」**也`: micromark's rules alone do not close after `」`.
         assert_eq!(
-            emphasis(false, b'*', None, Some('」'), Some('也')),
+            emphasis(Flanking::Core, b'*', None, Some('」'), Some('也')),
             (true, false)
         );
         assert_eq!(
-            emphasis(true, b'*', None, Some('」'), Some('也')),
+            emphasis(Flanking::Cjk, b'*', None, Some('」'), Some('也')),
+            (true, true)
+        );
+    }
+
+    #[test]
+    fn legacy_rules_open_beside_another_marker() {
+        // `**_a_**`: 1.2.3 lets the inner `_` open after `*`; 2.3 reads `*` as punctuation.
+        assert_eq!(
+            emphasis(Flanking::LegacyCjk, b'_', None, Some('*'), Some('a')),
+            (true, false)
+        );
+        assert_eq!(
+            emphasis(Flanking::Cjk, b'_', None, Some('*'), Some('a')),
+            (true, false)
+        );
+        assert_eq!(
+            emphasis(Flanking::LegacyCjk, b'*', None, Some('a'), Some('_')),
             (true, true)
         );
     }
