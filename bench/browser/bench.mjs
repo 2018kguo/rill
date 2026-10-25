@@ -84,6 +84,8 @@ async function metrics(events, stage) {
     wallMs: wall,
     // History: every answer on screen. Stream: the last character handed to the engine.
     contentMs: (stage.stats.onScreen || stage.stats.revealed) - stage.stats.started,
+    // The last change inside the viewport (what a reader sees settle), from the run's start.
+    visibleMs: stage.stats.visible ? stage.stats.visible - stage.stats.started : null,
     busyMs: busy,
     scriptMs: Math.max(0, busy - styleLayout - paint - gc),
     // The engine's own share: main-thread JavaScript and the garbage it leaves.
@@ -159,11 +161,13 @@ for (const [scenario, query] of scenarios) {
       const m = summary.engines[name];
       // The most any engine could gain here: its busy time over the browser's layout+paint floor.
       const ceiling = m.busyMs / (m.styleLayoutMs + m.paintMs);
-      return `${name}: wall ${m.wallMs.toFixed(0)} ms (busy ${m.busyMs.toFixed(0)} = script ${m.scriptMs.toFixed(0)} + style/layout ${m.styleLayoutMs.toFixed(0)} + paint ${m.paintMs.toFixed(0)} + gc ${m.gcMs.toFixed(0)}; idle ${m.idleMs.toFixed(0)}; worker ${m.workerMs.toFixed(0)}), dropped ${m.droppedPct.toFixed(0)}% of ${m.frames} frames, LoAF blocking ${m.loafBlockingMs.toFixed(0)} ms, heap ${m.heapMB.toFixed(1)} MB, ${m.domNodes} DOM nodes, ceiling ${ceiling.toFixed(1)}×`;
+      return `${name}: wall ${m.wallMs.toFixed(0)} ms, visible ${m.visibleMs?.toFixed(0) ?? "-"} ms (busy ${m.busyMs.toFixed(0)} = script ${m.scriptMs.toFixed(0)} + style/layout ${m.styleLayoutMs.toFixed(0)} + paint ${m.paintMs.toFixed(0)} + gc ${m.gcMs.toFixed(0)}; idle ${m.idleMs.toFixed(0)}; worker ${m.workerMs.toFixed(0)}), dropped ${m.droppedPct.toFixed(0)}% of ${m.frames} frames, LoAF blocking ${m.loafBlockingMs.toFixed(0)} ms, heap ${m.heapMB.toFixed(1)} MB, ${m.domNodes} DOM nodes, ceiling ${ceiling.toFixed(1)}×`;
     });
     console.log(`\n${scenario} @ ${throttle}× CPU, ${runs} runs (medians)\n  ${line.join("\n  ")}`);
     if (summary.wallMsRatio) {
       const r = summary.wallMsRatio;
+      const v = summary.visibleMsRatio;
+      if (v && Number.isFinite(v.median)) console.log(`  visible ratio ${v.median.toFixed(2)}× [95% CI ${v.ci95[0].toFixed(2)}–${v.ci95[1].toFixed(2)}]`);
       console.log(`  wall ratio ${r.median.toFixed(2)}× [95% CI ${r.ci95[0].toFixed(2)}–${r.ci95[1].toFixed(2)}], busy ratio ${summary.busyMsRatio.median.toFixed(2)}× [${summary.busyMsRatio.ci95.map((x) => x.toFixed(2)).join("–")}], script+gc ratio ${summary.scriptGcMsRatio.median.toFixed(2)}× [${summary.scriptGcMsRatio.ci95.map((x) => x.toFixed(2)).join("–")}]`);
     }
     writeFileSync(out, JSON.stringify(results, null, 1));

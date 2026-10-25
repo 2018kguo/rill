@@ -38,7 +38,7 @@ const plugins = params.get("nocode") === "1" ? {} : { code };
 
 const $ = (id: string) => document.getElementById(id)!;
 const frames: number[] = [];
-const stats = { started: 0, onScreen: 0, revealed: 0, finished: 0 };
+const stats = { started: 0, onScreen: 0, revealed: 0, finished: 0, visible: 0 };
 // Long Animation Frames: the browser's own per-frame breakdown of slow frames.
 const loaf: Record<string, number>[] = [];
 try {
@@ -63,7 +63,25 @@ function settle(ready: () => boolean) {
   let lastMutation = performance.now();
   let quietSince = lastMutation;
   let lastTick = lastMutation;
-  new MutationObserver(() => (lastMutation = performance.now())).observe($("answer"), { subtree: true, childList: true, attributes: true, characterData: true });
+  // Every mutation's time and target, to find the last one a reader could see (`visible`:
+  // the last change inside the viewport once the run ends, as "visually complete").
+  const changes: [number, Node][] = [];
+  new MutationObserver((records) => {
+    lastMutation = performance.now();
+    for (const record of records) changes.push([lastMutation, record.target]);
+  }).observe($("answer"), { subtree: true, childList: true, attributes: true, characterData: true });
+  const lastVisible = () => {
+    const view = $("scroll").getBoundingClientRect();
+    let last = 0;
+    for (const [time, target] of changes) {
+      if (time <= last) continue;
+      const element = target instanceof Element ? target : target.parentElement;
+      if (!element?.isConnected) continue;
+      const box = element.getBoundingClientRect();
+      if (box.bottom > view.top && box.top < view.bottom && box.right > view.left && box.left < view.right) last = time;
+    }
+    return last;
+  };
   const tick = () => {
     const now = performance.now();
     if (now - lastTick > 100) quietSince = now;
@@ -72,6 +90,7 @@ function settle(ready: () => boolean) {
       stats.finished = lastMutation;
       overlay(now);
       end();
+      stats.visible = lastVisible();
       document.body.dataset.done = "true";
       dispatchEvent(new Event("stage-done"));
       return;
@@ -169,6 +188,8 @@ function startHistory() {
   const tick = () => {
     const now = performance.now();
     frames.push(now);
+    // bottom=1: the chat opens at its last answer, as chat apps do.
+    if (params.get("bottom") === "1") follow();
     overlay(now);
     if (!stats.finished) requestAnimationFrame(tick);
   };
