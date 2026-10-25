@@ -58,7 +58,19 @@ const end = () => performance.mark("stage:end");
 // restarts the wait: a long task can be highlighting that has not reached the DOM yet);
 // `finished` is the last mutation.
 // Raw (not yet highlighted) lines are one token colored `inherit`.
-const highlighted = () => params.get("nocode") === "1" || !document.querySelector('#answer [data-streamdown="code-block-body"] span[style*="--sdm-c: inherit"]');
+// lazy=1: code off screen may stay raw (an engine with lazyHighlight); only bodies in the
+// viewport must be highlighted. The quiet rule still waits out any engine's other work.
+const rawSelector = '#answer [data-streamdown="code-block-body"] span[style*="--sdm-c: inherit"]';
+const inView = (element: Element) => {
+  const view = $("scroll").getBoundingClientRect();
+  const box = element.getBoundingClientRect();
+  return box.bottom > view.top && box.top < view.bottom;
+};
+const highlighted = () =>
+  params.get("nocode") === "1" ||
+  (params.get("lazy") === "1"
+    ? ![...document.querySelectorAll(rawSelector)].some(inView)
+    : !document.querySelector(rawSelector));
 function settle(ready: () => boolean) {
   let lastMutation = performance.now();
   let quietSince = lastMutation;
