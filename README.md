@@ -130,9 +130,8 @@ answers nobody can see yet. Let it skip them: give each settled message's row
 ```
 
 The DOM stays the same (find-in-page and selection work); rows off screen are laid out
-when they scroll near. Opening the 18-answer chat with a page's own plugins
-(`bench/browser`, `cv=1`), rill finished in 528 ms instead of 865 (layout and style 162 →
-34 ms) at 4× CPU; Streamdown barely moved (2,511 → 2,470 ms), its time is its JavaScript.
+when they scroll near. Streamdown's own time is mostly its JavaScript, so it gains little;
+rill's is mostly the browser's layout, so it gains a lot.
 
 ## Why
 

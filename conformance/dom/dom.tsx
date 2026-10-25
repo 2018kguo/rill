@@ -79,7 +79,7 @@ function CustomLink({ node: _node, children, ...props }: Record<string, unknown>
   return createElement("a", { "data-custom": "link", ...props }, children as ReactNode);
 }
 
-// An app's own BlockComponent wrapping the Block it imports (Arca's shape): each side
+// An app's own BlockComponent wrapping the Block it imports: each side
 // wraps its own module's Block.
 const IndexContext = createContext(-1);
 const wrapBlock = (Block: ComponentType<Record<string, unknown>>) =>
