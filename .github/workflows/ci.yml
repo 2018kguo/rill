@@ -109,6 +109,9 @@ jobs:
             node conformance/dom/dom-diff.mjs --config code --variant "$variant"
           done
           node conformance/dom/dom-diff.mjs --config code --stream every=60,short=1
+          # A page that never passes isAnimating: the same DOM after every update, and the
+          # heap the 56 KB chapter holds while streaming stays linear (59 MB once, 31 now).
+          node conformance/dom/dom-diff.mjs --config code --variant noanim --corpus bench/browser/stage/ownership-chapter.md --stream every=240,short=0 --max-heap 45
           # Streamdown 2's animated, streamed (one clock for both sides).
           for variant in animated animated-options; do
             node conformance/dom/dom-diff.mjs --config code --variant "$variant" --stream every=60,short=1

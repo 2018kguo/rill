@@ -151,6 +151,25 @@ if (probe !== undefined) {
   const { reference, actual } = await page.evaluate((text) => window.probe(text), markdown);
   console.log(`reference: ${reference}\nactual:    ${actual}\n${reference === actual ? "identical" : "DIFFERENT"}`);
 } else if (stream) {
+  // --max-heap MB: after each streamed document, still mounted, the page's heap after a
+  // collection must stay under it (a stream held per prefix once reached 243 MB).
+  const maxHeap = Number(option("--max-heap", "0"));
+  let peakHeap = 0;
+  if (maxHeap) {
+    for (const each of pages) {
+      const cdp = await each.context().newCDPSession(each);
+      await each.exposeFunction("heapProbe", async () => {
+        await cdp.send("HeapProfiler.collectGarbage");
+        const { usedSize } = await cdp.send("Runtime.getHeapUsage");
+        peakHeap = Math.max(peakHeap, usedSize / 1e6);
+      });
+    }
+  }
+  process.on("exit", () => {
+    if (!maxHeap) return;
+    console.log(`heap while streaming: peak ${peakHeap.toFixed(1)} MB (limit ${maxHeap} MB)`);
+    if (peakHeap > maxHeap) process.exitCode = 1;
+  });
   const settings = Object.fromEntries(stream.split(",").map((pair) => pair.split("=")));
   const every = Number(settings.every ?? 40);
   const documents = corpus(option("--corpus", "chat"));

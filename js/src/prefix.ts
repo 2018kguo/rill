@@ -27,13 +27,24 @@ export function commonPrefix(before: string, after: string): number {
   return length;
 }
 
-/** A map that keeps its `size` most recently used entries. */
+/**
+ * A map that keeps its most recently used entries: at most `size` of them, and, when
+ * `weigh` is given, at most `bytes` of what it estimates they hold. Keys that are texts
+ * (a message, a block) can be long, and a page that streams without saying so offers a
+ * new, longer one every update: the bytes bound keeps that linear.
+ */
 export class Lru<K, V> {
   readonly #entries = new Map<K, V>();
+  readonly #weights = new Map<K, number>();
   readonly #size: number;
+  readonly #bytes: number;
+  readonly #weigh: ((key: K, value: V) => number) | undefined;
+  #total = 0;
 
-  constructor(size: number) {
+  constructor(size: number, bytes = Infinity, weigh?: (key: K, value: V) => number) {
     this.#size = size;
+    this.#bytes = bytes;
+    this.#weigh = weigh;
   }
 
   get(key: K): V | undefined {
@@ -46,10 +57,23 @@ export class Lru<K, V> {
   }
 
   set(key: K, value: V): void {
-    this.#entries.delete(key);
+    this.#forget(key);
+    const weight = this.#weigh?.(key, value) ?? 0;
+    // One entry over the bound is not kept at all.
+    if (weight > this.#bytes) return;
     this.#entries.set(key, value);
-    if (this.#entries.size > this.#size) {
-      this.#entries.delete(this.#entries.keys().next().value as K);
+    if (this.#weigh) {
+      this.#weights.set(key, weight);
+      this.#total += weight;
     }
+    while (this.#entries.size > this.#size || this.#total > this.#bytes) {
+      this.#forget(this.#entries.keys().next().value as K);
+    }
+  }
+
+  #forget(key: K): void {
+    if (!this.#entries.delete(key)) return;
+    this.#total -= this.#weights.get(key) ?? 0;
+    this.#weights.delete(key);
   }
 }

@@ -332,7 +332,7 @@ const cut = (previous: ParseCache | null, input: string): ParseCache => {
 
 let lastParse: ParseCache | null = null;
 /** Texts cut before, for messages that do not stream (mounted again, or repeated). */
-const cuts = new Lru<string, ParseCache>(64);
+const cuts = new Lru<string, ParseCache>(64, 4 << 20, (text) => 8 * text.length);
 
 /** Where the first footnote match in `text` from `from` ends (with its lookahead), or
  * -1. */

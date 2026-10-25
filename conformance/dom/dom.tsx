@@ -116,6 +116,9 @@ const variants: Record<string, Record<string, unknown>> = {
   // Streamdown 2's word animation while streaming (compare with --stream), with its
   // defaults and with every option.
   animated: { animated: true },
+  // A page that never passes isAnimating while it streams (compare with --stream): the
+  // drop-in cannot tell, and must stay correct and keep memory linear.
+  noanim: {},
   // The plugins pages add most (rill builds them in), as pages pass them.
   breaks: { remarkPlugins: [remarkGfm, remarkBreaks] },
   slug: { rehypePlugins: [...REHYPE, rehypeSlug] },
@@ -256,13 +259,15 @@ async function renderSteps(component: Component, steps: [string, boolean][]) {
     root.render(
       createElement(
         component,
-        { plugins, ...variantProps, ...sideProps(component), isAnimating },
+        { plugins, ...variantProps, ...sideProps(component), ...(variant === "noanim" ? {} : { isAnimating }) },
         markdown
       )
     );
     await settle(host, 120);
     out.push(snapshot(host));
   }
+  // The heap the streamed answer holds while still mounted (dom-diff's --max-heap).
+  await (window as unknown as { heapProbe?: () => Promise<void> }).heapProbe?.();
   root.unmount();
   host.remove();
   return out;

@@ -126,7 +126,9 @@ function Stream() {
     };
     return () => cancelAnimationFrame(frame);
   }, []);
-  return createElement(Streamdown, { plugins, ...answerProps(done, shown), isAnimating: !done }, shown);
+  // noanim=1: a page that never passes isAnimating (the drop-in cannot tell it streams).
+  const animating = params.get("noanim") === "1" ? {} : { isAnimating: !done };
+  return createElement(Streamdown, { plugins, ...answerProps(done, shown), ...animating }, shown);
 }
 
 const asked: Record<string, string> = {

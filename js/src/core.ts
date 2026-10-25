@@ -237,7 +237,8 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
   let last: string | null = null;
   let lastHealed = "";
   // Texts healed whole (a message that does not stream, mounted again or repeated).
-  const healedWhole = new Lru<string, string>(64);
+  // Bounded by bytes too: a page that streams without isAnimating offers every prefix.
+  const healedWhole = new Lru<string, string>(64, 4 << 20, (text, healed) => 2 * (text.length + healed.length));
   const heal = (text: string): string | null => {
     // A slice compared with === is V8's bulk comparison; startsWith goes unit by unit.
     const appended =
@@ -288,7 +289,8 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
     const known = bound.get(key);
     if (known) return known;
     // Blocks rendered when not streaming (a message mounted again, or repeated).
-    const rendered = new Lru<string, Map<string, [Uint32Array, string] | string>>(512);
+    // Weighed as the source plus its markup (ops and strings run a few times the source).
+    const rendered = new Lru<string, Map<string, [Uint32Array, string] | string>>(512, 8 << 20, (source) => 10 * source.length);
     const markup = (source: string, syntax: Syntax, options: MarkupOptions) => {
       // Lone surrogates and NUL take the exact path (Streamdown's own Block).
       if (!source.isWellFormed() || source.includes("\0")) {

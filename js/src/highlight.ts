@@ -6,6 +6,7 @@
 // rill-highlight runs on the main thread; with any other code plugin, that plugin.
 import type { PluginConfig } from "streamdown";
 
+import { Lru } from "./prefix.ts";
 import type { Callback, Options, Result } from "./rill-highlight.ts";
 
 // rill-highlight on the main thread (no workers: the server, tests, old browsers) is
@@ -75,7 +76,9 @@ function forget(id: number, request: Pending) {
   pending.delete(id);
   if (pendingByKey.get(request.key) === id) pendingByKey.delete(request.key);
 }
-const cache = new Map<string, Result>();
+// Weighed by the code (its tokens run some times its length): a code block streaming
+// without isAnimating asks for every prefix, and 500 of those can be large.
+const cache = new Lru<string, Result>(MAX_CACHED, 8 << 20, (key) => 24 * key.length);
 let nextId = 0;
 /** Languages the worker sent back to Shiki. */
 const shikiLanguages = new Set<string>();
@@ -159,9 +162,7 @@ function startWorker(): Worker | null {
     if (!request) return;
     forget(data.id, request);
     if (!request.options.isIncomplete) {
-      cache.delete(request.key);
       cache.set(request.key, data.result);
-      if (cache.size > MAX_CACHED) cache.delete(cache.keys().next().value as string);
     }
     for (const callback of request.callbacks) callback(data.result);
   };
@@ -200,11 +201,7 @@ const inWorker: Highlighter = {
     }
     const key = `${options.language}:${themeName(options.themes[0])}:${themeName(options.themes[1])}:${options.isIncomplete ? 1 : 0}\n${options.code}`;
     const cached = cache.get(key);
-    if (cached) {
-      cache.delete(key);
-      cache.set(key, cached);
-      return cached;
-    }
+    if (cached) return cached;
     const joined = pendingByKey.get(key);
     if (joined !== undefined) {
       pending.get(joined)!.callbacks.push(callback);

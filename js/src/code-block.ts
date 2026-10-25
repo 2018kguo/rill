@@ -5,6 +5,7 @@
 // (lib/code-block/body.tsx, highlighted-body.tsx; Apache-2.0, Copyright 2023 Vercel,
 // Inc.): raw lines first, then the code plugin's tokens once its callback (or cache)
 // has them.
+import { Lru } from "./prefix.ts";
 import {
   createElement,
   Fragment,
@@ -475,7 +476,12 @@ type Memo = {
   html: string;
   body: BodyState;
   next: WeakMap<HighlightResult, Map<string, Memo>>;
+  /** Results in the sequence: the raw lines (1), then the highlighted ones (2). */
+  depth: number;
 };
+
+/** A body past the sequences worth sharing (one whose code keeps changing). */
+const UNSHARED: Memo = { html: "", body: { lines: [], pre: undefined, code: undefined }, next: new WeakMap(), depth: Infinity };
 
 type WholeState = { memo: Memo | null; body: BodyState; shared: boolean };
 
@@ -489,13 +495,24 @@ function wholeHtml(
   key: string,
   render: (body: BodyState) => string
 ): string {
+  // Only the raw-then-highlighted sequence repeats across messages. A body whose code
+  // keeps changing (streaming without isAnimating) would chain a memo per update, each
+  // holding that update's whole markup: it renders without one.
+  if (state.memo && state.memo.depth >= 2) {
+    const body = state.shared ? cloneBody(state.body) : state.body;
+    const html = render(body);
+    state.memo = UNSHARED;
+    state.body = body;
+    state.shared = false;
+    return html;
+  }
   const table = state.memo ? state.memo.next : firstMemo;
   let byKey = table.get(result);
   let memo = byKey?.get(key);
   if (!memo) {
     // A state another body shares stays as it is.
     const body = state.shared ? cloneBody(state.body) : state.body;
-    memo = { html: render(body), body, next: new WeakMap() };
+    memo = { html: render(body), body, next: new WeakMap(), depth: (state.memo?.depth ?? 0) + 1 };
     if (!byKey) table.set(result, (byKey = new Map()));
     byKey.set(key, memo);
   }
@@ -514,13 +531,13 @@ function cloneBody(body: BodyState): BodyState {
 }
 
 /** Raw results by code, so bodies with the same code share them (and their markup). */
-const rawResults = new Map<string, HighlightResult>();
+// Bounded by bytes too: a code block streaming without isAnimating offers every prefix.
+const rawResults = new Lru<string, HighlightResult>(256, 4 << 20, (code) => 12 * code.length);
 
 function rawResultFor(code: string): HighlightResult {
   let result = rawResults.get(code);
   if (!result) {
     result = rawResult(code);
-    if (rawResults.size >= 256) rawResults.delete(rawResults.keys().next().value as string);
     rawResults.set(code, result);
   }
   return result;
