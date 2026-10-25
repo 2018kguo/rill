@@ -138,8 +138,8 @@ function report(label, results, describe) {
   for (const { index, reference, actual } of failures.slice(0, show)) {
     const at = firstDifference(reference, actual);
     console.log(`  #${index} ${describe(index)}`);
-    console.log(`    reference …${reference.slice(Math.max(0, at - 100), at + 100)}`);
-    console.log(`    actual    …${actual.slice(Math.max(0, at - 100), at + 100)}`);
+    console.log(`    reference …${reference.slice(Math.max(0, at - Number(process.env.CONTEXT ?? 100)), at + 100)}`);
+    console.log(`    actual    …${actual.slice(Math.max(0, at - Number(process.env.CONTEXT ?? 100)), at + 100)}`);
   }
 }
 
@@ -180,6 +180,7 @@ if (probe !== undefined) {
   }
 }
 const renders = { rill: 0, streamdown: 0, tableTails: 0, rillHighlight: 0, shiki: 0 };
+const reasons = {};
 for (const worker of pages) {
   const counts = await worker.evaluate(() => window.blockRenders());
   renders.rill += counts.rill;
@@ -187,11 +188,13 @@ for (const worker of pages) {
   renders.tableTails += counts.tableTails;
   renders.rillHighlight += counts.highlights.rill;
   renders.shiki += counts.highlights.shiki;
+  for (const [reason, count] of Object.entries(counts.fallbacks ?? {})) reasons[reason] = (reasons[reason] ?? 0) + count;
 }
 console.log(
   `block renders: ${renders.rill} by rill (${renders.tableTails} as a table's new rows), ` +
     `${renders.streamdown} by Streamdown's Block; ` +
-    `highlights: ${renders.rillHighlight} by rill-highlight, ${renders.shiki} by Shiki`
+    `highlights: ${renders.rillHighlight} by rill-highlight, ${renders.shiki} by Shiki` +
+    (Object.keys(reasons).length ? `; fallbacks: ${Object.entries(reasons).map(([reason, count]) => `${reason} ${count}`).join(", ")}` : "")
 );
 await browser.close();
 server.close();

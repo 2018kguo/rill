@@ -7,6 +7,7 @@
 //! match the JavaScript output node for node, positions included; `conformance/` checks
 //! that against remark itself.
 
+pub mod animate;
 pub mod hast;
 pub mod markup;
 pub mod mdast;
@@ -20,7 +21,7 @@ pub use hast::{
     BlockPolicy, Context, Harden, Kind, Options, Plugin, Rendered, Sanitize, Schema, render,
     render_json, render_ops,
 };
-pub use markup::{MarkupOptions, render_markup};
+pub use markup::{Fallback, MarkupOptions, markup, render_markup};
 pub use mdast::{Error, Syntax, parse_json};
 
 /// The WebAssembly boundary the `@2018kguo/rill` JavaScript package reads. A build is one
@@ -37,17 +38,18 @@ pub mod wasm {
 
     /// The boundary's version, which the JavaScript package checks before it calls
     /// anything else.
-    pub const ABI: u32 = 3;
+    pub const ABI: u32 = 4;
 
-    /// One rendered document: how far Rust took it (a [`crate::Kind`], `"markup"`,
-    /// `"fallback"` where only Streamdown renders a block exactly, or `"unsupported"`
-    /// where a plugin left it to JavaScript) and its opcodes, decoded by the JavaScript
-    /// package.
+    /// One rendered document: how far Rust took it (a [`crate::Kind`], `"markup"`, a
+    /// [`crate::Fallback`]'s name where only Streamdown renders a block exactly, or
+    /// `"unsupported"` where a plugin left it to JavaScript) and its opcodes, decoded by
+    /// the JavaScript package.
     #[wasm_bindgen]
     pub struct RenderedHast {
         kind: &'static str,
         ops: Vec<u32>,
         strings: String,
+        animated: Option<crate::animate::Animated>,
     }
 
     #[wasm_bindgen]
@@ -64,6 +66,13 @@ pub mod wasm {
         pub fn strings(&mut self) -> String {
             std::mem::take(&mut self.strings)
         }
+        /// After an animated render: the text's length in UTF-16 units and the timeline's
+        /// cursor (`rill::animate::Animated`); empty otherwise.
+        pub fn animated(&self) -> Vec<f64> {
+            self.animated
+                .map(|animated| vec![f64::from(animated.chars), animated.cursor])
+                .unwrap_or_default()
+        }
     }
 
     impl RenderedHast {
@@ -72,6 +81,7 @@ pub mod wasm {
                 kind,
                 ops: Vec::new(),
                 strings: String::new(),
+                animated: None,
             }
         }
     }
@@ -95,6 +105,7 @@ pub mod wasm {
                 kind: encoded.kind.as_str(),
                 ops: encoded.ops,
                 strings: encoded.strings,
+                animated: None,
             }),
             Err(Error::Unsupported) => Ok(RenderedHast::empty("unsupported")),
             Err(error) => Err(JsError::new(&error.to_string())),
@@ -103,8 +114,11 @@ pub mod wasm {
 
     /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
     /// `linkSafety.enabled`, bit 1 server rendering, bit 2 the streaming spine, bit 3
-    /// KaTeX available, bit 4 an incomplete code fence; `overrides`: the tag names with components of the page's own,
-    /// space-separated.
+    /// KaTeX available, bit 4 an incomplete code fence, bit 5 every element through React; `overrides`: the tag names with
+    /// components of the page's own, space-separated. `animate`, while `animated`
+    /// streams: the animation, duration and easing joined by NUL; `timing`: `sep: "char"`
+    /// (0 or 1), the stagger, the units already shown, the timeline's cursor, the clock
+    /// and the backlog (see [`crate::animate::Animate`]).
     #[doc(hidden)]
     pub fn render_markup(
         source: &str,
@@ -112,6 +126,8 @@ pub mod wasm {
         prefix: String,
         flags: u32,
         overrides: &str,
+        animate: &str,
+        timing: &[f64],
     ) -> Result<RenderedHast, JsError> {
         options.close_open_raw = true;
         let markup = MarkupOptions {
@@ -123,16 +139,42 @@ pub mod wasm {
             katex: flags & 8 != 0,
             incomplete: flags & 16 != 0,
             spine: flags & 4 != 0,
+            deep: flags & 32 != 0,
+            animate: animation(animate, timing),
         };
-        let encoded = crate::render_markup(source, &options, &markup)
-            .map_err(|error| JsError::new(&error.to_string()))?;
-        Ok(match encoded {
-            Some(encoded) => RenderedHast {
+        Ok(match crate::markup(source, &options, &markup) {
+            Ok(encoded) => RenderedHast {
                 kind: "markup",
                 ops: encoded.ops,
                 strings: encoded.strings,
+                animated: encoded.animated,
             },
-            None => RenderedHast::empty("fallback"),
+            Err(Ok(fallback)) => RenderedHast::empty(fallback.as_str()),
+            Err(Err(error)) => return Err(JsError::new(&error.to_string())),
+        })
+    }
+
+    /// [`render_markup`]'s `animate` and `timing` as the pass's options.
+    fn animation(animate: &str, timing: &[f64]) -> Option<crate::animate::Animate> {
+        let mut names = animate.split('\0');
+        let (Some(animation), Some(duration), Some(easing)) =
+            (names.next(), names.next(), names.next())
+        else {
+            return None;
+        };
+        let &[by_char, stagger, shown, cursor, now, backlog] = timing else {
+            return None;
+        };
+        Some(crate::animate::Animate {
+            animation: animation.to_owned(),
+            duration: duration.to_owned(),
+            easing: easing.to_owned(),
+            by_char: by_char != 0.0,
+            stagger,
+            shown: shown as u32,
+            cursor,
+            now,
+            backlog,
         })
     }
 
@@ -244,6 +286,8 @@ macro_rules! wasm_exports {
             prefix: String,
             flags: u32,
             overrides: &str,
+            animate: &str,
+            timing: &[f64],
             $($arg: $ty),*
         ) -> Result<$crate::wasm::RenderedHast, $crate::wasm::wasm_bindgen::JsError> {
             let options: $crate::Options = $options;
@@ -253,6 +297,8 @@ macro_rules! wasm_exports {
                 prefix,
                 flags,
                 overrides,
+                animate,
+                timing,
             )
         }
 

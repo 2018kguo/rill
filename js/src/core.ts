@@ -28,6 +28,8 @@ export type RenderedHast = {
   readonly kind: string;
   ops(): Uint32Array;
   strings(): string;
+  /** After an animated render: `[chars, cursor]` (see `AnimatePass`). */
+  animated?(): Float64Array;
   free(): void;
 };
 
@@ -42,6 +44,8 @@ export type Glue<A extends Args = []> = {
     prefix: string,
     flags: number,
     overrides: string,
+    animate: string,
+    timing: Float64Array,
     ...args: A
   ): RenderedHast;
   pieces(...args: A): boolean;
@@ -52,7 +56,7 @@ export type Glue<A extends Args = []> = {
 };
 
 /** The `rill::wasm::ABI` this package reads. */
-export const ABI = 3;
+export const ABI = 4;
 
 /** rill for one set of a build's arguments. */
 export type Rill = {
@@ -64,9 +68,10 @@ export type Rill = {
   render(source: string, syntax?: Syntax): { kind: RillKind; tree: HastNode } | null;
   /**
    * Streamdown's DOM for one block as segments (see crates/rill/src/markup.rs), read
-   * with the returned reader; `null` where only Streamdown renders it exactly.
+   * with the returned reader; where only Streamdown renders it exactly, the reason (a
+   * `FallbackReason`).
    */
-  markup?: (source: string, syntax: Syntax, options: MarkupOptions) => HastReader | null;
+  markup?: (source: string, syntax: Syntax, options: MarkupOptions) => HastReader | string;
   /** The link definitions at the root of `source`, as UTF-16 `[start, end)` ranges, or
    * `null` when one sits in a container or `source` has a footnote definition. Only
    * builds without plugins of their own (a plugin may read the whole text) have it. */
@@ -96,7 +101,34 @@ export type MarkupOptions = {
    * gives its own component renders through Streamdown (its components read the fence's
    * state from a context only Streamdown's Block provides). */
   incomplete?: boolean;
+  /** While `animated` streams: the animate plugin's pass on this block, whose results
+   * the render writes back. */
+  animate?: AnimatePass;
+  /** Every element a React element (a block that was animated, settling as React
+   * reconciles it). */
+  deep?: boolean;
 };
+
+/** One block's pass of Streamdown's animate plugin (`rill::animate::Animate`). */
+export type AnimatePass = {
+  animation: string;
+  /** The duration as the plugin writes it (`String(duration)`). */
+  duration: string;
+  easing: string;
+  byChar: boolean;
+  stagger: number;
+  /** UTF-16 units of the block's text already shown. */
+  shown: number;
+  /** The timeline: its cursor, its clock, and its backlog. */
+  cursor: number;
+  now: number;
+  backlog: number;
+  /** Written by the render: the block's text length, and the cursor after it. */
+  chars?: number;
+  next?: number;
+};
+
+const NO_TIMING = new Float64Array(0);
 
 /** A build's instance: its `Rill` for each set of arguments. */
 export type RillBuild<A extends Args = []> = {
@@ -213,22 +245,26 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
     const known = bound.get(key);
     if (known) return known;
     // Blocks rendered when not streaming (a message mounted again, or repeated).
-    const rendered = new Lru<string, Map<string, [Uint32Array, string] | null>>(512);
+    const rendered = new Lru<string, Map<string, [Uint32Array, string] | string>>(512);
     const markup = (source: string, syntax: Syntax, options: MarkupOptions) => {
       // Lone surrogates and NUL take the exact path (Streamdown's own Block).
       if (!source.isWellFormed() || source.includes("\0")) {
-        return null;
+        return "surrogates";
       }
       const flags =
         (options.linkSafety ? 1 : 0) |
         (options.ssr ? 2 : 0) |
         (options.spine ? 4 : 0) |
+        (options.deep ? 128 : 0) |
         (options.katex ? 8 : 0) |
         (options.incomplete ? 16 : 0) |
         (syntax.math === true ? 32 : 0) |
         (syntax.cjk === true ? 64 : 0);
       const flagsKey = `${flags} ${options.prefix} ${options.overrides}`;
-      const known = options.spine ? undefined : rendered.get(source);
+      const animate = options.animate;
+      // Streaming and animated renders are not kept: they do not repeat.
+      const keep = !(options.spine || animate);
+      const known = keep ? rendered.get(source) : undefined;
       let output = known?.get(flagsKey);
       if (output === undefined) {
         const result = renderMarkup(
@@ -236,22 +272,38 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
           syntax.math === true,
           syntax.cjk === true,
           options.prefix,
-          flags & 31,
+          (flags & 31) | (options.deep ? 32 : 0),
           options.overrides,
+          animate ? `${animate.animation}\0${animate.duration}\0${animate.easing}` : "",
+          animate
+            ? Float64Array.of(
+                animate.byChar ? 1 : 0,
+                animate.stagger,
+                animate.shown,
+                animate.cursor,
+                animate.now,
+                animate.backlog
+              )
+            : NO_TIMING,
           ...args
         );
         try {
-          output = result.kind === "markup" ? [result.ops(), result.strings()] : null;
+          output = result.kind === "markup" ? [result.ops(), result.strings()] : result.kind;
+          if (animate && result.kind === "markup") {
+            const animated = result.animated!();
+            animate.chars = animated[0]!;
+            animate.next = animated[1]!;
+          }
         } finally {
           result.free();
         }
-        if (!options.spine) {
+        if (keep) {
           const byKey = known ?? new Map();
           byKey.set(flagsKey, output);
           if (!known) rendered.set(source, byKey);
         }
       }
-      return output && new HastReader(output[0], output[1], source);
+      return typeof output === "string" ? output : new HastReader(output[0], output[1], source);
     };
     const rill: Rill = {
       markup,

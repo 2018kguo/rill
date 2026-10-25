@@ -17,6 +17,10 @@ type StreamdownPlugins = Pick<PluginConfig, "math" | "cjk">;
 const sets = new WeakMap<Rill, WeakMap<object, Plugins>>();
 const NO_PLUGINS = {};
 const attempted = new WeakSet<object>();
+const failed = new WeakSet<object>();
+
+/** Whether `engine`'s WebAssembly failed to load. */
+export const loadFailed = (engine: object): boolean => failed.has(engine);
 
 /** Starts loading `engine`'s WebAssembly, once per page: a failure (no WebAssembly, a
  * missing asset) would only repeat. */
@@ -24,6 +28,7 @@ export function load(engine: Pick<Engine, "load">) {
   if (attempted.has(engine)) return;
   attempted.add(engine);
   engine.load().catch((error: unknown) => {
+    failed.add(engine);
     // Streamdown keeps rendering, with the same output.
     console.warn(
       "rill: the WebAssembly did not load, so Streamdown renders in JavaScript. " +

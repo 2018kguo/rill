@@ -355,7 +355,7 @@ pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Value<'s>> {
 // ---------------------------------------------------------------------------
 
 /// Slices a `Cow`, keeping a borrow borrowed.
-fn slice_cow<'s>(value: &Cow<'s, str>, range: std::ops::Range<usize>) -> Cow<'s, str> {
+pub(crate) fn slice_cow<'s>(value: &Cow<'s, str>, range: std::ops::Range<usize>) -> Cow<'s, str> {
     match value {
         Cow::Borrowed(borrowed) => Cow::Borrowed(&borrowed[range]),
         Cow::Owned(owned) => Cow::Owned(owned[range].to_owned()),
@@ -524,6 +524,8 @@ struct ToHast<'t, 's> {
     code_meta: bool,
     /// The tree holds math for rehype-katex.
     math: bool,
+    /// A comment still streaming is simple too (see [`Options::close_open_raw`]).
+    open_comments: bool,
     /// Whether each list converted so far is loose.
     loose_lists: HashMap<NodeId, bool>,
 }
@@ -734,7 +736,12 @@ impl<'s> ToHast<'_, 's> {
                         | mdast::NodeKind::FootnoteDefinition(_)
                 );
                 // A comment ends where micromark's does and restructures nothing.
-                let simple = SimpleRaw::parse(value);
+                // One still streaming, only as the text's last node (in a container,
+                // what follows the raw node can join the comment).
+                let last = matches!(self.mdast.node(parent).kind, mdast::NodeKind::Root)
+                    && self.mdast.nodes[ix as usize].next == mdast::NIL;
+                let simple = SimpleRaw::parse(value)
+                    .filter(|_| (self.open_comments && last) || !SimpleRaw::open_comment(value));
                 let flow_ok = matches!(
                     simple,
                     Some(SimpleRaw::Comment | SimpleRaw::WrapOpen | SimpleRaw::WrapClose)
@@ -1202,6 +1209,7 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
         katex: options.math,
         code_meta: options.code_meta,
         math: false,
+        open_comments: close_open_raw,
         loose_lists: HashMap::new(),
     };
     state.collect(mdast::Tree::ROOT);
@@ -1264,6 +1272,16 @@ enum SimpleRaw {
 }
 
 impl SimpleRaw {
+    /// A comment with no end, which parse5 ends where the raw node ends.
+    fn open_comment(value: &str) -> bool {
+        value.strip_prefix("<!--").is_some_and(|body| {
+            !body.starts_with('>')
+                && !body.starts_with("->")
+                && !body.contains("--!>")
+                && !body.contains("-->")
+        })
+    }
+
     fn parse(value: &str) -> Option<SimpleRaw> {
         if let Some(body) = value
             .strip_prefix("<!--")
@@ -1275,6 +1293,12 @@ impl SimpleRaw {
                 && !body.contains("--!>")
                 && !body.contains("-->");
             return plain.then_some(SimpleRaw::Comment);
+        }
+        // A comment still streaming (flow HTML runs to the end of its container): parse5
+        // ends it with the raw node, but leaves the root without a position, so only
+        // `Options::close_open_raw` takes it.
+        if Self::open_comment(value) {
+            return Some(SimpleRaw::Comment);
         }
         let inner = value.strip_prefix('<')?.strip_suffix('>')?;
         if let Some(name) = inner.strip_prefix('/') {
@@ -2782,6 +2806,8 @@ pub struct Options {
     /// its paragraph, cell, list item or heading, as parse5 does, instead of leaving the
     /// document to JavaScript. The element then has no position, so only output without
     /// positions ([`crate::render_markup`]) sets this.
+    /// A comment still streaming (no `-->` yet) is removed as parse5 and sanitize remove
+    /// it, too.
     pub close_open_raw: bool,
 }
 
