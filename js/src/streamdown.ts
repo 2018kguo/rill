@@ -252,6 +252,11 @@ function sameRootAttributes(previous: object, next: object): boolean {
 const NO_ARGS: Args = [];
 let warnedOwnLists = false;
 
+// The prebuilt WebAssembly starts loading when the page loads this module, not when the
+// first <Streamdown> mounts: a chat that fetches its messages would otherwise render
+// them all with Streamdown's Block while it loads, and then again with rill.
+if (typeof window !== "undefined") load(rillEngine);
+
 /** The props that give Streamdown the engine's plugins: none when they are its own
  * defaults (Streamdown then keeps its own lists, which some of its props look for). */
 function listProps(pipeline: Pipeline): Partial<BaseStreamdownProps> {

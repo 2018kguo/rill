@@ -27,7 +27,7 @@ export function load(engine: Pick<Engine, "load">) {
     // Streamdown keeps rendering, with the same output.
     console.warn(
       "rill: the WebAssembly did not load, so Streamdown renders in JavaScript. " +
-        "With Vite, add `optimizeDeps: { exclude: ['@2018kguo/rill'] }`.",
+        "With Vite 7 or older, add `rill()` from `@2018kguo/rill/vite` to your plugins.",
       error
     );
   });
