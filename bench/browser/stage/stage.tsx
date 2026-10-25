@@ -33,7 +33,8 @@ const rate = Number(params.get("rate") ?? 1200);
 const chunk = Number(params.get("chunk") ?? 0);
 const turns = Number(params.get("turns") ?? 18);
 const source = documents[params.get("doc") ?? "lru-cache"] ?? lruCache;
-const plugins = { code };
+// nocode=1: no highlighting (prices what highlighting adds to a run).
+const plugins = params.get("nocode") === "1" ? {} : { code };
 
 const $ = (id: string) => document.getElementById(id)!;
 const frames: number[] = [];
@@ -57,7 +58,7 @@ const end = () => performance.mark("stage:end");
 // restarts the wait: a long task can be highlighting that has not reached the DOM yet);
 // `finished` is the last mutation.
 // Raw (not yet highlighted) lines are one token colored `inherit`.
-const highlighted = () => !document.querySelector('#answer [data-streamdown="code-block-body"] span[style*="--sdm-c: inherit"]');
+const highlighted = () => params.get("nocode") === "1" || !document.querySelector('#answer [data-streamdown="code-block-body"] span[style*="--sdm-c: inherit"]');
 function settle(ready: () => boolean) {
   let lastMutation = performance.now();
   let quietSince = lastMutation;
@@ -172,6 +173,9 @@ function startHistory() {
   requestAnimationFrame(tick);
 }
 
+// cv=1: settled turns skip layout and paint while off screen (a page's own CSS; the DOM
+// stays the same).
+if (params.get("cv") === "1") document.head.append(Object.assign(document.createElement("style"), { textContent: ".turn{content-visibility:auto;contain-intrinsic-size:auto 1200px}" }));
 $("engine").textContent = engineName;
 document.body.dataset.engine = engineName.includes("rill") ? "rill" : "streamdown";
 if (scene === "history") {

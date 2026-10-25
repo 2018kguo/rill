@@ -51,7 +51,8 @@ async function bundle(entry: string, outdir: string, engine: string) {
     outdir,
     target: "browser",
     splitting: true,
-    minify: true,
+    // PROFILE=1: readable names for CPU profiles (whitespace and syntax still minified).
+    minify: process.env.PROFILE ? { whitespace: true, syntax: true, identifiers: false } : true,
     define: { "process.env.NODE_ENV": '"production"' },
     plugins: [resolveHere(engine)],
   });
