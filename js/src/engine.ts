@@ -109,17 +109,23 @@ export function defineEngine<A extends Args = []>(definition: EngineDefinition<A
         await glue.default({ module_or_path: definition.wasm() });
         ready(glue);
       })();
-      // A failed fetch (offline, deploy skew) is retried on the next call.
-      loading.catch(() => {
-        loading = undefined;
+      // A failed fetch (offline, deploy skew) is retried on the next call, unless an
+      // init() took over meanwhile.
+      const current = loading;
+      current.catch(() => {
+        if (loading === current) loading = undefined;
       });
-      return loading;
+      return current;
     },
-    async init(wasm) {
-      if (build) return;
-      const glue = await definition.glue();
-      glue.initSync({ module: wasm });
-      ready(glue);
+    init(wasm) {
+      if (build) return Promise.resolve();
+      // A page's own init wins over the default load: load() reuses this promise.
+      loading = (async () => {
+        const glue = await definition.glue();
+        glue.initSync({ module: wasm });
+        ready(glue);
+      })();
+      return loading;
     },
     subscribe(listener) {
       listeners.add(listener);

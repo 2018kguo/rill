@@ -27,7 +27,10 @@ export const loadFailed = (engine: object): boolean => failed.has(engine);
 export function load(engine: Pick<Engine, "load">) {
   if (attempted.has(engine)) return;
   attempted.add(engine);
-  engine.load().catch((error: unknown) => {
+  // A page's own init() may have started while the default load failed: the second
+  // load() waits on it, and only a second failure is one.
+  const retry = () => engine.load();
+  engine.load().catch(retry).catch((error: unknown) => {
     failed.add(engine);
     // Streamdown keeps rendering, with the same output.
     console.warn(

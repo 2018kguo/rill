@@ -342,8 +342,9 @@ function thrown(error: unknown): Why {
 
 // The prebuilt WebAssembly starts loading when the page loads this module, not when the
 // first <Streamdown> mounts: a chat that fetches its messages would otherwise render
-// them all with Streamdown's Block while it loads, and then again with rill.
-if (typeof window !== "undefined") load(rillEngine);
+// them all with Streamdown's Block while it loads, and then again with rill. One task
+// later, so a page that calls `initRill` from its own module (bytes of its own) wins.
+if (typeof window !== "undefined") setTimeout(() => load(rillEngine), 0);
 
 /** The props that give Streamdown the engine's plugins: none when they are its own
  * defaults (Streamdown then keeps its own lists, which some of its props look for). */
