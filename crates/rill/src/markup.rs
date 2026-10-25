@@ -20,6 +20,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use crate::animate::{self, Animate, Animated};
 use crate::hast::{self, Encoder, Kind, NodeKind, Options, Props, Tree, Value};
 use crate::mdast::{Error, NodeId};
 
@@ -51,6 +52,12 @@ pub struct MarkupOptions {
     /// grows the end changes only text nodes there, as React does, instead of replacing
     /// static HTML.
     pub spine: bool,
+    /// `animated` while the answer streams: the animate plugin's pass on the tree first.
+    pub animate: Option<Animate>,
+    /// Every element a React element (as while animated): a block that was animated
+    /// settles as React reconciles it, keeping attributes React leaves behind (an empty
+    /// `style`).
+    pub deep: bool,
 }
 
 /// The tree holds something only Streamdown's own `Block` renders exactly.
@@ -76,6 +83,8 @@ pub mod seg {
     pub const NUMBER: u32 = 3;
     /// `style={{textAlign}}` from a table cell's `align`.
     pub const ALIGN: u32 = 4;
+    /// `style={{"--name": value, ...}}` from `--name:value;...`.
+    pub const STYLE: u32 = 5;
     /// Static HTML parts.
     pub const HTML: u32 = 0;
     pub const KATEX: u32 = 1;
@@ -89,6 +98,9 @@ enum Prop<'a> {
     Num(i64),
     /// `style: {textAlign}`.
     Align(Cow<'a, str>),
+    /// A style of custom properties (`--name:value;...`, as the animate plugin writes
+    /// them), which hast-util-to-jsx-runtime hands React as an object.
+    Style(Cow<'a, str>),
 }
 
 type ReactProps<'a> = Vec<(&'static str, Prop<'a>)>;
@@ -263,6 +275,43 @@ fn escape(out: &mut String, value: &str, ssr: bool) {
         run = index + 1;
     }
     out.push_str(&value[run..]);
+}
+
+/// The declarations of a style made only of custom properties with plain values (what
+/// the animate plugin writes): `--name:value`, `;`-separated.
+fn custom_properties(style: &str) -> bool {
+    style.split(';').all(|declaration| {
+        declaration.split_once(':').is_some_and(|(name, value)| {
+            name.starts_with("--")
+                && name[2..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+                && !value.is_empty()
+                && !value.starts_with(char::is_whitespace)
+                && !value.ends_with(char::is_whitespace)
+                && !value.contains(['\'', '"', '\\', '/', '\r', '\n', '!', ':'])
+        })
+    })
+}
+
+/// A style of custom properties as React writes it: on the server `--a:b;--c:d`, in the
+/// browser (through the CSSOM) `--a: b; --c: d;`.
+fn css_text(style: &str, ssr: bool) -> String {
+    if ssr {
+        return style.to_owned();
+    }
+    let mut out = String::with_capacity(style.len() + 16);
+    for declaration in style.split(';') {
+        let (name, value) = declaration.split_once(':').expect("checked");
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(name);
+        out.push_str(": ");
+        out.push_str(value);
+        out.push(';');
+    }
+    out
 }
 
 /// How an element renders.
@@ -456,6 +505,13 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 "align" if matches!(tag, "td" | "th") => "align",
                 "href" | "title" | "alt" | "src" | "id" | "start" | "type" | "checked"
                 | "disabled" | "metastring" | "target" | "rel" | "width" | "height" => key,
+                "style" => match value {
+                    Value::Str(style) if custom_properties(style) => {
+                        out.push(("style", Prop::Style(style.clone())));
+                        continue;
+                    }
+                    _ => return Err(Unsupported),
+                },
                 // A plugin's data attributes, named as in HTML: React's prop name too.
                 _ if data_attribute(key) => key,
                 _ => return Err(Unsupported),
@@ -743,6 +799,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 Prop::Bool(_) => return,
                 Prop::Align(value) if ssr => Cow::Owned(format!("text-align:{value}")),
                 Prop::Align(value) => Cow::Owned(format!("text-align: {value};")),
+                Prop::Style(style) => Cow::Owned(css_text(style, ssr)),
             };
             out.push(' ');
             out.push_str(name);
@@ -877,6 +934,10 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 Prop::Align(value) => {
                     self.encoder.push(seg::ALIGN);
                     self.encoder.string(value);
+                }
+                Prop::Style(style) => {
+                    self.encoder.push(seg::STYLE);
+                    self.encoder.string(style);
                 }
             }
         }
@@ -1018,37 +1079,100 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
     }
 }
 
-/// One block's segments, or `None` where only Streamdown's `Block` renders it exactly
-/// (raw HTML rill leaves to parse5, or something [`Unsupported`]).
+/// One block's segments.
 pub struct EncodedMarkup {
     pub ops: Vec<u32>,
     pub strings: String,
+    /// With [`MarkupOptions::animate`]: what the pass leaves for the next one.
+    pub animated: Option<Animated>,
 }
 
-/// Markdown → the segments of Streamdown's DOM for it. `source` must be NUL-free (see
-/// [`crate::mdast::without_nul`]); offsets index it in UTF-16 units.
+/// Why a block renders with Streamdown's own `Block` instead of rill's markup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Fallback {
+    /// Raw HTML (or a link in a link) that needs parse5, the HTML5 parser.
+    Raw,
+    /// Nodes nested deeper than [`crate::mdast::MAX_DEPTH`].
+    Deep,
+    /// A [`crate::Plugin`] left the block to its JavaScript form.
+    Plugin,
+    /// Math, with no KaTeX in JavaScript to render it.
+    Math,
+    /// An element or property the markup does not reproduce exactly.
+    Shape,
+    /// Math while `animated` streams (the plugin would animate KaTeX's output).
+    AnimatedMath,
+    /// A code fence still streaming in a block holding an element the page gives its
+    /// own component (see [`MarkupOptions::incomplete`]).
+    Incomplete,
+}
+
+impl Fallback {
+    /// The name the JavaScript package reports (`rill::wasm::RenderedHast`'s kind).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Fallback::Raw => "raw-html",
+            Fallback::Deep => "too-deep",
+            Fallback::Plugin => "plugin-declined",
+            Fallback::Math => "math-without-katex",
+            Fallback::Shape => "unsupported-shape",
+            Fallback::AnimatedMath => "animated-math",
+            Fallback::Incomplete => "incomplete-fence-components",
+        }
+    }
+}
+
+/// Markdown → the segments of Streamdown's DOM for it, or `None` where only
+/// Streamdown's `Block` renders it exactly (see [`markup`] for why). `source` must be
+/// NUL-free (see [`crate::mdast::without_nul`]); offsets index it in UTF-16 units.
 pub fn render_markup(
     source: &str,
     options: &Options,
-    markup: &MarkupOptions,
+    markup_options: &MarkupOptions,
 ) -> Result<Option<EncodedMarkup>, Error> {
-    let built = match hast::build(source, options) {
-        Err(Error::Unsupported) => return Ok(None),
-        built => built?,
-    };
-    if built.kind == Kind::Raw || built.kind == Kind::Math && !markup.katex {
-        return Ok(None);
+    match markup(source, options, markup_options) {
+        Ok(encoded) => Ok(Some(encoded)),
+        Err(Ok(_)) => Ok(None),
+        Err(Err(error)) => Err(error),
     }
+}
+
+/// [`render_markup`], with the reason a block is left to Streamdown.
+pub fn markup(
+    source: &str,
+    options: &Options,
+    markup: &MarkupOptions,
+) -> Result<EncodedMarkup, Result<Fallback, Error>> {
+    let mut built = match hast::build(source, options) {
+        Err(Error::Unsupported) => return Err(Ok(Fallback::Plugin)),
+        Err(Error::TooDeep) => return Err(Ok(Fallback::Deep)),
+        built => built.map_err(Err)?,
+    };
+    if built.kind == Kind::Raw {
+        return Err(Ok(Fallback::Raw));
+    }
+    if built.kind == Kind::Math && !markup.katex {
+        return Err(Ok(Fallback::Math));
+    }
+    let animated = match &markup.animate {
+        Some(_) if built.kind == Kind::Math => return Err(Ok(Fallback::AnimatedMath)),
+        Some(options) => Some(animate::animate(&mut built.tree, built.root, options)),
+        None => None,
+    };
     let markup = MarkupOptions {
         math: built.kind == Kind::Math,
         ..markup.clone()
     };
     let mut encoder = Encoder::new(&built.tree, &built.points, source);
-    if encode(&mut encoder, &built.tree, built.root, &markup).is_err() {
-        return Ok(None);
-    }
+    encode(&mut encoder, &built.tree, built.root, &markup).map_err(Ok)?;
     let (ops, strings) = encoder.finish();
-    Ok(Some(EncodedMarkup { ops, strings }))
+    Ok(EncodedMarkup {
+        ops,
+        strings,
+        animated,
+    })
 }
 
 /// Writes the segments for `root`'s children into `encoder`.
@@ -1057,7 +1181,7 @@ fn encode<'t, 's>(
     tree: &'t Tree<'s>,
     root: NodeId,
     options: &MarkupOptions,
-) -> Result<(), Unsupported> {
+) -> Result<(), Fallback> {
     let mut markup = Markup {
         tree,
         options,
@@ -1071,15 +1195,22 @@ fn encode<'t, 's>(
             .children(root)
             .any(|ix| markup.need(ix) >= Need::React && markup.holds_jsx(ix))
     {
-        return Err(Unsupported);
+        return Err(Fallback::Incomplete);
     }
     let children: Vec<NodeId> = tree.children(root).collect();
-    markup.segments(
-        &children,
-        if options.spine {
-            Spine::Last
-        } else {
-            Spine::Off
-        },
-    )
+    // Animated, every element is a React element: Streamdown's words come and go as
+    // React reconciles them (an element keeps its place, and the attributes it had), so
+    // only React elements keyed as hast-util-to-jsx-runtime keys them end the same.
+    markup
+        .segments(
+            &children,
+            if options.animate.is_some() || options.deep {
+                Spine::Deep
+            } else if options.spine {
+                Spine::Last
+            } else {
+                Spine::Off
+            },
+        )
+        .map_err(|Unsupported| Fallback::Shape)
 }

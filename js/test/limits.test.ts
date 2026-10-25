@@ -22,15 +22,11 @@ const NESTED_IMAGES = "![".repeat(30000) + "a" + "](u)".repeat(30000);
 
 test("deep nesting is left to Streamdown, and rill keeps rendering", () => {
   for (const source of DEEP) {
-    let reader = null;
-    try {
-      reader = rill.markup!(source, {}, options);
-    } catch {}
-    assert.equal(reader, null, source.slice(0, 20));
+    assert.equal(rill.markup!(source, {}, options), "too-deep", source.slice(0, 20));
     rill.definitions!(source, {});
     rill.splitsAt!(source, {}, source.length >> 1);
     assert.equal(typeof rill.remend!(source), "string");
-    assert.ok(rill.markup!(`- **ok** ${source.length}`, {}, options), "rill still renders");
+    assert.equal(typeof rill.markup!(`- **ok** ${source.length}`, {}, options), "object", "rill still renders");
   }
-  assert.ok(rill.markup!(NESTED_IMAGES, {}, options));
+  assert.equal(typeof rill.markup!(NESTED_IMAGES, {}, options), "object");
 });

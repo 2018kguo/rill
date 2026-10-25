@@ -55,16 +55,30 @@ answer in one block in Streamdown) renders as its pieces, of which only the last
 A message that has not streamed (a conversation opened from history) renders its blocks
 from one component instead of one per block, and what it computes from its text alone is
 cached by content, so mounting it again is cheap. `mode="static"` renders the whole text
-in one pass, as Streamdown's static mode does, through rill too.
+in one pass, as Streamdown's static mode does, through rill too. With `animated`
+(Streamdown 2's word-by-word fade while an answer streams, with any of its options),
+rill runs the animation plugin's pass in Rust on the same shared timeline, so each word
+gets the span, duration and delay Streamdown would give it. (One difference: Streamdown
+keeps a block's elements as its words come and go, and React leaves an empty `style`
+behind on an element that had one. A block that turns to Streamdown's `Block` mid-answer,
+as raw HTML arrives, starts over with new elements, so those leftovers, which show
+nothing, are missing there.)
+
+The `remarkPlugins` and `rehypePlugins` pages add most often render on the fast path
+too, with no Rust: remark-breaks, remark-math with rehype-katex (`$x$` or only `$$x$$`),
+rehype-slug and rehype-external-links, after Streamdown's own plugins, as published or
+minified (see [Plugins on the prebuilt build](#plugins-on-the-prebuilt-build)).
 
 Anything rill doesn't reproduce exactly renders with Streamdown's own `Block`, the same
 way: raw HTML that needs the HTML5 parser (rill handles comments, phrasing tags, `<img>`
 and `<br>` with or without attributes, and tags sanitize removes around Markdown, such as
-custom elements or the Rust Book's `<Listing>`), `animated`, `allowedTags`, custom
+custom elements or the Rust Book's `<Listing>`), `allowedTags`, other
 `remarkPlugins`/`rehypePlugins` (bring them as a [custom build](#custom-builds) instead),
 `urlTransform` and the other Markdown filters, `fallbackComponent`, nesting deeper than
-256 levels (quotes, lists, emphasis, raw tags), `mode="static"` with `dir`, and every
-block until the WebAssembly has loaded (and on the server without `initRill`).
+256 levels (quotes, lists, emphasis, raw tags), `mode="static"` with `dir`, math while
+`animated` streams, and every block until the WebAssembly has loaded (and on the server
+without `initRill`). In development rill says so once per reason in the console, and
+`setFallbackListener` hears every one (see [Fallbacks](#fallbacks)).
 
 The other tiers stay:
 
@@ -294,15 +308,80 @@ The WebAssembly loads with `new URL("../wasm/rill_bg.wasm", import.meta.url)` as
 the browser evaluates `@2018kguo/rill/streamdown`; see [Setup per bundler](#setup-per-bundler)
 for where that resolves.
 
+### Plugins on the prebuilt build
+
+A GitHub code search in October 2026 (366 repositories that pass `<Streamdown>` lists of
+their own, out of 435 sampled; repositories per package, counting per-package searches)
+found these the most common: remark-gfm (77), remark-breaks (50), remark-math (42) with
+rehype-katex (40), Streamdown's own rehype-raw, rehype-harden and rehype-sanitize listed
+again (37, 30, 27), rehype-slug (11), remark-directive (9),
+remark-github-blockquote-alert (7) and rehype-external-links (5); 210 of the 366 also pass
+a plugin of their own. The drop-in renders these lists on the fast path with the prebuilt
+WebAssembly:
+
+| In `remarkPlugins` / `rehypePlugins` | rill |
+|---|---|
+| Streamdown's `defaultRemarkPlugins` / `defaultRehypePlugins` (spread, picked, or the same `remark-gfm` and `rehype-raw` imported again) | as Streamdown's, remarkCodeMeta optional; rehype-sanitize also with no options (hast-util-sanitize's schema) |
+| remark-breaks 4 | every line ending in text is a `<br>` |
+| remark-math 6 (`singleDollarTextMath` either way) with rehype-katex 7 (any options) | math parsed in Rust, KaTeX in JavaScript; `plugins.math` with `singleDollarTextMath: true` too |
+| rehype-slug 6 (`prefix`) after the chain | github-slugger's ids |
+| rehype-external-links 3 (`target`, `rel`, `protocols`) after the chain | `rel` and `target` on links to other sites |
+
+Plugins are found by name or, when a minifier renamed them, by the shape of their code,
+and each is then run once on a probe document next to rill's own version: if their
+output differs, the list renders with Streamdown and says so. Anything else in the lists
+(remark-directive, a plugin of your own, harden or sanitize with options of your own)
+renders all of the message's blocks with Streamdown, reported as `remarkPlugins` or
+`rehypePlugins` with the plugins' names.
+
+### Fallbacks
+
+Each block rill leaves to Streamdown's own `Block` has a reason. In development
+(`process.env.NODE_ENV !== "production"`), rill logs each reason once per page, for
+example:
+
+```
+[rill] rehypePlugins given (rehypeMermaid): these messages render with Streamdown (slow path). See https://github.com/2018kguo/rill#fallbacks.
+```
+
+Production builds drop the messages. For telemetry, `setFallbackListener` (from
+`@2018kguo/rill/streamdown`) hears every fallback, in production too, and costs nothing
+when unset:
+
+```ts
+import { setFallbackListener } from "@2018kguo/rill/streamdown";
+setFallbackListener((reason, detail) => track("rill-fallback", { reason, detail }));
+```
+
+| Reason | Why |
+|---|---|
+| `remarkPlugins`, `rehypePlugins` | lists with plugins rill does not know (`detail` names them; see above) |
+| `allowedTags`, `literalTagContent`, `disableAutolinkProtocols` | props that change Streamdown's plugin lists |
+| `allowElement`, `allowedElements`, `disallowedElements`, `skipHtml`, `unwrapDisallowed`, `urlTransform`, `remarkRehypeOptions` | Markdown filters rill does not run |
+| `fallbackComponent` | the prop is given |
+| `static-dir` | `mode="static"` with `dir` |
+| `engine-lists` | `<Streamdown engine>` given its own `remarkPlugins` or `rehypePlugins` |
+| `math-twice` | math in the engine or the lists, and `plugins.math` |
+| `animated-block-component`, `animated-options`, `animated-math` | `animated` with a `BlockComponent` of your own, with an `animation` or `easing` only a CSS parser reads (quotes, `;`, `!`), or math while it streams |
+| `raw-html` | raw HTML that needs the HTML5 parser |
+| `too-deep`, `too-long`, `surrogates` | nesting deeper than 256 levels, a block over 128K characters, lone surrogates or NUL |
+| `plugin-declined` | a custom build's Rust plugin (or rehype-slug after KaTeX, on a heading with math) left the block to JavaScript |
+| `math-without-katex` | a build's math with no KaTeX plugin to render it |
+| `incomplete-fence-components`, `incomplete-diagram` | a code fence still streaming next to components of your own or diagram renderers |
+| `unsupported-shape` | an element or property the markup does not reproduce |
+| `loading` (not logged), `server`, `load-failed`, `trapped`, `error` | the WebAssembly is not loaded yet, server rendering without `initRill`, the load failed, it crashed (rill stops calling it), or a render threw |
+
 ### What runs where
 
 | Stage | Package ported | Runs in |
 |---|---|---|
-| Parse | remark-parse 11, remark-gfm 4, Streamdown's remarkCodeMeta; `plugins.math`: remark-math 6 (`singleDollarTextMath: false`); `plugins.cjk`: remark-cjk-friendly 2.3 (and its strikethrough) and its autolink boundary | Rust |
+| Parse | remark-parse 11, remark-gfm 4, Streamdown's remarkCodeMeta; `plugins.math`: remark-math 6 (either dollar rule); `plugins.cjk`: remark-cjk-friendly 2.3 (and its strikethrough) and its autolink boundary; remark-breaks 4 | Rust |
 | MDAST → HAST | remark-rehype 11 (`allowDangerousHtml`) | Rust |
 | Raw HTML | rehype-raw 7 | Rust without raw HTML, else JavaScript |
 | Sanitize | rehype-sanitize 6, Streamdown 2.7.1's schema | Rust |
 | Harden | rehype-harden 1.1.8 with Streamdown's options | Rust |
+| After the chain | rehype-slug 6, rehype-external-links 3 | Rust |
+| Animation | `animated`: Streamdown 2.7.1's animate plugin | Rust |
 | Math | `plugins.math`: rehype-katex 7 | JavaScript |
 
 `render` reports how far it got:
@@ -444,9 +523,12 @@ Chromium, waits until both stop changing (highlighting included), and compares t
 React keeps apart). Configurations are `default`, `code` (`@streamdown/code`), `math`, `cjk` and
 `all`; variants cover `prefix`, `controls={false}`, `linkSafety` off, `lineNumbers`
 off, a `components` override, `dir="rtl"`, `mode="static"`, `caret`, a custom
-`BlockComponent` around `Block`, `translations` for the code controls' labels, and a copy
-icon of your own. With `--stream` it streams the chat corpus into one
-root with `isAnimating`, comparing after every Nth character.
+`BlockComponent` around `Block`, `translations` for the code controls' labels, a copy
+icon of your own, `animated` (`animated`, `animated-options`, on one clock for both
+sides), and the common plugins in the page's own lists (`breaks`, `slug`, `external`,
+`remark-math`, `math-single`, `extras`). With `--stream` it streams the chat corpus into
+one root with `isAnimating`, comparing after every Nth character. `conformance/diff.mjs`
+checks the plugins' trees too (`--config breaks`, `slug`, `external`, `math1`, `extras`).
 
 ### Benchmarks
 

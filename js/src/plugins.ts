@@ -87,12 +87,12 @@ export function rillPlugins(options: RillPluginsOptions) {
   const syntax: Syntax = {
     math: plugins.math !== undefined,
     cjk: plugins.cjk !== undefined,
+    // remark-math's own default is `$x$` math too (`@streamdown/math` turns it off).
+    singleDollar:
+      plugins.math !== undefined &&
+      optionsOf(plugins.math.remarkPlugin)?.singleDollarTextMath !== false,
   };
-  // rill parses `$$` only (remark-math's `singleDollarTextMath: false`).
-  const supported =
-    raw !== undefined &&
-    (plugins.math === undefined ||
-      optionsOf(plugins.math.remarkPlugin)?.singleDollarTextMath === false);
+  const supported = raw !== undefined;
   // Streamdown merges its `plugins` around these lists (index.tsx `mergedRemarkPlugins`):
   // what rill expects before and after its remark plugin.
   const expectedBefore = (plugins.cjk?.remarkPluginsBefore ?? []).map(

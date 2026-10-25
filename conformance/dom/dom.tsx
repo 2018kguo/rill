@@ -9,13 +9,21 @@ import { createRoot, type Root } from "react-dom/client";
 import { Block as StreamdownBlock, Streamdown } from "streamdown";
 import { cjk } from "@streamdown/cjk";
 import { code } from "@streamdown/code";
-import { math } from "@streamdown/math";
+import { createMathPlugin, math } from "@streamdown/math";
+import rehypeExternalLinks from "rehype-external-links";
+import rehypeKatex from "rehype-katex";
+import rehypeSlug from "rehype-slug";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { defaultRehypePlugins, defaultRemarkPlugins } from "streamdown";
 
 import {
   Block as RillBlock,
   blockRenders,
   highlightCounts,
   pendingHighlights,
+  setFallbackListener,
   setHighlightWasm,
   setRillHighlight,
   Streamdown as RillStreamdown,
@@ -81,6 +89,9 @@ const wrapBlock = (Block: ComponentType<Record<string, unknown>>) =>
 const ReferenceBlock = wrapBlock(StreamdownBlock as never);
 const CandidateBlock = wrapBlock(RillBlock as never);
 
+const REMARK = Object.values(defaultRemarkPlugins);
+const REHYPE = Object.values(defaultRehypePlugins);
+
 // Streamdown props per variant (beyond `plugins` and the document). `block` is set per
 // side below.
 const variants: Record<string, Record<string, unknown>> = {
@@ -102,6 +113,23 @@ const variants: Record<string, Record<string, unknown>> = {
   // own (the controls render through React from the start).
   labels: { translations: { copyCode: 'Copier "le" <code>', downloadFile: "Télécharger & garder" } },
   icons: { icons: { CopyIcon: OwnCopyIcon } },
+  // Streamdown 2's word animation while streaming (compare with --stream), with its
+  // defaults and with every option.
+  animated: { animated: true },
+  // The plugins pages add most (rill builds them in), as pages pass them.
+  breaks: { remarkPlugins: [remarkGfm, remarkBreaks] },
+  slug: { rehypePlugins: [...REHYPE, rehypeSlug] },
+  external: { rehypePlugins: [...REHYPE, [rehypeExternalLinks, { target: "_blank" }]], linkSafety: { enabled: false } },
+  "remark-math": { remarkPlugins: [...REMARK, remarkMath], rehypePlugins: [...REHYPE, rehypeKatex] },
+  "math-single": { plugins: { ...(config === "code" || config === "all" ? { code: countedCode } : {}), math: createMathPlugin({ singleDollarTextMath: true }) } },
+  extras: {
+    remarkPlugins: [...REMARK, remarkBreaks, remarkMath],
+    rehypePlugins: [...REHYPE, rehypeSlug, rehypeKatex, [rehypeExternalLinks, { target: "_blank", rel: ["noopener"] }]],
+    linkSafety: { enabled: false },
+  },
+  "animated-options": {
+    animated: { animation: "blurIn", duration: 320, easing: "cubic-bezier(0.4, 0, 0.2, 1)", sep: "char", stagger: 12, maxBacklogMs: 200 },
+  },
 };
 const variantProps = variants[variant];
 if (!variantProps) throw new Error(`unknown variant ${variant}`);
@@ -212,12 +240,19 @@ async function renderOne(component: Component, markdown: string, props: Record<s
   return html;
 }
 
+// With `animated`, delays come from the clock: both sides see the same one, advanced a
+// fixed step per update.
+let clock = 0;
+if (variant.startsWith("animated")) performance.now = () => clock;
+
 /** Renders `steps` (markdown, isAnimating) one after another into one root, like a
  * streamed answer, recording the settled HTML after each. */
 async function renderSteps(component: Component, steps: [string, boolean][]) {
   const { host, root } = mount();
   const out: string[] = [];
+  clock = 1000;
   for (const [markdown, isAnimating] of steps) {
+    clock += 23;
     root.render(
       createElement(
         component,
@@ -232,6 +267,12 @@ async function renderSteps(component: Component, steps: [string, boolean][]) {
   host.remove();
   return out;
 }
+
+// Why blocks went to Streamdown's own Block, by reason.
+const fallbacks: Record<string, number> = {};
+setFallbackListener((reason) => {
+  fallbacks[reason] = (fallbacks[reason] ?? 0) + 1;
+});
 
 const page = window as unknown as Record<string, unknown>;
 page.run = async (documents: string[]) => {
@@ -263,7 +304,7 @@ page.mount = (markdown: string, props: Record<string, unknown> = {}) => {
   host.id = "mounted";
   root.render(createElement(candidates[candidateName] as Component, { plugins, ...props }, markdown));
 };
-page.blockRenders = () => ({ ...blockRenders, highlights: highlightCounts() });
+page.blockRenders = () => ({ ...blockRenders, highlights: highlightCounts(), fallbacks });
 page.probe = async (markdown: string) => ({
   reference: await renderOne(Streamdown as never, markdown, {}),
   actual: await renderOne(candidates[candidateName] as Component, markdown, {}),

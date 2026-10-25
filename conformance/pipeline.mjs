@@ -5,12 +5,15 @@
 //   remark: cjk.remarkPluginsBefore, gfm, codeMeta, cjk.remarkPluginsAfter, math.remarkPlugin
 //   rehype: raw, sanitize, harden, math.rehypePlugin
 import { cjk } from "@streamdown/cjk";
-import { math } from "@streamdown/math";
+import { createMathPlugin, math } from "@streamdown/math";
 import { defaultSchema } from "hast-util-sanitize";
 import { harden } from "rehype-harden";
+import rehypeExternalLinks from "rehype-external-links";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize from "rehype-sanitize";
+import rehypeSlug from "rehype-slug";
+import remarkBreaks from "remark-breaks";
 import remarkCjkFriendly from "remark-cjk-friendly-1";
 import remarkCjkFriendlyGfmStrikethrough from "remark-cjk-friendly-gfm-strikethrough-1";
 import remarkGfm from "remark-gfm";
@@ -63,27 +66,46 @@ export const CLASSIC = {
   ],
 };
 
-/** Streamdown's `plugins` prop for each configuration the harness checks. */
+/** remark-math with its default `singleDollarTextMath: true`. */
+const math1 = createMathPlugin({ singleDollarTextMath: true });
+
+/** Plugins pages add to Streamdown's own (rill builds them in), after its lists. */
+const EXTRAS = {
+  breaks: { remark: [remarkBreaks], flags: ["--breaks"] },
+  slug: { rehype: [rehypeSlug], flags: ["--slug"] },
+  external: { rehype: [[rehypeExternalLinks, { target: "_blank" }]], flags: ["--external"] },
+};
+
+/** Streamdown's `plugins` prop for each configuration the harness checks, and plugins
+ * added to its lists (`extra`). */
 export const CONFIGS = {
   default: {},
   math: { math },
   cjk: { cjk },
   "math+cjk": { math, cjk },
   classic: CLASSIC,
+  math1: { math: math1 },
+  breaks: { extra: [EXTRAS.breaks] },
+  slug: { extra: [EXTRAS.slug] },
+  external: { extra: [EXTRAS.external] },
+  extras: { math: math1, cjk, extra: [EXTRAS.breaks, EXTRAS.slug, EXTRAS.external] },
 };
 
 /** The remark and rehype plugin lists `<Streamdown plugins={plugins}>` runs. */
 export function streamdownPlugins(plugins = {}) {
   if (plugins === CLASSIC) return CLASSIC;
+  const extra = plugins.extra ?? [];
   return {
     remarkPlugins: [
       ...(plugins.cjk?.remarkPluginsBefore ?? []),
       ...Object.values(defaultRemarkPlugins),
+      ...extra.flatMap((added) => added.remark ?? []),
       ...(plugins.cjk?.remarkPluginsAfter ?? []),
       ...(plugins.math ? [plugins.math.remarkPlugin] : []),
     ],
     rehypePlugins: [
       ...Object.values(defaultRehypePlugins),
+      ...extra.flatMap((added) => added.rehype ?? []),
       ...(plugins.math ? [plugins.math.rehypePlugin] : []),
     ],
   };
@@ -105,7 +127,12 @@ export function pipeline(name = "default") {
   /** What rill reports for this configuration's syntax (`stdio` flags). */
   const flags = classic
     ? ["--classic"]
-    : [...(plugins.math ? ["--math"] : []), ...(plugins.cjk ? ["--cjk"] : [])];
+    : [
+        ...(plugins.math ? ["--math"] : []),
+        ...(plugins.math === math1 ? ["--single-dollar"] : []),
+        ...(plugins.cjk ? ["--cjk"] : []),
+        ...(plugins.extra ?? []).flatMap((added) => added.flags),
+      ];
   /** What JavaScript still runs on rill's tree for each `kind`. */
   const tails = {
     complete: null,

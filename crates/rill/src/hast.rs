@@ -355,7 +355,7 @@ pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Value<'s>> {
 // ---------------------------------------------------------------------------
 
 /// Slices a `Cow`, keeping a borrow borrowed.
-fn slice_cow<'s>(value: &Cow<'s, str>, range: std::ops::Range<usize>) -> Cow<'s, str> {
+pub(crate) fn slice_cow<'s>(value: &Cow<'s, str>, range: std::ops::Range<usize>) -> Cow<'s, str> {
     match value {
         Cow::Borrowed(borrowed) => Cow::Borrowed(&borrowed[range]),
         Cow::Owned(owned) => Cow::Owned(owned[range].to_owned()),
@@ -524,6 +524,10 @@ struct ToHast<'t, 's> {
     code_meta: bool,
     /// The tree holds math for rehype-katex.
     math: bool,
+    /// A comment still streaming is simple too (see [`Options::close_open_raw`]).
+    open_comments: bool,
+    /// Whether each list converted so far is loose.
+    loose_lists: HashMap<NodeId, bool>,
 }
 
 impl<'s> ToHast<'_, 's> {
@@ -732,7 +736,12 @@ impl<'s> ToHast<'_, 's> {
                         | mdast::NodeKind::FootnoteDefinition(_)
                 );
                 // A comment ends where micromark's does and restructures nothing.
-                let simple = SimpleRaw::parse(value);
+                // One still streaming, only as the text's last node (in a container,
+                // what follows the raw node can join the comment).
+                let last = matches!(self.mdast.node(parent).kind, mdast::NodeKind::Root)
+                    && self.mdast.nodes[ix as usize].next == mdast::NIL;
+                let simple = SimpleRaw::parse(value)
+                    .filter(|_| (self.open_comments && last) || !SimpleRaw::open_comment(value));
                 let flow_ok = matches!(
                     simple,
                     Some(SimpleRaw::Comment | SimpleRaw::WrapOpen | SimpleRaw::WrapClose)
@@ -898,13 +907,18 @@ impl<'s> ToHast<'_, 's> {
                 spread: list_spread,
                 ..
             } => {
-                *list_spread
-                    || self.mdast.children(parent).any(|item| {
-                        matches!(
-                            self.mdast.node(item).kind,
-                            mdast::NodeKind::ListItem { spread: true, .. }
-                        )
-                    })
+                // mdast-util-to-hast's `listLoose` scans the list for every item: once
+                // per list here.
+                let mdast = self.mdast;
+                *self.loose_lists.entry(parent).or_insert_with(|| {
+                    *list_spread
+                        || mdast.children(parent).any(|item| {
+                            matches!(
+                                mdast.node(item).kind,
+                                mdast::NodeKind::ListItem { spread: true, .. }
+                            )
+                        })
+                })
             }
             _ => spread,
         };
@@ -1195,6 +1209,8 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
         katex: options.math,
         code_meta: options.code_meta,
         math: false,
+        open_comments: close_open_raw,
+        loose_lists: HashMap::new(),
     };
     state.collect(mdast::Tree::ROOT);
     let root = state.one(mdast::Tree::ROOT, mdast::Tree::ROOT).first;
@@ -1256,6 +1272,16 @@ enum SimpleRaw {
 }
 
 impl SimpleRaw {
+    /// A comment with no end, which parse5 ends where the raw node ends.
+    fn open_comment(value: &str) -> bool {
+        value.strip_prefix("<!--").is_some_and(|body| {
+            !body.starts_with('>')
+                && !body.starts_with("->")
+                && !body.contains("--!>")
+                && !body.contains("-->")
+        })
+    }
+
     fn parse(value: &str) -> Option<SimpleRaw> {
         if let Some(body) = value
             .strip_prefix("<!--")
@@ -1267,6 +1293,12 @@ impl SimpleRaw {
                 && !body.contains("--!>")
                 && !body.contains("-->");
             return plain.then_some(SimpleRaw::Comment);
+        }
+        // A comment still streaming (flow HTML runs to the end of its container): parse5
+        // ends it with the raw node, but leaves the root without a position, so only
+        // `Options::close_open_raw` takes it.
+        if Self::open_comment(value) {
+            return Some(SimpleRaw::Comment);
         }
         let inner = value.strip_prefix('<')?.strip_suffix('>')?;
         if let Some(name) = inner.strip_prefix('/') {
@@ -2764,9 +2796,19 @@ pub struct Options {
     /// remark-cjk-friendly 1.2.3 and its strikethrough after remark-gfm, as Streamdown 1.x
     /// attached them (see [`Syntax::legacy_cjk`]), in place of `cjk`.
     pub legacy_cjk: bool,
+    /// With `math`: remark-math's `singleDollarTextMath` (`$x$` is math too), its
+    /// default, which `@streamdown/math` turns off.
+    pub single_dollar: bool,
     /// Streamdown's remarkCodeMeta: a fence's meta string as `metastring` on `<code>`.
     /// On by default.
     pub code_meta: bool,
+    /// remark-breaks: every line ending in text is a `<br>`.
+    pub breaks: bool,
+    /// rehype-slug after the chain: an id on every heading.
+    pub slug: Option<crate::extras::Slug>,
+    /// rehype-external-links after the chain: `rel` and `target` on links to other
+    /// sites.
+    pub external_links: Option<crate::extras::ExternalLinks>,
     pub harden: Harden,
     pub sanitize: Sanitize,
     pub plugins: Vec<Box<dyn Plugin>>,
@@ -2774,6 +2816,8 @@ pub struct Options {
     /// its paragraph, cell, list item or heading, as parse5 does, instead of leaving the
     /// document to JavaScript. The element then has no position, so only output without
     /// positions ([`crate::render_markup`]) sets this.
+    /// A comment still streaming (no `-->` yet) is removed as parse5 and sanitize remove
+    /// it, too.
     pub close_open_raw: bool,
 }
 
@@ -2783,7 +2827,11 @@ impl Default for Options {
             math: false,
             cjk: false,
             legacy_cjk: false,
+            single_dollar: false,
             code_meta: true,
+            breaks: false,
+            slug: None,
+            external_links: None,
             harden: Harden::default(),
             sanitize: Sanitize::default(),
             plugins: Vec::new(),
@@ -2800,6 +2848,7 @@ impl Options {
             math: self.math,
             cjk: self.cjk,
             legacy_cjk: self.legacy_cjk,
+            single_dollar: self.math && self.single_dollar,
         }
     }
 }
@@ -3170,6 +3219,9 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
     if options.cjk {
         mdast::cjk_autolink_boundary(&mut mdast, mdast::Tree::ROOT);
     }
+    if options.breaks {
+        crate::extras::newline_to_break(&mut mdast);
+    }
     for plugin in &options.plugins {
         plugin.mdast(&mut mdast)?;
     }
@@ -3215,6 +3267,12 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         table_depth: 0,
     }
     .children(root);
+    if let Some(slug) = &options.slug {
+        crate::extras::slug_headings(&mut tree, root, slug).map_err(|()| Error::Unsupported)?;
+    }
+    if let Some(links) = &options.external_links {
+        crate::extras::external_links(&mut tree, root, links);
+    }
     for plugin in &options.plugins {
         plugin.hast(&mut tree, root, &context);
     }

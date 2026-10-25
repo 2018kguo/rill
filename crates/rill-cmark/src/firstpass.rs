@@ -866,7 +866,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         self.tree.append_text(begin_text, ix, backslash_escaped);
                         if self.syntax.math
                             && bytes[ix + 1] == b'$'
-                            && bytes.get(ix + 2) == Some(&b'$')
+                            && (self.syntax.single_dollar || bytes.get(ix + 2) == Some(&b'$'))
                         {
                             let count = 1 + scan_ch_repeat(&bytes[(ix + 2)..], b'$');
                             self.tree.append(Item {
@@ -958,9 +958,10 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 }
                 b'$' if self.syntax.math => {
                     // rill: micromark-extension-math text with `singleDollarTextMath: false`
-                    // is a code span of `$$`+ runs; a lone `$` is text.
+                    // is a code span of `$$`+ runs; a lone `$` is text. With it, a lone `$`
+                    // runs one too.
                     let count = 1 + scan_ch_repeat(&bytes[(ix + 1)..], b'$');
-                    if count >= 2 {
+                    if count >= 2 || self.syntax.single_dollar {
                         self.tree.append_text(begin_text, ix, backslash_escaped);
                         backslash_escaped = false;
                         self.tree.append(Item {

@@ -36,6 +36,8 @@ const variants: Record<string, Record<string, unknown>> = {
   nosafety: { linkSafety: { enabled: false } },
   rtl: { dir: "rtl" },
   streaming: { isAnimating: true, caret: "block" },
+  // Streamdown 2's animated, on the server while streaming.
+  animated: { isAnimating: true, animated: true },
   static: { mode: "static" },
   // The custom build (examples/custom-build), initialized on the server, against
   // Streamdown with its JavaScript plugins.
@@ -43,6 +45,8 @@ const variants: Record<string, Record<string, unknown>> = {
   "engine-static": { mode: "static" },
 };
 const variant = option("--variant", "default");
+// Delays after the first block's come from the clock: one that stands still for both.
+if (variant === "animated") performance.now = () => 1000;
 const props = { plugins, ...variants[variant] };
 
 await initRill(readFileSync(join(repo, "js/wasm/rill_bg.wasm")));
