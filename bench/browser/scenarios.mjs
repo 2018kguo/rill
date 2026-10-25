@@ -8,6 +8,10 @@ export const SCENARIOS = {
   table118: "scene=stream&doc=elements-118&chunk=24&overlay=0",
   // Stream the Rust Book's chapter 4 (56 KB), 24 characters a frame.
   chapter: "scene=stream&doc=ownership-chapter&chunk=24&overlay=0",
+  // Stream the chapter below a chat that already holds the 18 distinct answers.
+  "after-chapter": "scene=after&chat=distinct&doc=ownership-chapter&chunk=24&overlay=0",
+  // A realistic pace instead: 2,400 characters a second, below the same 18 answers.
+  "after-paced": "scene=after&chat=distinct&doc=ownership-chapter&rate=2400&overlay=0",
 };
 
 /** `name` (one of SCENARIOS) or `name=query` to [name, query]. */

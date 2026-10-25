@@ -176,7 +176,17 @@ $("engine").textContent = engineName;
 document.body.dataset.engine = engineName.includes("rill") ? "rill" : "streamdown";
 if (scene === "history") {
   (window as unknown as { go: () => void }).go = startHistory;
+  document.body.dataset.ready = "true";
+} else if (scene === "after") {
+  // A chat that already holds `turns` settled answers (mounted before the run, untimed),
+  // then one more answer streams below them: what a chat page does all day.
+  createRoot($("answer")).render(createElement("div", null, createElement(History), createElement("div", { className: "turn" }, createElement(Stream))));
+  // Ready once the history stopped changing (highlighting included) for 500 ms.
+  let quiet = performance.now();
+  new MutationObserver(() => (quiet = performance.now())).observe($("answer"), { subtree: true, childList: true, characterData: true, attributes: true });
+  const wait = () => (performance.now() - quiet > 500 ? (document.body.dataset.ready = "true") : setTimeout(wait, 100));
+  setTimeout(wait, 100);
 } else {
   createRoot($("answer")).render(createElement(Stream));
+  document.body.dataset.ready = "true";
 }
-document.body.dataset.ready = "true";
