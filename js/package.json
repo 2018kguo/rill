@@ -50,6 +50,10 @@
       "types": "./dist/react.d.ts",
       "default": "./dist/react.js"
     },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "default": "./dist/vite.js"
+    },
     "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm"
   },
   "files": [
