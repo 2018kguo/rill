@@ -669,9 +669,22 @@ struct Builder<'s> {
     exits: Vec<Exit>,
     /// Where plain text (image alts included) holds a code run micromark gave up on.
     failed_runs: Vec<u32>,
+    /// Each node's previous sibling when the builder appended it (`NIL` for a first
+    /// child), so a closing node finds it without walking its parent's children.
+    previous: Vec<NodeId>,
 }
 
 impl<'s> Builder<'s> {
+    /// Appends `ix` to `parent`, noting its previous sibling.
+    fn append(&mut self, parent: NodeId, ix: NodeId) {
+        let last = self.tree.nodes[parent as usize].last;
+        if self.previous.len() <= ix as usize {
+            self.previous.resize(ix as usize + 1, NIL);
+        }
+        self.previous[ix as usize] = last;
+        self.tree.append(parent, ix);
+    }
+
     /// Notes the code runs in plain text: micromark tried each as code and gave up.
     fn note_failed_run(&mut self, start: usize, end: usize) {
         let runs = code_runs(&self.tree.source[start..end], self.syntax.math)
@@ -695,7 +708,7 @@ impl<'s> Builder<'s> {
         self.flush_text()?;
         let parent = self.parent()?;
         let ix = self.tree.push(kind, at);
-        self.tree.append(parent, ix);
+        self.append(parent, ix);
         Ok(())
     }
 
@@ -705,7 +718,7 @@ impl<'s> Builder<'s> {
             let ix = self
                 .tree
                 .push(NodeKind::Text(value), At::Bytes(start as u32, end as u32));
-            self.tree.append(parent, ix);
+            self.append(parent, ix);
         }
         Ok(())
     }
@@ -743,7 +756,7 @@ impl<'s> Builder<'s> {
             return Err(Error::TooDeep);
         }
         let ix = self.tree.push(kind, At::None);
-        self.tree.append(parent, ix);
+        self.append(parent, ix);
         self.stack.push(Frame {
             node: ix,
             start,
@@ -1265,6 +1278,18 @@ impl<'s> Builder<'s> {
     }
 
     fn previous_sibling(&self, parent: NodeId, ix: NodeId) -> NodeId {
+        // Noted when appended, while the sibling links are still those it was appended
+        // with (no node is inserted before another while building).
+        if let Some(&previous) = self.previous.get(ix as usize) {
+            let linked = if previous == NIL {
+                self.tree.nodes[parent as usize].first == ix
+            } else {
+                self.tree.nodes[previous as usize].next == ix
+            };
+            if linked {
+                return previous;
+            }
+        }
         let mut previous = NIL;
         for child in self.tree.children(parent) {
             if child == ix {
@@ -1706,6 +1731,7 @@ pub fn parse_arena(source: &str, syntax: Syntax) -> Result<Tree<'_>, Error> {
         starts: Vec::new(),
         exits: Vec::new(),
         failed_runs: Vec::new(),
+        previous: Vec::new(),
     };
     let events = Parser::with_syntax(source, syntax).into_offset_iter();
     for (event, range) in events {

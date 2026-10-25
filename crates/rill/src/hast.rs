@@ -524,6 +524,8 @@ struct ToHast<'t, 's> {
     code_meta: bool,
     /// The tree holds math for rehype-katex.
     math: bool,
+    /// Whether each list converted so far is loose.
+    loose_lists: HashMap<NodeId, bool>,
 }
 
 impl<'s> ToHast<'_, 's> {
@@ -898,13 +900,18 @@ impl<'s> ToHast<'_, 's> {
                 spread: list_spread,
                 ..
             } => {
-                *list_spread
-                    || self.mdast.children(parent).any(|item| {
-                        matches!(
-                            self.mdast.node(item).kind,
-                            mdast::NodeKind::ListItem { spread: true, .. }
-                        )
-                    })
+                // mdast-util-to-hast's `listLoose` scans the list for every item: once
+                // per list here.
+                let mdast = self.mdast;
+                *self.loose_lists.entry(parent).or_insert_with(|| {
+                    *list_spread
+                        || mdast.children(parent).any(|item| {
+                            matches!(
+                                mdast.node(item).kind,
+                                mdast::NodeKind::ListItem { spread: true, .. }
+                            )
+                        })
+                })
             }
             _ => spread,
         };
@@ -1195,6 +1202,7 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
         katex: options.math,
         code_meta: options.code_meta,
         math: false,
+        loose_lists: HashMap::new(),
     };
     state.collect(mdast::Tree::ROOT);
     let root = state.one(mdast::Tree::ROOT, mdast::Tree::ROOT).first;
