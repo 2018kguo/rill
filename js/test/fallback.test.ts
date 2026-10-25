@@ -76,7 +76,6 @@ const CASES: [string, string, Record<string, unknown>][] = [
   ["fallbackComponent", "Some *text*.", { fallbackComponent: Fallback }],
   ["static-dir", "Some *text*.", { mode: "static", dir: "rtl" }],
   ["engine-lists", "Some *text*.", { engine: customEngine, engineArgs: ["/u", true], rehypePlugins: [rehypeOwn] }],
-  ["single-dollar-math", "Some $x$.", { plugins: { math: createMathPlugin({ singleDollarTextMath: true }) } }],
   ["math-twice", "Some $$x$$.", { engine: customEngine, engineArgs: ["/u", true], plugins: { math } }],
   ["raw-html", "<details><summary>a</summary>b</details>", {}],
   ["too-deep", `${"> ".repeat(300)}x`, {}],

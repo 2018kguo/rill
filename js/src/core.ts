@@ -16,8 +16,51 @@ export type RillKind = "complete" | "raw" | "math";
 
 /** The Streamdown `plugins` a render follows: `plugins.math` (`@streamdown/math` with
  * `singleDollarTextMath: false`) and `plugins.cjk` (`@streamdown/cjk`), on top of what the
- * build turns on itself. */
-export type Syntax = { math?: boolean; cjk?: boolean };
+ * build turns on itself; and the plugins of a page's own lists rill builds in (the
+ * prebuilt build: see `knownLists` in streamdown.ts). */
+export type Syntax = {
+  math?: boolean;
+  cjk?: boolean;
+  /** remark-math's `singleDollarTextMath` (its default). */
+  singleDollar?: boolean;
+  /** remark-breaks. */
+  breaks?: boolean;
+  /** `false`: no remarkCodeMeta. */
+  codeMeta?: boolean;
+  /** rehype-sanitize with its own default schema (no options). */
+  defaultSchema?: boolean;
+  /** rehype-slug after the chain: its prefix, and whether it runs after rehype-katex. */
+  slug?: { prefix: string; afterKatex: boolean };
+  /** rehype-external-links after the chain, its options resolved. */
+  externalLinks?: { target: string; rel: string[]; protocols: string[] };
+};
+
+/** `syntax` as the WebAssembly reads it (`rill::wasm::with_plugins`). */
+export function syntaxBits(syntax: Syntax): number {
+  return (
+    (syntax.math === true ? 1 : 0) |
+    (syntax.cjk === true ? 2 : 0) |
+    (syntax.singleDollar === true ? 4 : 0) |
+    (syntax.breaks === true ? 8 : 0) |
+    (syntax.codeMeta === false ? 16 : 0) |
+    (syntax.slug ? 32 : 0) |
+    (syntax.slug?.afterKatex ? 64 : 0) |
+    (syntax.externalLinks ? 128 : 0) |
+    (syntax.defaultSchema === true ? 256 : 0)
+  );
+}
+
+/** The strings `syntax`'s plugins take (`rill::wasm::with_plugins`). */
+export function syntaxExtra(syntax: Syntax): string {
+  const links = syntax.externalLinks;
+  if (!(syntax.slug || links)) return "";
+  return [
+    syntax.slug?.prefix ?? "",
+    links?.target ?? "",
+    links?.rel.join(" ") ?? "",
+    links?.protocols.join(" ") ?? "",
+  ].join("\0");
+}
 
 /** A build's extra arguments (`engineArgs`): values `wasm-bindgen` takes and that
  * compare by value. */
@@ -36,11 +79,11 @@ export type RenderedHast = {
 /** The exports `rill::wasm_exports!` makes, from a build's `wasm-bindgen` glue. */
 export type Glue<A extends Args = []> = {
   rillAbi(): number;
-  renderHast(source: string, math: boolean, cjk: boolean, ...args: A): RenderedHast;
+  renderHast(source: string, syntax: number, extra: string, ...args: A): RenderedHast;
   renderMarkup(
     source: string,
-    math: boolean,
-    cjk: boolean,
+    syntax: number,
+    extra: string,
     prefix: string,
     flags: number,
     overrides: string,
@@ -49,14 +92,14 @@ export type Glue<A extends Args = []> = {
     ...args: A
   ): RenderedHast;
   pieces(...args: A): boolean;
-  definitions(source: string, math: boolean, cjk: boolean, ...args: A): Uint32Array;
-  splitsAt(source: string, math: boolean, cjk: boolean, at: number, ...args: A): boolean;
+  definitions(source: string, syntax: number, ...args: A): Uint32Array;
+  splitsAt(source: string, syntax: number, at: number, ...args: A): boolean;
   remendStream(appended: string, reset: boolean): number;
   remendMiddle(): string;
 };
 
 /** The `rill::wasm::ABI` this package reads. */
-export const ABI = 4;
+export const ABI = 5;
 
 /** rill for one set of a build's arguments. */
 export type Rill = {
@@ -257,10 +300,10 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
         (options.spine ? 4 : 0) |
         (options.deep ? 128 : 0) |
         (options.katex ? 8 : 0) |
-        (options.incomplete ? 16 : 0) |
-        (syntax.math === true ? 32 : 0) |
-        (syntax.cjk === true ? 64 : 0);
-      const flagsKey = `${flags} ${options.prefix} ${options.overrides}`;
+        (options.incomplete ? 16 : 0);
+      const bits = syntaxBits(syntax);
+      const extra = syntaxExtra(syntax);
+      const flagsKey = `${flags} ${bits} ${extra} ${options.prefix} ${options.overrides}`;
       const animate = options.animate;
       // Streaming and animated renders are not kept: they do not repeat.
       const keep = !(options.spine || animate);
@@ -269,8 +312,8 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
       if (output === undefined) {
         const result = renderMarkup(
           source,
-          syntax.math === true,
-          syntax.cjk === true,
+          bits,
+          extra,
           options.prefix,
           (flags & 31) | (options.deep ? 32 : 0),
           options.overrides,
@@ -318,7 +361,7 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
         const transport = encoded.source.includes("\0")
           ? encoded.source.replaceAll("\0", "�")
           : encoded.source;
-        const result = renderHast(transport, syntax.math === true, syntax.cjk === true, ...args);
+        const result = renderHast(transport, syntaxBits(syntax), syntaxExtra(syntax), ...args);
         try {
           const kind = result.kind;
           if (kind === "unsupported") return null;
@@ -339,7 +382,7 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
         if (!source.isWellFormed() || source.includes("\0")) return null;
         let flat: Uint32Array;
         try {
-          flat = ranges(source, syntax.math === true, syntax.cjk === true, ...args);
+          flat = ranges(source, syntaxBits(syntax), ...args);
         } catch {
           return null;
         }
@@ -353,7 +396,7 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
       rill.splitsAt = (source: string, syntax: Syntax, at: number) => {
         if (!source.isWellFormed() || source.includes("\0")) return false;
         try {
-          return splitsAt(source, syntax.math === true, syntax.cjk === true, at, ...args);
+          return splitsAt(source, syntaxBits(syntax), at, ...args);
         } catch {
           return false;
         }

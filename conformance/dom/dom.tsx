@@ -9,7 +9,14 @@ import { createRoot, type Root } from "react-dom/client";
 import { Block as StreamdownBlock, Streamdown } from "streamdown";
 import { cjk } from "@streamdown/cjk";
 import { code } from "@streamdown/code";
-import { math } from "@streamdown/math";
+import { createMathPlugin, math } from "@streamdown/math";
+import rehypeExternalLinks from "rehype-external-links";
+import rehypeKatex from "rehype-katex";
+import rehypeSlug from "rehype-slug";
+import remarkBreaks from "remark-breaks";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import { defaultRehypePlugins, defaultRemarkPlugins } from "streamdown";
 
 import {
   Block as RillBlock,
@@ -82,6 +89,9 @@ const wrapBlock = (Block: ComponentType<Record<string, unknown>>) =>
 const ReferenceBlock = wrapBlock(StreamdownBlock as never);
 const CandidateBlock = wrapBlock(RillBlock as never);
 
+const REMARK = Object.values(defaultRemarkPlugins);
+const REHYPE = Object.values(defaultRehypePlugins);
+
 // Streamdown props per variant (beyond `plugins` and the document). `block` is set per
 // side below.
 const variants: Record<string, Record<string, unknown>> = {
@@ -106,6 +116,17 @@ const variants: Record<string, Record<string, unknown>> = {
   // Streamdown 2's word animation while streaming (compare with --stream), with its
   // defaults and with every option.
   animated: { animated: true },
+  // The plugins pages add most (rill builds them in), as pages pass them.
+  breaks: { remarkPlugins: [remarkGfm, remarkBreaks] },
+  slug: { rehypePlugins: [...REHYPE, rehypeSlug] },
+  external: { rehypePlugins: [...REHYPE, [rehypeExternalLinks, { target: "_blank" }]], linkSafety: { enabled: false } },
+  "remark-math": { remarkPlugins: [...REMARK, remarkMath], rehypePlugins: [...REHYPE, rehypeKatex] },
+  "math-single": { plugins: { ...(config === "code" || config === "all" ? { code: countedCode } : {}), math: createMathPlugin({ singleDollarTextMath: true }) } },
+  extras: {
+    remarkPlugins: [...REMARK, remarkBreaks, remarkMath],
+    rehypePlugins: [...REHYPE, rehypeSlug, rehypeKatex, [rehypeExternalLinks, { target: "_blank", rel: ["noopener"] }]],
+    linkSafety: { enabled: false },
+  },
   "animated-options": {
     animated: { animation: "blurIn", duration: 320, easing: "cubic-bezier(0.4, 0, 0.2, 1)", sep: "char", stagger: 12, maxBacklogMs: 200 },
   },

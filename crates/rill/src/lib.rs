@@ -8,6 +8,7 @@
 //! that against remark itself.
 
 pub mod animate;
+pub mod extras;
 pub mod hast;
 pub mod markup;
 pub mod mdast;
@@ -38,7 +39,7 @@ pub mod wasm {
 
     /// The boundary's version, which the JavaScript package checks before it calls
     /// anything else.
-    pub const ABI: u32 = 4;
+    pub const ABI: u32 = 5;
 
     /// One rendered document: how far Rust took it (a [`crate::Kind`], `"markup"`, a
     /// [`crate::Fallback`]'s name where only Streamdown renders a block exactly, or
@@ -86,13 +87,47 @@ pub mod wasm {
         }
     }
 
-    /// `options` with Streamdown's `plugins.math` and `plugins.cjk` as the JavaScript
-    /// package passes them, on top of the build's own.
+    /// `options` with the plugins the JavaScript package found in `<Streamdown>`'s
+    /// props, on top of the build's own. `syntax`: bit 0 `plugins.math` (or
+    /// remark-math), 1 `plugins.cjk`, 2 remark-math's `singleDollarTextMath`, 3
+    /// remark-breaks, 4 no remarkCodeMeta, 5 rehype-slug, 6 rehype-slug after
+    /// rehype-katex, 7 rehype-external-links, 8 rehype-sanitize's own default schema.
+    /// `extra`: rehype-slug's prefix, then rehype-external-links' target, rel and
+    /// protocols (space-separated), joined by NUL.
     #[doc(hidden)]
     #[must_use]
-    pub fn with_plugins(mut options: Options, math: bool, cjk: bool) -> Options {
-        options.math |= math;
-        options.cjk |= cjk;
+    pub fn with_plugins(mut options: Options, syntax: u32, extra: &str) -> Options {
+        let bit = |n: u32| syntax & (1 << n) != 0;
+        options.math |= bit(0);
+        options.cjk |= bit(1);
+        options.single_dollar |= bit(2);
+        options.breaks |= bit(3);
+        if bit(4) {
+            options.code_meta = false;
+        }
+        if bit(8) {
+            options.sanitize.schema = crate::Schema::Default;
+        }
+        if bit(5) || bit(7) {
+            let mut fields = extra.split('\0');
+            let prefix = fields.next().unwrap_or_default();
+            if bit(5) {
+                options.slug = Some(crate::extras::Slug {
+                    prefix: prefix.to_owned(),
+                    after_katex: bit(6),
+                });
+            }
+            if bit(7) {
+                let mut next = || fields.next().unwrap_or_default();
+                let target = next();
+                let tokens = |list: &str| list.split_whitespace().map(str::to_owned).collect();
+                options.external_links = Some(crate::extras::ExternalLinks {
+                    target: (!target.is_empty()).then(|| target.to_owned()),
+                    rel: tokens(next()),
+                    protocols: tokens(next()),
+                });
+            }
+        }
         options
     }
 
@@ -114,12 +149,14 @@ pub mod wasm {
 
     /// Streamdown's DOM for one block (see [`crate::markup`]). `flags`: bit 0
     /// `linkSafety.enabled`, bit 1 server rendering, bit 2 the streaming spine, bit 3
-    /// KaTeX available, bit 4 an incomplete code fence, bit 5 every element through React; `overrides`: the tag names with
-    /// components of the page's own, space-separated. `animate`, while `animated`
-    /// streams: the animation, duration and easing joined by NUL; `timing`: `sep: "char"`
-    /// (0 or 1), the stagger, the units already shown, the timeline's cursor, the clock
-    /// and the backlog (see [`crate::animate::Animate`]).
+    /// KaTeX available, bit 4 an incomplete code fence, bit 5 every element through
+    /// React; `overrides`: the tag names with components of the page's own,
+    /// space-separated. `animate`, while `animated` streams: the animation, duration and
+    /// easing joined by NUL; `timing`: `sep: "char"` (0 or 1), the stagger, the units
+    /// already shown, the timeline's cursor, the clock and the backlog (see
+    /// [`crate::animate::Animate`]).
     #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
     pub fn render_markup(
         source: &str,
         mut options: Options,
@@ -258,31 +295,32 @@ macro_rules! wasm_exports {
             $crate::wasm::ABI
         }
 
-        /// The HAST for `source`, with Streamdown's `plugins.math` and `plugins.cjk` as
-        /// given.
+        /// The HAST for `source`, with the plugins `syntax` and `extra` add (see
+        /// `rill::wasm::with_plugins`).
         #[$crate::wasm::wasm_bindgen::prelude::wasm_bindgen(
             js_name = renderHast,
             wasm_bindgen = $crate::wasm::wasm_bindgen
         )]
         pub fn __rill_render_hast(
             source: &str,
-            math: bool,
-            cjk: bool,
+            syntax: u32,
+            extra: &str,
             $($arg: $ty),*
         ) -> Result<$crate::wasm::RenderedHast, $crate::wasm::wasm_bindgen::JsError> {
             let options: $crate::Options = $options;
-            $crate::wasm::render_hast(source, &$crate::wasm::with_plugins(options, math, cjk))
+            $crate::wasm::render_hast(source, &$crate::wasm::with_plugins(options, syntax, extra))
         }
 
         /// Streamdown's DOM for one block (see `rill::wasm::render_markup`).
+        #[allow(clippy::too_many_arguments)]
         #[$crate::wasm::wasm_bindgen::prelude::wasm_bindgen(
             js_name = renderMarkup,
             wasm_bindgen = $crate::wasm::wasm_bindgen
         )]
         pub fn __rill_render_markup(
             source: &str,
-            math: bool,
-            cjk: bool,
+            syntax: u32,
+            extra: &str,
             prefix: String,
             flags: u32,
             overrides: &str,
@@ -293,7 +331,7 @@ macro_rules! wasm_exports {
             let options: $crate::Options = $options;
             $crate::wasm::render_markup(
                 source,
-                $crate::wasm::with_plugins(options, math, cjk),
+                $crate::wasm::with_plugins(options, syntax, extra),
                 prefix,
                 flags,
                 overrides,
@@ -318,9 +356,9 @@ macro_rules! wasm_exports {
             js_name = definitions,
             wasm_bindgen = $crate::wasm::wasm_bindgen
         )]
-        pub fn __rill_definitions(source: &str, math: bool, cjk: bool, $($arg: $ty),*) -> Vec<u32> {
+        pub fn __rill_definitions(source: &str, syntax: u32, $($arg: $ty),*) -> Vec<u32> {
             let options: $crate::Options = $options;
-            $crate::wasm::definitions(source, &$crate::wasm::with_plugins(options, math, cjk))
+            $crate::wasm::definitions(source, &$crate::wasm::with_plugins(options, syntax, ""))
         }
 
         /// Whether no root child of `source` spans UTF-16 offset `at`.
@@ -330,13 +368,12 @@ macro_rules! wasm_exports {
         )]
         pub fn __rill_splits_at(
             source: &str,
-            math: bool,
-            cjk: bool,
+            syntax: u32,
             at: u32,
             $($arg: $ty),*
         ) -> bool {
             let options: $crate::Options = $options;
-            let options = $crate::wasm::with_plugins(options, math, cjk);
+            let options = $crate::wasm::with_plugins(options, syntax, "");
             $crate::mdast::splits_at(source, options.syntax(), at)
         }
 

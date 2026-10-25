@@ -115,18 +115,8 @@ fn cjk(c: char) -> bool {
     if c < 0x2e80 {
         return false;
     }
-    match CJK.binary_search_by(|&(start, end)| {
-        if end < c {
-            std::cmp::Ordering::Less
-        } else if start > c {
-            std::cmp::Ordering::Greater
-        } else {
-            std::cmp::Ordering::Equal
-        }
-    }) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    let after = CJK.partition_point(|&(start, _)| start <= c);
+    after > 0 && c <= CJK[after - 1].1
 }
 
 fn units(text: &str) -> u32 {
@@ -338,7 +328,7 @@ impl<'s> Pass<'_, '_, 's> {
                     continue;
                 }
                 changed = true;
-                self.text(&text, &mut out);
+                self.text(text, &mut out);
                 continue;
             }
             out.push(child);
@@ -370,9 +360,9 @@ impl<'s> Pass<'_, '_, 's> {
     }
 
     /// `processTextNode`: the text's units as spans (spaces alone stay text).
-    fn text(&mut self, text: &Cow<'s, str>, out: &mut Vec<NodeId>) {
+    fn text(&mut self, text: Cow<'s, str>, out: &mut Vec<NodeId>) {
         let mut ranges = std::mem::take(&mut self.ranges);
-        parts(text, self.animate.by_char, &mut ranges);
+        parts(&text, self.animate.by_char, &mut ranges);
         let item = self
             .ancestors
             .iter()
@@ -384,7 +374,7 @@ impl<'s> Pass<'_, '_, 's> {
             _ => false,
         });
         for &(start, end) in &ranges {
-            let part = hast::slice_cow(text, start..end);
+            let part = hast::slice_cow(&text, start..end);
             let at = self.count;
             self.count += units(&part);
             if blank(&part) {

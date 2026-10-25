@@ -51,7 +51,15 @@ import type { Pluggable } from "unified";
 
 import { parseMarkdownIntoBlocks, splitDefinitionBlock } from "./blocks.ts";
 import { CodeSegment, shellLabels, type ShellLabels } from "./code-block.ts";
-import { argsKey, HastReader, type Args, type HastNode, type MarkupOptions, type Rill } from "./core.ts";
+import {
+  argsKey,
+  HastReader,
+  type Args,
+  type HastNode,
+  type MarkupOptions,
+  type Rill,
+  type Syntax,
+} from "./core.ts";
 import type { Engine, Pipeline } from "./engine.ts";
 import { rillEngine } from "./index.ts";
 import { highlighterFor, type Highlighter } from "./highlight.ts";
@@ -60,6 +68,7 @@ import { mathFragments } from "./math.ts";
 import { DEFAULT_MAX_SOURCE_LENGTH, optionsOf } from "./plugins.ts";
 import { load, loadFailed, pluginsFor } from "./react.ts";
 import { reportFallback, type FallbackReason } from "./fallback.ts";
+import { knownLists } from "./known.ts";
 import {
   animatedKey,
   beginPass,
@@ -118,6 +127,8 @@ type Settings = {
   engine: Engine<Args>;
   /** Why the blocks' plugin lists are not the engine's, when the props say. */
   lists: Why | null;
+  /** The plugins of the page's own lists the prebuilt build renders itself. */
+  syntax: Syntax | null;
   /** The remark and rehype plugins Streamdown merges `plugins` around (the engine's). */
   expected: Merged;
   /** The engine's plugins are Streamdown's defaults: the blocks rill does not render as
@@ -272,6 +283,23 @@ function listProps(pipeline: Pipeline): Partial<BaseStreamdownProps> {
     : { remarkPlugins: pipeline.remarkPlugins, rehypePlugins: pipeline.rehypePlugins };
 }
 
+const givenPipelines = new WeakMap<object, WeakMap<object, Pipeline>>();
+
+/** A page's own lists as a pipeline: the same object for the same lists. */
+function givenPipeline(remark: PluggableList, rehype: PluggableList): Pipeline {
+  let byRehype = givenPipelines.get(remark);
+  if (!byRehype) {
+    byRehype = new WeakMap();
+    givenPipelines.set(remark, byRehype);
+  }
+  let found = byRehype.get(rehype);
+  if (!found) {
+    found = { remarkPlugins: remark, rehypePlugins: rehype };
+    byRehype.set(rehype, found);
+  }
+  return found;
+}
+
 /** A static text as one block, which `Block` renders whole. */
 const staticBlocks = (text: string): string[] => [text];
 
@@ -325,14 +353,36 @@ export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<A
   useLayoutEffect(() => {
     if (isAnimating) animation.current?.timeline.commitPass();
   });
+  // A page's own lists that the prebuilt build knows (see known.ts) render through rill
+  // as Streamdown's do.
+  const known =
+    !props.engine && rill && ownLists
+      ? knownLists(
+          rill,
+          (props.remarkPlugins ?? REMARK_DEFAULTS) as unknown[],
+          (props.rehypePlugins ?? REHYPE_DEFAULTS) as unknown[],
+          Boolean(plugins?.math)
+        )
+      : null;
+  const recognized = known && "syntax" in known ? known : null;
+  const blockLists = recognized
+    ? givenPipeline(props.remarkPlugins ?? REMARK_DEFAULTS, props.rehypePlugins ?? REHYPE_DEFAULTS)
+    : pipeline;
   const settings = useMemo<Settings>(
     () => ({
       rill,
       engine,
-      lists: listsWhy(props, pipeline),
-      expected: merged(plugins, pipeline),
-      defaults: listProps(pipeline).remarkPlugins === undefined,
-      math: engineMath && plugins?.math ? MATH_TWICE : (engineMath ?? plugins?.math?.rehypePlugin),
+      lists: known && !recognized ? (known as Why) : listsWhy(props, pipeline),
+      syntax: recognized?.syntax ?? null,
+      expected: merged(plugins, blockLists),
+      defaults: listProps(pipeline).remarkPlugins === undefined && !ownLists,
+      math: recognized?.katex
+        ? plugins?.math
+          ? MATH_TWICE
+          : recognized.katex
+        : engineMath && plugins?.math
+          ? MATH_TWICE
+          : (engineMath ?? plugins?.math?.rehypePlugin),
       static: staticMode ? { isAnimating } : null,
       plugins,
       cn: createCn(prefix),
@@ -344,7 +394,7 @@ export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<A
       animation: animation.current,
     }),
     // biome-ignore lint/correctness/useExhaustiveDependencies: translations by value
-    [rill, engine, animation.current, pipeline, props.remarkPlugins, props.rehypePlugins, props.allowedTags, props.literalTagContent, props.disableAutolinkProtocols, engineMath, staticMode, isAnimating, plugins, prefix, fallbackComponent, whole, ownIcons, translationsKey]
+    [rill, engine, known, blockLists, animation.current, pipeline, props.remarkPlugins, props.rehypePlugins, props.allowedTags, props.literalTagContent, props.disableAutolinkProtocols, engineMath, staticMode, isAnimating, plugins, prefix, fallbackComponent, whole, ownIcons, translationsKey]
   );
   // Streamdown repairs streaming Markdown with remend before splitting it into blocks;
   // rill's port gives the same text, so Streamdown is told not to.
@@ -532,7 +582,7 @@ function overridesOf(components: Record<string, unknown> | undefined): string {
   return found;
 }
 
-type Plan = {
+type Plan = Syntax & {
   overrides: string;
   math: boolean;
   cjk: boolean;
@@ -559,13 +609,6 @@ function planFor(
     return settings.lists ?? { reason: "rehypePlugins" };
   }
   if (settings.math === MATH_TWICE) return { reason: "math-twice" };
-  // rill parses `$$` only (remark-math's `singleDollarTextMath: false`).
-  if (
-    plugins?.math &&
-    optionsOf(plugins.math.remarkPlugin)?.singleDollarTextMath !== false
-  ) {
-    return { reason: "single-dollar-math" };
-  }
   let overrides = overridesOf(props.components as Record<string, unknown>);
   // A custom modal renders next to each link button: Streamdown's link component.
   if (renderModal) overrides += " a";
@@ -576,9 +619,14 @@ function planFor(
     return { reason: "incomplete-diagram" };
   }
   return {
+    ...settings.syntax,
     overrides,
-    math: Boolean(plugins?.math),
+    math: Boolean(plugins?.math) || settings.syntax?.math === true,
     cjk: Boolean(plugins?.cjk),
+    // `plugins.math` with remark-math's own default, `$x$` math too.
+    ...(plugins?.math && optionsOf(plugins.math.remarkPlugin)?.singleDollarTextMath !== false
+      ? { singleDollar: true }
+      : {}),
     katex: settings.math !== undefined,
     incomplete: props.isIncomplete && overrides.trim() !== "",
   };
@@ -858,8 +906,9 @@ export const Block = memo(function Block(props: BlockProps) {
     }
     // A text with link definitions is one block, which a message that streams renders as
     // pieces (an update renders the last one); one that does not renders it in one call.
+    // rehype-slug numbers repeated headings across the whole block.
     const chunks =
-      !settings.whole && rill.definitions && rill.splitsAt && content.length <= DEFAULT_MAX_SOURCE_LENGTH
+      !settings.whole && !plan.slug && rill.definitions && rill.splitsAt && content.length <= DEFAULT_MAX_SOURCE_LENGTH
         ? splitDefinitionBlock(content)
         : null;
     if (chunks) {

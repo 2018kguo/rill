@@ -687,8 +687,8 @@ impl<'s> Builder<'s> {
 
     /// Notes the code runs in plain text: micromark tried each as code and gave up.
     fn note_failed_run(&mut self, start: usize, end: usize) {
-        let runs = code_runs(&self.tree.source[start..end], self.syntax.math)
-            .map(|at| (start + at) as u32);
+        let runs =
+            code_runs(&self.tree.source[start..end], self.syntax).map(|at| (start + at) as u32);
         self.failed_runs.extend(runs);
     }
 
@@ -1839,12 +1839,15 @@ fn crossed_in_paragraph(
     }
 }
 
-/// Where `text` (source) holds a `` ` `` (or, with `math`, `$$`) that no backslash escapes.
-fn code_runs(text: &str, math: bool) -> impl Iterator<Item = usize> + '_ {
+/// Where `text` (source) holds a `` ` `` (or, with `math`, `$$`, or `$` with
+/// `single_dollar`) that no backslash escapes.
+fn code_runs(text: &str, syntax: Syntax) -> impl Iterator<Item = usize> + '_ {
     let bytes = text.as_bytes();
     (0..bytes.len()).filter(move |&at| {
-        let run =
-            bytes[at] == b'`' || math && bytes[at] == b'$' && bytes.get(at + 1) == Some(&b'$');
+        let run = bytes[at] == b'`'
+            || syntax.math
+                && bytes[at] == b'$'
+                && (syntax.single_dollar || bytes.get(at + 1) == Some(&b'$'));
         run && bytes[..at]
             .iter()
             .rev()

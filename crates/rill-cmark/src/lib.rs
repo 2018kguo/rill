@@ -70,6 +70,9 @@ pub struct Syntax {
     /// them still do), in place of `cjk`'s rules: their flanking, and attention for `_`
     /// before GFM's email literal.
     pub legacy_cjk: bool,
+    /// With `math`: remark-math's `singleDollarTextMath` (its default): `$x$` is math
+    /// too.
+    pub single_dollar: bool,
 }
 
 impl Syntax {

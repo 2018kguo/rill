@@ -2796,9 +2796,19 @@ pub struct Options {
     /// remark-cjk-friendly 1.2.3 and its strikethrough after remark-gfm, as Streamdown 1.x
     /// attached them (see [`Syntax::legacy_cjk`]), in place of `cjk`.
     pub legacy_cjk: bool,
+    /// With `math`: remark-math's `singleDollarTextMath` (`$x$` is math too), its
+    /// default, which `@streamdown/math` turns off.
+    pub single_dollar: bool,
     /// Streamdown's remarkCodeMeta: a fence's meta string as `metastring` on `<code>`.
     /// On by default.
     pub code_meta: bool,
+    /// remark-breaks: every line ending in text is a `<br>`.
+    pub breaks: bool,
+    /// rehype-slug after the chain: an id on every heading.
+    pub slug: Option<crate::extras::Slug>,
+    /// rehype-external-links after the chain: `rel` and `target` on links to other
+    /// sites.
+    pub external_links: Option<crate::extras::ExternalLinks>,
     pub harden: Harden,
     pub sanitize: Sanitize,
     pub plugins: Vec<Box<dyn Plugin>>,
@@ -2817,7 +2827,11 @@ impl Default for Options {
             math: false,
             cjk: false,
             legacy_cjk: false,
+            single_dollar: false,
             code_meta: true,
+            breaks: false,
+            slug: None,
+            external_links: None,
             harden: Harden::default(),
             sanitize: Sanitize::default(),
             plugins: Vec::new(),
@@ -2834,6 +2848,7 @@ impl Options {
             math: self.math,
             cjk: self.cjk,
             legacy_cjk: self.legacy_cjk,
+            single_dollar: self.math && self.single_dollar,
         }
     }
 }
@@ -3204,6 +3219,9 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
     if options.cjk {
         mdast::cjk_autolink_boundary(&mut mdast, mdast::Tree::ROOT);
     }
+    if options.breaks {
+        crate::extras::newline_to_break(&mut mdast);
+    }
     for plugin in &options.plugins {
         plugin.mdast(&mut mdast)?;
     }
@@ -3249,6 +3267,12 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         table_depth: 0,
     }
     .children(root);
+    if let Some(slug) = &options.slug {
+        crate::extras::slug_headings(&mut tree, root, slug).map_err(|()| Error::Unsupported)?;
+    }
+    if let Some(links) = &options.external_links {
+        crate::extras::external_links(&mut tree, root, links);
+    }
     for plugin in &options.plugins {
         plugin.hast(&mut tree, root, &context);
     }

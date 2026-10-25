@@ -78,6 +78,15 @@ jobs:
           node conformance/diff.mjs --config classic --pieces '["_","__","a@b.co","x","*","[t](tel:+1)","<a id=\"x\">","</a>","[^a]","\n\n[^a]: n"]' --length 4
           # Indented code on micromark's lazy line: after a container that did not continue.
           node conformance/diff.mjs --pieces '["> ","- ","1. ",">\n","    a\n","a\n","\n","```\n"]' --length 5
+          # Plugins pages add to Streamdown's (rill builds them in): remark-breaks, rehype-slug,
+          # rehype-external-links, remark-math's single dollar.
+          for config in breaks slug external math1 extras; do
+            node conformance/diff.mjs --config "$config"
+          done
+          node conformance/diff.mjs --config math1 --alphabet '$\`a \n' --length 6
+          node conformance/diff.mjs --config breaks --pieces '["a","\n","\r\n","\r","  ","\\\\","*","[x](y)","> ","- ","`","<br>"]' --length 4
+          node conformance/diff.mjs --config slug --pieces '["# Hello World\n","## Hello World\n","### *x* `c` 中😀! a_b-c\n","#### hello-world-1\n","Title\n---\n","\n","text\n","> ","- ","<h2 id=\"q\">x</h2>\n"]' --length 4
+          node conformance/diff.mjs --config external --pieces '["[a](","https://x.com","//z.org","HTTP://Q","mailto:a@b.c","/p","#f",")","<https://x.com>","www.w.com"," "]' --length 3
           # @streamdown/cjk: autolink literals end at CJK punctuation; the rest is relinked.
           node conformance/diff.mjs --config cjk --pieces '["https://x.com/a","www.y.org","a@b.co","。","，","（","）","中","<",">","](https://x.com/b。c)"," "]' --length 4
       - name: remend (Streamdown's streaming repair) against the package
@@ -100,6 +109,14 @@ jobs:
             node conformance/dom/dom-diff.mjs --config code --variant "$variant"
           done
           node conformance/dom/dom-diff.mjs --config code --stream every=60,short=1
+          # Streamdown 2's animated, streamed (one clock for both sides).
+          for variant in animated animated-options; do
+            node conformance/dom/dom-diff.mjs --config code --variant "$variant" --stream every=60,short=1
+          done
+          # The plugins pages add most, in the page's own lists.
+          for variant in breaks slug external remark-math math-single extras; do
+            node conformance/dom/dom-diff.mjs --config code --variant "$variant"
+          done
           # A custom build (examples/custom-build) against Streamdown with its JavaScript plugins.
           for variant in engine engine-static; do
             node conformance/dom/dom-diff.mjs --config code --variant "$variant"

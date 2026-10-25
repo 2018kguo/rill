@@ -10,9 +10,8 @@
  *   `literalTagContent`, `disableAutolinkProtocols`, `allowElement`, `allowedElements`,
  *   `disallowedElements`, `skipHtml`, `unwrapDisallowed`, `urlTransform`,
  *   `remarkRehypeOptions`, `fallbackComponent`, `static-dir` (`mode="static"` with `dir`),
- *   `engine-lists` (`<Streamdown engine>` with lists of its own), `single-dollar-math`
- *   (`plugins.math` without `singleDollarTextMath: false`), `math-twice` (an engine with
- *   math of its own and `plugins.math`), `animated-block-component` (`animated` with a
+ *   `engine-lists` (`<Streamdown engine>` with lists of its own), `math-twice` (math in
+ *   the engine or the page's lists, and `plugins.math`), `animated-block-component` (`animated` with a
  *   `BlockComponent` of the page's own), `animated-options` (an `animation` or `easing`
  *   with characters only a CSS parser reads).
  * - The block's text: `raw-html` (raw HTML that needs the HTML5 parser), `too-deep`
@@ -42,7 +41,6 @@ export type FallbackReason =
   | "fallbackComponent"
   | "static-dir"
   | "engine-lists"
-  | "single-dollar-math"
   | "math-twice"
   | "animated-block-component"
   | "animated-options"
@@ -99,8 +97,6 @@ function message(reason: FallbackReason, detail: string | undefined): string {
         return 'mode="static" with dir';
       case "engine-lists":
         return "<Streamdown engine> given remarkPlugins or rehypePlugins (the engine brings its own)";
-      case "single-dollar-math":
-        return "plugins.math without singleDollarTextMath: false";
       case "math-twice":
         return "an engine with math of its own and plugins.math";
       case "animated-block-component":

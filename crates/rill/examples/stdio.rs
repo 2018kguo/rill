@@ -1,6 +1,8 @@
 //! Conformance driver: reads records of `<byte length>\n<source>` from stdin and writes one
 //! line per record, `{"mdast":…,"hast":{"kind":…,"tree":…}}` or `{"error":"…"}`. `--math`
-//! and `--cjk` turn on Streamdown's `plugins.math` and `plugins.cjk`; `--classic` is
+//! and `--cjk` turn on Streamdown's `plugins.math` and `plugins.cjk` (`--single-dollar`:
+//! remark-math's default `singleDollarTextMath`); `--breaks`, `--slug` and `--external`
+//! remark-breaks, rehype-slug and rehype-external-links with `target: "_blank"`; `--classic` is
 //! Streamdown 1.x's default plugins (conformance/pipeline.mjs `CLASSIC`).
 
 use std::io::{self, BufRead, Read, Write};
@@ -24,9 +26,17 @@ fn main() -> io::Result<()> {
             ..rill::Options::default()
         }
     } else {
+        let flag = |name: &str| flags.iter().any(|flag| flag == name);
         rill::Options {
-            math: flags.iter().any(|flag| flag == "--math"),
-            cjk: flags.iter().any(|flag| flag == "--cjk"),
+            math: flag("--math"),
+            cjk: flag("--cjk"),
+            single_dollar: flag("--single-dollar"),
+            breaks: flag("--breaks"),
+            slug: flag("--slug").then(rill::extras::Slug::default),
+            external_links: flag("--external").then(|| rill::extras::ExternalLinks {
+                target: Some("_blank".to_owned()),
+                ..rill::extras::ExternalLinks::default()
+            }),
             ..rill::Options::default()
         }
     };
