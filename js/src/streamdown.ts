@@ -729,7 +729,8 @@ export const Block = memo(function Block(props: BlockProps) {
   const activator =
     link && typeof document !== "undefined"
       ? createElement(LinkActivator, {
-          key: link.id,
+          // Not a number: the blocks beside it are keyed by their index.
+          key: `link:${link.id}`,
           href: link.href,
           host: (host.current ??= document.createElement("div")),
         })
