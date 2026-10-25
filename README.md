@@ -74,13 +74,37 @@ The other tiers stay:
 - `@2018kguo/rill/plugins` (also exported from `/streamdown`): `rillPlugins`, the same
   plugins when you load rill yourself.
 
-With Vite, keep the package out of dependency pre-bundling, which would move the
-WebAssembly files away from the code that loads them:
+### Setup per bundler
 
-```ts
-// vite.config.ts
-export default { optimizeDeps: { exclude: ["@2018kguo/rill"] } };
-```
+The WebAssembly and the highlighting worker load by themselves, from URLs the bundler
+emits (`new URL(..., import.meta.url)`): no files to copy, no config.
+
+- **Next.js** (App Router; Turbopack and webpack, `next dev` and `next build`): nothing
+  to configure. Import it in client components or render it straight from a server
+  component, as you would Streamdown: the server renders it with Streamdown's own
+  pipeline and the page hydrates without a warning
+  ([examples/nextjs](examples/nextjs)).
+- **Vite 8**, and frameworks on it such as React Router (SSR included): nothing to
+  configure ([examples/vite](examples/vite), [examples/react-router](examples/react-router)).
+- **Vite 7 and older**: one plugin. Vite 7 pre-bundles dependencies in a way that loses
+  those URLs, and its build needs ES module workers:
+
+  ```ts
+  // vite.config.ts
+  import { rill } from "@2018kguo/rill/vite";
+  export default defineConfig({ plugins: [react(), rill()] });
+  ```
+
+- **bun build**: serve `@2018kguo/rill-highlight/dist/rill_highlight.wasm` and pass its
+  URL to `setHighlightWasm` (bun doesn't emit it).
+
+CI builds each example in each of these modes and checks it in Chromium: server-rendered
+where the app renders on the server, no console error or hydration warning, both
+WebAssembly modules served as `application/wasm`, code highlighted by rill-highlight in
+its worker, and a streamed answer rendered entirely on rill's fast path
+(`examples/run.sh`, `examples/smoke.mjs`). Other bundlers that emit
+`new URL(..., import.meta.url)` assets and module workers (webpack 5 on its own, Rollup,
+Parcel) should work the same way, but CI doesn't check them.
 
 ## Why
 
@@ -107,6 +131,33 @@ bounded by what the browser itself spends; "less JS + GC" is rill's own share. S
 a realistic 2,000–3,000 characters a second, recorded live at 10× throttle, Streamdown
 averages 15–28 fps with 95th-percentile frames of 155–185 ms; rill averages 60–65 fps
 with 95th-percentile frames of 26–36 ms.
+
+### Real app: Vercel's AI chatbot
+
+The numbers above come from a page that only renders Markdown. In a real app, React
+also re-renders the app around each answer. [vercel/ai-chatbot](https://github.com/vercel/ai-chatbot)
+(Next.js 16, React 19, Streamdown with its `cjk`, `code`, `math` and `mermaid` plugins),
+built for production as it is and with rill's import (one line in each of the two files
+that render Markdown, no config), on the same phone screen, with the template's mock
+model and no API keys. Medians of 5 interleaved trace-based runs, with 95% bootstrap
+intervals on the ratio; Streamdown 2.7.1 → rill:
+
+| Scenario | CPU | Settled | Main-thread JS + GC | Long-frame blocking | Heap after |
+|---|---:|---:|---:|---:|---:|
+| Open a chat of 18 long answers (239 KB) | 4× | 2,991 → 1,942 ms (1.54× [1.53–2.66]) | 2,735 → 1,535 ms (1.78×) | 2,150 → 1,221 ms | 49.5 → 24.2 MB |
+| | 10× | 7,964 → 2,863 ms (2.78× [2.71–2.84]) | 7,338 → 2,214 ms (3.31× [3.23–3.39]) | 6,820 → 2,135 ms | 48.9 → 22.0 MB |
+| Stream an 8 KB answer (code, tables, a list) at 2,400 chars/s | 4× | 4,512 → 4,582 ms (stream-bound) | 3,404 → 2,239 ms (1.52× [1.41–1.57]) | 497 → 4 ms | 27.5 → 47.3 MB |
+| | 10× | 10,056 → 6,427 ms (1.56× [1.41–1.64]) | 9,360 → 5,638 ms (1.66× [1.45–1.71]) | 8,401 → 4,070 ms | 26.7 → 19.8 MB |
+
+Opening the chat, the time from the messages' response to settled falls 1.70× at 4× and
+3.88× [3.78–3.99] at 10× (2,591 → 1,527 ms, 6,913 → 1,782 ms); the rest is the app
+loading, the same on both sides. At 4× the stream arrives no faster than it is sent, so
+wall time is the stream's; what changes is that the main thread stops blocking (long
+frames 497 → 4 ms, dropped frames 32% → 21%). At 10× the template's own React work per
+streamed chunk (the message list, the chat state) is most of what remains, which is why
+the gains are smaller than on the Markdown-only page. Heap after the 4× stream is the one
+number that got worse. The settled answers' HTML is byte-identical in every run of both
+builds. The harness and the template patches are in `bench/ai-chatbot`.
 
 The Markdown pipeline alone (remark, rehype, sanitize, harden, Streamdown's plugins) is a
 smaller tier of the same story:
@@ -200,6 +251,7 @@ source text instead of copying it.
 - `@2018kguo/rill/react`: `useRill(plugins?)`, plugins for Streamdown's own component.
 - `@2018kguo/rill/engine`: `defineEngine`, a [custom build](#custom-builds) for
   `<Streamdown engine>`; `rillEngine` is the prebuilt one, defined the same way.
+- `@2018kguo/rill/vite`: `rill()`, the Vite plugin for Vite 7 and older.
 - `@2018kguo/rill/conformance`: `checkEngine`, a custom build against its JavaScript
   plugins, DOM against DOM.
 - `@2018kguo/rill/plugins`: `rillPlugins({ rill, plugins })` returns the `remarkPlugins`
@@ -238,8 +290,9 @@ Without rehype-raw in `rehypePlugins` (Streamdown then shows raw HTML as text), 
 `disableAutolinkProtocols` or any other remark plugin `<Streamdown>` adds, every document
 renders in JavaScript.
 
-The WebAssembly loads with `new URL("../wasm/rill_bg.wasm", import.meta.url)`, which Vite,
-webpack 5, Next.js, Rollup and esbuild all resolve to a served asset.
+The WebAssembly loads with `new URL("../wasm/rill_bg.wasm", import.meta.url)` as soon as
+the browser evaluates `@2018kguo/rill/streamdown`; see [Setup per bundler](#setup-per-bundler)
+for where that resolves.
 
 ### What runs where
 

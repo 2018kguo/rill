@@ -1,0 +1,26 @@
+diff --git a/components/ai-elements/message.tsx b/components/ai-elements/message.tsx
+index 0418891..8b4635a 100644
+--- a/components/ai-elements/message.tsx
++++ b/components/ai-elements/message.tsx
+@@ -29,7 +29,7 @@ import {
+   useMemo,
+   useState,
+ } from "react";
+-import { Streamdown } from "streamdown";
++import { Streamdown } from "@2018kguo/rill/streamdown";
+ 
+ export type MessageProps = HTMLAttributes<HTMLDivElement> & {
+   from: UIMessage["role"];
+diff --git a/components/ai-elements/reasoning.tsx b/components/ai-elements/reasoning.tsx
+index 834051e..283bcb9 100644
+--- a/components/ai-elements/reasoning.tsx
++++ b/components/ai-elements/reasoning.tsx
+@@ -23,7 +23,7 @@ import {
+   useRef,
+   useState,
+ } from "react";
+-import { Streamdown } from "streamdown";
++import { Streamdown } from "@2018kguo/rill/streamdown";
+ 
+ import { Shimmer } from "./shimmer";
+ 

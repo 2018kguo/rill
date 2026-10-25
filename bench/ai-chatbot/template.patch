@@ -1,0 +1,169 @@
+diff --git a/app/(auth)/api/auth/guest/route.ts b/app/(auth)/api/auth/guest/route.ts
+index 97ce3d2..7f565a6 100644
+--- a/app/(auth)/api/auth/guest/route.ts
++++ b/app/(auth)/api/auth/guest/route.ts
+@@ -1,7 +1,6 @@
+ import { NextResponse } from "next/server";
+ import { getToken } from "next-auth/jwt";
+ import { signIn } from "@/app/(auth)/auth";
+-import { isDevelopmentEnvironment } from "@/lib/constants";
+ 
+ export async function GET(request: Request) {
+   const { searchParams } = new URL(request.url);
+@@ -14,7 +13,7 @@ export async function GET(request: Request) {
+   const token = await getToken({
+     req: request,
+     secret: process.env.AUTH_SECRET,
+-    secureCookie: !isDevelopmentEnvironment,
++    secureCookie: new URL(request.url).protocol === "https:",
+   });
+ 
+   if (token) {
+diff --git a/app/(chat)/api/chat/route.ts b/app/(chat)/api/chat/route.ts
+index 0853fac..9c14d02 100644
+--- a/app/(chat)/api/chat/route.ts
++++ b/app/(chat)/api/chat/route.ts
+@@ -27,7 +27,7 @@ import { editDocument } from "@/lib/ai/tools/edit-document";
+ import { getWeather } from "@/lib/ai/tools/get-weather";
+ import { requestSuggestions } from "@/lib/ai/tools/request-suggestions";
+ import { updateDocument } from "@/lib/ai/tools/update-document";
+-import { isProductionEnvironment } from "@/lib/constants";
++import { isProductionEnvironment, isTestEnvironment } from "@/lib/constants";
+ import {
+   createStreamId,
+   deleteChatById,
+@@ -82,7 +82,8 @@ export async function POST(request: Request) {
+       requestBody;
+ 
+     const [botIdResult, session] = await Promise.all([
+-      checkBotId().catch(() => null),
++      // Local benchmark (mock models): BotID only classifies requests on Vercel.
++      isTestEnvironment ? null : checkBotId().catch(() => null),
+       auth(),
+     ]);
+ 
+diff --git a/components/ai-elements/reasoning.tsx b/components/ai-elements/reasoning.tsx
+index cb784cf..834051e 100644
+--- a/components/ai-elements/reasoning.tsx
++++ b/components/ai-elements/reasoning.tsx
+@@ -197,7 +197,7 @@ export const ReasoningTrigger = memo(
+   }
+ );
+ 
+-export type ReasoningContentProps = HTMLAttributes<HTMLDivElement> & {
++export type ReasoningContentProps = Omit<HTMLAttributes<HTMLDivElement>, "dir" | "onAnimationStart" | "onAnimationEnd"> & {
+   children: string;
+ };
+ 
+diff --git a/lib/ai/models.mock.ts b/lib/ai/models.mock.ts
+index efcc7a1..70c5f1e 100644
+--- a/lib/ai/models.mock.ts
++++ b/lib/ai/models.mock.ts
+@@ -1,4 +1,10 @@
+ import type { LanguageModel } from "ai";
++import { BENCH_ANSWER } from "./bench-answer";
++
++// The benchmark's scripted answer streams in chunks of this many characters, one every
++// BENCH_INTERVAL_MS (12 characters / 5 ms = 2,400 characters a second).
++const BENCH_CHUNK = 12;
++const BENCH_INTERVAL_MS = 5;
+ 
+ const mockResponses: Record<string, string> = {
+   default: "This is a mock response for testing.",
+@@ -38,6 +44,32 @@ const createMockModel = (): LanguageModel =>
+       warnings: [],
+     }),
+     doStream: ({ prompt }: { prompt: unknown }) => {
++      if (JSON.stringify(prompt).toLowerCase().includes("benchmark")) {
++        return {
++          stream: new ReadableStream({
++            async start(controller) {
++              controller.enqueue({ id: "t1", type: "text-start" });
++              for (let at = 0; at < BENCH_ANSWER.length; at += BENCH_CHUNK) {
++                controller.enqueue({
++                  delta: BENCH_ANSWER.slice(at, at + BENCH_CHUNK),
++                  id: "t1",
++                  type: "text-delta",
++                });
++                await new Promise((resolve) => {
++                  setTimeout(resolve, BENCH_INTERVAL_MS);
++                });
++              }
++              controller.enqueue({ id: "t1", type: "text-end" });
++              controller.enqueue({
++                finishReason: "stop",
++                type: "finish",
++                usage: mockUsage,
++              });
++              controller.close();
++            },
++          }),
++        };
++      }
+       const response = getResponseForPrompt(prompt);
+       const words = response.split(" ");
+ 
+diff --git a/lib/ai/providers.ts b/lib/ai/providers.ts
+index 9cf5258..fd2dc9f 100644
+--- a/lib/ai/providers.ts
++++ b/lib/ai/providers.ts
+@@ -19,7 +19,8 @@ export const myProvider = isTestEnvironment
+ 
+ export function getLanguageModel(modelId: string) {
+   if (isTestEnvironment && myProvider) {
+-    return myProvider.languageModel(modelId);
++    // Every chat model is the mock (the selector's ids are the gateway's).
++    return myProvider.languageModel(modelId === "title-model" ? modelId : "chat-model");
+   }
+ 
+   return gateway.languageModel(modelId);
+diff --git a/package.json b/package.json
+index a1417e8..a757235 100644
+--- a/package.json
++++ b/package.json
+@@ -29,10 +29,10 @@
+     "@opentelemetry/api": "^1.9.1",
+     "@opentelemetry/api-logs": "^0.200.0",
+     "@radix-ui/react-use-controllable-state": "^1.2.3",
+-    "@streamdown/cjk": "^1.0.3",
+-    "@streamdown/code": "^1.0.3",
+-    "@streamdown/math": "^1.0.2",
+-    "@streamdown/mermaid": "^1.0.2",
++    "@streamdown/cjk": "^1.0.4",
++    "@streamdown/code": "^2.0.0",
++    "@streamdown/math": "^1.0.3",
++    "@streamdown/mermaid": "^1.0.3",
+     "@vercel/analytics": "^2.0.1",
+     "@vercel/blob": "^0.24.1",
+     "@vercel/functions": "^3.7.5",
+@@ -78,7 +78,7 @@
+     "server-only": "^0.0.1",
+     "shiki": "^3.21.0",
+     "sonner": "^2.0.7",
+-    "streamdown": "^2.3.0",
++    "streamdown": "^2.7.1",
+     "swr": "^2.4.2",
+     "tailwind-merge": "^3.6.0",
+     "tailwindcss-animate": "^1.0.7",
+diff --git a/proxy.ts b/proxy.ts
+index 60b97f4..1efb457 100644
+--- a/proxy.ts
++++ b/proxy.ts
+@@ -1,6 +1,6 @@
+ import { type NextRequest, NextResponse } from "next/server";
+ import { getToken } from "next-auth/jwt";
+-import { guestRegex, isDevelopmentEnvironment } from "./lib/constants";
++import { guestRegex } from "./lib/constants";
+ 
+ export async function proxy(request: NextRequest) {
+   const { pathname } = request.nextUrl;
+@@ -16,7 +16,8 @@ export async function proxy(request: NextRequest) {
+   const token = await getToken({
+     req: request,
+     secret: process.env.AUTH_SECRET,
+-    secureCookie: !isDevelopmentEnvironment,
++    // Local benchmark: production over http://localhost, where Auth.js sets plain cookies.
++    secureCookie: request.nextUrl.protocol === "https:",
+   });
+ 
+   const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
