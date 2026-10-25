@@ -113,3 +113,56 @@ jobs:
           bun conformance/dom/ssr.tsx --config code --variant static
           bun conformance/dom/ssr.tsx --config code --variant engine
           node conformance/blocks.mjs --fuzz 3000
+
+  # The package as npm would install it, for the example apps.
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: wasm-bindgen
+        run: |
+          mkdir -p "$RUNNER_TEMP/bin"
+          curl -fsSL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$WASM_BINDGEN_VERSION/wasm-bindgen-$WASM_BINDGEN_VERSION-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP/bin" --strip-components=1
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: npm install --no-audit --no-fund
+      - run: sh examples/pack.sh --build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rill-pack
+          path: examples/.pack/rill.tgz
+
+  # Each example app in each of its bundler modes, in Chromium: server-rendered and
+  # hydrated without warnings, the WebAssembly loaded, code highlighted in the worker,
+  # an answer streamed on rill's fast path (examples/smoke.mjs).
+  examples:
+    needs: pack
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - example: nextjs
+            modes: dev dev-webpack build build-webpack
+          - example: vite
+            modes: dev build vite7-dev vite7-build
+          - example: react-router
+            modes: dev build
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: rill-pack
+          path: examples/.pack
+      - run: npm install --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: sh examples/run.sh ${{ matrix.example }} ${{ matrix.modes }}

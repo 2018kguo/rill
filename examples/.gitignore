@@ -1,0 +1,8 @@
+.pack/
+*/node_modules/
+*/.next/
+*/dist/
+*/build/
+*/next-env.d.ts
+*/.react-router/
+nextjs/AGENTS.md
