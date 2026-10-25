@@ -58,7 +58,11 @@ cached by content, so mounting it again is cheap. `mode="static"` renders the wh
 in one pass, as Streamdown's static mode does, through rill too. With `animated`
 (Streamdown 2's word-by-word fade while an answer streams, with any of its options),
 rill runs the animation plugin's pass in Rust on the same shared timeline, so each word
-gets the span, duration and delay Streamdown would give it.
+gets the span, duration and delay Streamdown would give it. (One difference: Streamdown
+keeps a block's elements as its words come and go, and React leaves an empty `style`
+behind on an element that had one. A block that turns to Streamdown's `Block` mid-answer,
+as raw HTML arrives, starts over with new elements, so those leftovers, which show
+nothing, are missing there.)
 
 The `remarkPlugins` and `rehypePlugins` pages add most often render on the fast path
 too, with no Rust: remark-breaks, remark-math with rehype-katex (`$x$` or only `$$x$$`),

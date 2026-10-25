@@ -191,3 +191,18 @@ test("a plugin that only looks like a known one is checked, not trusted", async 
   }
   assert.equal(heard[0], "rehypePlugins: rehypeSlug");
 });
+
+test("lists written inline are recognized once, not on every render", async () => {
+  let calls = 0;
+  function remarkBreaks(this: unknown) {
+    calls += 1;
+    return (plain.remarkBreaks as (this: unknown) => unknown).call(this);
+  }
+  const root = mount(RillStreamdown);
+  for (let index = 0; index < 5; index += 1) {
+    await root.render(`line ${index}\nnext`, { remarkPlugins: [...REMARK, remarkBreaks] });
+  }
+  await root.unmount();
+  const first = calls;
+  assert.ok(first > 0 && first <= 3, String(first));
+});

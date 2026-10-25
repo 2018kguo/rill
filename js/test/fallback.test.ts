@@ -128,6 +128,21 @@ test("reports a streaming fence beside the page's own components or diagram rend
   assert.ok(diagram.reasons.has("incomplete-diagram"), [...diagram.reasons].join());
 });
 
+test("reports what animated leaves to Streamdown", async () => {
+  const { Block } = await import("../src/streamdown.ts");
+  const OwnBlock = (props: Record<string, unknown>) => createElement(Block as never, props);
+  const own = await hear(() => client("Some *text*.", { animated: true, BlockComponent: OwnBlock }, ["Some *te"]));
+  assert.ok(own.reasons.has("animated-block-component"), [...own.reasons].join());
+  const quoted = await hear(() =>
+    client("Some *text*.", { animated: { easing: "steps(4, 'end')" } }, ["Some *te"])
+  );
+  assert.ok(quoted.reasons.has("animated-options"), [...quoted.reasons].join());
+  const withMath = await hear(() => client("Some $$x$$.", { animated: true, plugins: { math } }, ["Some $$x"]));
+  assert.ok(withMath.reasons.has("animated-math"), [...withMath.reasons].join());
+  const plain = await hear(() => client("Some *text*.", { animated: true }, ["Some *te"]));
+  assert.deepEqual([...plain.reasons], []);
+});
+
 test("reports math a build leaves to a KaTeX it was not given", async () => {
   // The custom build's math, without the `katex` entry its engine names.
   const engine = defineEngine({

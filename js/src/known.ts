@@ -175,12 +175,50 @@ const looksLike = {
     name === "rehypeExternalLinks" || (source.includes("properties.href") && /["'`]\/\/["'`]/.test(source)),
 };
 
-const remarkCache = new WeakMap<Rill, WeakMap<object, Known | Unknown>>();
+const ids = new WeakMap<object, number>();
+let nextId = 0;
+
+/** A key for `value` by what it is: JSON for plain options (a page often writes them
+ * inline, a new object each render), else its identity. */
+function keyOf(value: unknown): string {
+  if (value === undefined) return "u";
+  if ((typeof value === "object" && value !== null) || typeof value === "function") {
+    if (isPlainObject(value) || Array.isArray(value)) {
+      try {
+        const json = JSON.stringify(value, (_, inner) => {
+          if (typeof inner === "function" || (typeof inner === "object" && inner !== null && !isPlainObject(inner) && !Array.isArray(inner))) {
+            throw new Error("not plain");
+          }
+          return inner;
+        });
+        if (json !== undefined) return `j${json}`;
+      } catch {}
+    }
+    let id = ids.get(value);
+    if (id === undefined) {
+      id = nextId++;
+      ids.set(value, id);
+    }
+    return `#${id}`;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+const listKey = (list: readonly unknown[]) =>
+  list
+    .map((plugin) => {
+      const entry = entryOf(plugin);
+      return Array.isArray(plugin) ? `${keyOf(entry.attacher)}:${keyOf(entry.options)}` : keyOf(plugin);
+    })
+    .join(",");
+
+const known = new WeakMap<Rill, Map<string, Known | Unknown>>();
 
 /**
  * How the prebuilt build renders a page's `remarkPlugins` and `rehypePlugins` (each
  * Streamdown's own when not given), or why it does not. `math`: `plugins.math` is set
- * too (Streamdown adds remark-math and rehype-katex after the lists).
+ * too (Streamdown adds remark-math and rehype-katex after the lists). Cached by the
+ * lists' plugins and options, so lists written inline probe once.
  */
 export function knownLists(
   rill: Rill,
@@ -188,17 +226,18 @@ export function knownLists(
   rehype: readonly unknown[],
   math: boolean
 ): Known | Unknown {
-  let byRemark = remarkCache.get(rill);
-  if (!byRemark) {
-    byRemark = new WeakMap();
-    remarkCache.set(rill, byRemark);
+  let byKey = known.get(rill);
+  if (!byKey) {
+    byKey = new Map();
+    known.set(rill, byKey);
   }
-  // Keyed by both lists (the same arrays for the same props).
-  const key = remark as object;
-  const cached = byRemark.get(key) as (Known | Unknown) & { rehype?: unknown };
-  if (cached && cached.rehype === rehype) return cached;
-  const result = recognize(rill, remark, rehype, math);
-  byRemark.set(key, Object.assign(result, { rehype }) as never);
+  const key = `${math ? 1 : 0}|${listKey(remark)}|${listKey(rehype)}`;
+  let result = byKey.get(key);
+  if (!result) {
+    result = recognize(rill, remark, rehype, math);
+    if (byKey.size >= 256) byKey.clear();
+    byKey.set(key, result);
+  }
   return result;
 }
 
