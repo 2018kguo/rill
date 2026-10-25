@@ -120,6 +120,20 @@ its worker, and a streamed answer rendered entirely on rill's fast path
 `new URL(..., import.meta.url)` assets and module workers (webpack 5 on its own, Rollup,
 Parcel) should work the same way, but CI doesn't check them.
 
+### One line of CSS for long chats
+
+Once rill renders a chat, most of what's left when one opens is the browser laying out
+answers nobody can see yet. Let it skip them: give each settled message's row
+
+```css
+.message-row { content-visibility: auto; contain-intrinsic-size: auto 0px auto 240px; }
+```
+
+The DOM stays the same (find-in-page and selection work); rows off screen are laid out
+when they scroll near. Opening the 18-answer chat with a page's own plugins
+(`bench/browser`, `cv=1`), rill finished in 528 ms instead of 865 (layout and style 162 →
+34 ms) at 4× CPU; Streamdown barely moved (2,511 → 2,470 ms), its time is its JavaScript.
+
 ## Why
 
 When a chatbot streams an answer, the screen updates many times a second, and each
