@@ -1,6 +1,6 @@
 {
   "name": "@2018kguo/rill",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A drop-in for Streamdown's <Streamdown>: the same DOM with a fraction of the main-thread work, rendered in Rust compiled to WebAssembly.",
   "license": "MIT",
   "repository": {
