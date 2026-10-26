@@ -1,0 +1,38 @@
+// CPU self time per quarter of the run, by function (non-idle), to see per-update cost growth.
+import { chromium } from "playwright";
+import { serve } from "./trace-run.mjs";
+const [name, query, throttle = "4"] = process.argv.slice(2);
+const { origin, server } = serve(new URL(`dist/${name}`, import.meta.url).pathname);
+const browser = await chromium.launch();
+const context = await browser.newContext({ viewport: { width: 412, height: 915 }, deviceScaleFactor: 2.625 });
+const page = await context.newPage();
+await page.goto(`${origin}/stage.html?${query}`);
+await page.waitForSelector("body[data-ready]", { state: "attached" });
+await page.waitForLoadState("networkidle");
+await page.waitForTimeout(800);
+const cdp = await context.newCDPSession(page);
+await cdp.send("Emulation.setCPUThrottlingRate", { rate: Number(throttle) });
+await cdp.send("Profiler.enable");
+await cdp.send("Profiler.setSamplingInterval", { interval: 200 });
+await cdp.send("Profiler.start");
+await page.evaluate(() => window.go());
+await page.evaluate(() => new Promise((r) => (document.body.dataset.done ? r() : addEventListener("stage-done", r, { once: true }))));
+const { profile } = await cdp.send("Profiler.stop");
+await browser.close(); server.close();
+const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+const Q = 4, span = profile.endTime - profile.startTime;
+const qs = Array.from({ length: Q }, () => new Map());
+let t = profile.startTime;
+profile.samples.forEach((id, i) => {
+  const dt = profile.timeDeltas[i] ?? 0; t += dt;
+  const f = byId.get(id).callFrame; const k = f.functionName || "(anon)";
+  if (k === "(idle)") return;
+  const q = Math.min(Q - 1, Math.floor(((t - profile.startTime) / span) * Q));
+  qs[q].set(k, (qs[q].get(k) ?? 0) + dt / 1000);
+});
+const keys = new Map();
+for (const m of qs) for (const [k, v] of m) keys.set(k, (keys.get(k) ?? 0) + v);
+const top = [...keys.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25).map(([k]) => k);
+console.log("function".padEnd(34), ...[1, 2, 3, 4].map((q) => `Q${q}`.padStart(8)));
+console.log("TOTAL".padEnd(34), ...qs.map((m) => [...m.values()].reduce((a, b) => a + b, 0).toFixed(0).padStart(8)));
+for (const k of top) console.log(k.slice(0, 34).padEnd(34), ...qs.map((m) => (m.get(k) ?? 0).toFixed(0).padStart(8)));
