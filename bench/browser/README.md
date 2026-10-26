@@ -53,6 +53,9 @@ SOURCEMAP=1 bun build.ts streamdown rill rill-code
 node bytes.mjs --by package streamdown rill rill-code   # gzipped, and by source package
 ```
 
+Memory after a run (`node memory.mjs "<stage query>" streamdown rill`): the main thread's
+JS heap after a full GC, rill's WebAssembly memory, and DOM nodes.
+
 ## What is measured
 
 Every number comes from a Chrome trace (`@paulirish/trace_engine`) or the browser's own
