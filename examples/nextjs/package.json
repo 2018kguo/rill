@@ -9,7 +9,6 @@
   },
   "dependencies": {
     "@2018kguo/rill": "file:../.pack/rill.tgz",
-    "@streamdown/code": "2.0.0",
     "next": "16.4.3",
     "react": "19.3.1",
     "react-dom": "19.3.1",

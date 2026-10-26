@@ -1,4 +1,4 @@
-import { code } from "@streamdown/code";
+import { code } from "@2018kguo/rill/code";
 import { blockRenders, highlightCounts, Streamdown } from "@2018kguo/rill/streamdown";
 import { loadedRill } from "@2018kguo/rill";
 import { useEffect, useState } from "react";
