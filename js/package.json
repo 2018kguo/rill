@@ -46,6 +46,10 @@
       "types": "./dist/plugins.d.ts",
       "default": "./dist/plugins.js"
     },
+    "./code": {
+      "types": "./dist/code.d.ts",
+      "default": "./dist/code.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "default": "./dist/react.js"

@@ -25,6 +25,16 @@ Change one import:
 + import { Streamdown } from "@2018kguo/rill/streamdown";
 ```
 
+With `@streamdown/code`, change its import too, and the page ships no Shiki: rill-highlight
+tokenizes every language Shiki bundles, to the same tokens, and loads in the worker. In the
+[benchmark](#benchmarks)'s page that is 58 KiB less JavaScript on load (gzipped, 490 to 432
+KiB), within 3 KiB of Streamdown's own page with Shiki (430 KiB):
+
+```diff
+- import { code } from "@streamdown/code";
++ import { code } from "@2018kguo/rill/code";
+```
+
 `@2018kguo/rill/streamdown` exports everything `streamdown` 2.7.1 exports, so the rest of
 your imports (`Block`, `CodeBlock`, `defaultComponents`, types...) keep working from the
 new path, including a `BlockComponent` of your own that wraps `Block`: import `Block`
@@ -275,6 +285,9 @@ source text instead of copying it.
   `@2018kguo/rill-highlight/dist/`) where a bundler doesn't place it by itself, as bun
   doesn't (Vite and webpack do), and starts the highlighting worker;
   `preloadHighlighting()` starts it without one.
+- `@2018kguo/rill/code`: `code` and `createCodePlugin({ themes })`, `@streamdown/code`'s,
+  highlighting with rill-highlight instead of Shiki. The page loads only its language list;
+  rill-highlight's own plugin loads if the worker can't start.
 - `@2018kguo/rill/react`: `useRill(plugins?)`, plugins for Streamdown's own component.
 - `@2018kguo/rill/engine`: `defineEngine`, a [custom build](#custom-builds) for
   `<Streamdown engine>`; `rillEngine` is the prebuilt one, defined the same way.
@@ -553,7 +566,8 @@ node conformance/bench.mjs                     # the JavaScript pipeline, same d
 The browser numbers at the top come from `bench/browser`: a chat page built with each
 engine, traced in Chromium at 10× CPU throttle on a phone-sized screen, with interleaved
 runs and bootstrap intervals. Its README has a script per scenario and the check that the
-final HTML is byte-identical.
+final HTML is byte-identical; `bench/browser/bytes.mjs` reports what each engine's page
+loads, and with `--by package` where its JavaScript comes from.
 
 ### Layout
 
