@@ -20,11 +20,13 @@ import ownership from "./ownership.md" with { type: "text" };
 import ownershipChapter from "./ownership-chapter.md" with { type: "text" };
 // All 118 elements, derived from the Periodic-Table-JSON dataset by Bowserinator (CC BY-SA 3.0).
 import elements118 from "./elements-118.md" with { type: "text" };
+import ownershipNodef from "./ownership-nodef.md" with { type: "text" };
+import ownershipFn from "./ownership-fn.md" with { type: "text" };
 // chat=distinct: an 18-turn conversation where no two answers are the same (15 Rust
 // Book sections, listings inlined, plus the three general answers).
 import chat from "./chat.json";
 
-const documents: Record<string, string> = { elements, japan, "lru-cache": lruCache, ownership, "ownership-chapter": ownershipChapter, "elements-118": elements118 };
+const documents: Record<string, string> = { elements, japan, "lru-cache": lruCache, ownership, "ownership-chapter": ownershipChapter, "elements-118": elements118, "ownership-nodef": ownershipNodef, "ownership-fn": ownershipFn };
 const params = new URLSearchParams(location.search);
 const scene = params.get("scene") ?? "stream";
 const rate = Number(params.get("rate") ?? 1200);
