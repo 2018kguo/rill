@@ -1083,6 +1083,8 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
 pub struct EncodedMarkup {
     pub ops: Vec<u32>,
     pub strings: String,
+    /// The footnote calls after this text (see [`crate::hast::Footnotes`]).
+    pub footnote_calls: Vec<(String, usize)>,
     /// With [`MarkupOptions::animate`]: what the pass leaves for the next one.
     pub animated: Option<Animated>,
 }
@@ -1171,6 +1173,7 @@ pub fn markup(
     Ok(EncodedMarkup {
         ops,
         strings,
+        footnote_calls: std::mem::take(&mut built.footnote_calls),
         animated,
     })
 }

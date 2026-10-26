@@ -19,8 +19,8 @@ mod json;
 mod url;
 
 pub use hast::{
-    BlockPolicy, Context, Harden, Kind, Options, Plugin, Rendered, Sanitize, Schema, render,
-    render_json, render_ops,
+    BlockPolicy, Context, Footnotes, Harden, Kind, Options, Plugin, Rendered, Sanitize, Schema,
+    render, render_json, render_ops,
 };
 pub use markup::{Fallback, MarkupOptions, markup, render_markup};
 pub use mdast::{Error, Syntax, parse_json};
@@ -39,7 +39,7 @@ pub mod wasm {
 
     /// The boundary's version, which the JavaScript package checks before it calls
     /// anything else.
-    pub const ABI: u32 = 5;
+    pub const ABI: u32 = 6;
 
     /// One rendered document: how far Rust took it (a [`crate::Kind`], `"markup"`, a
     /// [`crate::Fallback`]'s name where only Streamdown renders a block exactly, or
@@ -51,6 +51,8 @@ pub mod wasm {
         ops: Vec<u32>,
         strings: String,
         animated: Option<crate::animate::Animated>,
+        /// After a piece (`renderPiece`): its footnote calls, as `renderPiece` takes them.
+        footnotes: String,
     }
 
     #[wasm_bindgen]
@@ -74,6 +76,10 @@ pub mod wasm {
                 .map(|animated| vec![f64::from(animated.chars), animated.cursor])
                 .unwrap_or_default()
         }
+        /// After `renderPiece`: the footnote calls so far (see [`render_piece`]).
+        pub fn footnotes(&self) -> String {
+            self.footnotes.clone()
+        }
     }
 
     impl RenderedHast {
@@ -83,6 +89,7 @@ pub mod wasm {
                 ops: Vec::new(),
                 strings: String::new(),
                 animated: None,
+                footnotes: String::new(),
             }
         }
     }
@@ -141,6 +148,7 @@ pub mod wasm {
                 ops: encoded.ops,
                 strings: encoded.strings,
                 animated: None,
+                footnotes: String::new(),
             }),
             Err(Error::Unsupported) => Ok(RenderedHast::empty("unsupported")),
             Err(error) => Err(JsError::new(&error.to_string())),
@@ -185,10 +193,67 @@ pub mod wasm {
                 ops: encoded.ops,
                 strings: encoded.strings,
                 animated: encoded.animated,
+                footnotes: encoded
+                    .footnote_calls
+                    .iter()
+                    .flat_map(|(id, count)| [id.clone(), count.to_string()])
+                    .collect::<Vec<_>>()
+                    .join("\0"),
             },
             Err(Ok(fallback)) => RenderedHast::empty(fallback.as_str()),
             Err(Err(error)) => return Err(JsError::new(&error.to_string())),
         })
+    }
+
+    /// [`render_markup`] for one piece of a text with footnotes (see
+    /// [`crate::Footnotes`]): `defined`, the labels of the footnotes the text defines,
+    /// joined by NUL; `calls`, the calls before the piece as `id`, count, `id`, count...
+    /// joined by NUL; flags bit 6 leaves out the footnote section. The result's
+    /// `footnotes()` are the calls after the piece, in the same form.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_piece(
+        source: &str,
+        mut options: Options,
+        prefix: String,
+        flags: u32,
+        overrides: &str,
+        defined: &str,
+        calls: &str,
+    ) -> Result<RenderedHast, JsError> {
+        let mut parts = calls.split('\0').filter(|part| !part.is_empty());
+        let mut seed = Vec::new();
+        while let (Some(id), Some(count)) = (parts.next(), parts.next()) {
+            let count = count
+                .parse()
+                .map_err(|_| JsError::new("renderPiece: a call count is not a number"))?;
+            seed.push((id.to_owned(), count));
+        }
+        options.footnotes = crate::Footnotes {
+            calls: seed,
+            defined: defined
+                .split('\0')
+                .filter(|label| !label.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            no_section: flags & 64 != 0,
+        };
+        render_markup(source, options, prefix, flags, overrides, "", &[])
+    }
+
+    /// The root-level footnote definitions of `source` as `start`, `end` (UTF-16) and
+    /// label, or `[""]` when one sits in a container (see
+    /// [`crate::mdast::root_footnotes`]).
+    #[doc(hidden)]
+    #[must_use]
+    pub fn footnotes(source: &str, options: &Options) -> Vec<String> {
+        match crate::mdast::root_footnotes(source, options.syntax()) {
+            Some(found) => found
+                .into_iter()
+                .flat_map(|(start, end, label)| [start.to_string(), end.to_string(), label.into()])
+                .collect(),
+            None => vec![String::new()],
+        }
     }
 
     /// [`render_markup`]'s `animate` and `timing` as the pass's options.
@@ -216,8 +281,8 @@ pub mod wasm {
     }
 
     /// The root-level link definitions of `source` as UTF-16 `[start, end)` pairs, or
-    /// `[u32::MAX]` when a definition sits elsewhere or `source` has a footnote
-    /// definition (see [`crate::mdast::root_definitions`]).
+    /// `[u32::MAX]` when a definition sits elsewhere (see
+    /// [`crate::mdast::root_definitions`]).
     #[doc(hidden)]
     #[must_use]
     pub fn definitions(source: &str, options: &Options) -> Vec<u32> {
@@ -359,6 +424,45 @@ macro_rules! wasm_exports {
         pub fn __rill_definitions(source: &str, syntax: u32, $($arg: $ty),*) -> Vec<u32> {
             let options: $crate::Options = $options;
             $crate::wasm::definitions(source, &$crate::wasm::with_plugins(options, syntax, ""))
+        }
+
+        /// One piece of a text with footnotes (see `rill::wasm::render_piece`).
+        #[allow(clippy::too_many_arguments)]
+        #[$crate::wasm::wasm_bindgen::prelude::wasm_bindgen(
+            js_name = renderPiece,
+            wasm_bindgen = $crate::wasm::wasm_bindgen
+        )]
+        pub fn __rill_render_piece(
+            source: &str,
+            syntax: u32,
+            extra: &str,
+            prefix: String,
+            flags: u32,
+            overrides: &str,
+            defined: &str,
+            calls: &str,
+            $($arg: $ty),*
+        ) -> Result<$crate::wasm::RenderedHast, $crate::wasm::wasm_bindgen::JsError> {
+            let options: $crate::Options = $options;
+            $crate::wasm::render_piece(
+                source,
+                $crate::wasm::with_plugins(options, syntax, extra),
+                prefix,
+                flags,
+                overrides,
+                defined,
+                calls,
+            )
+        }
+
+        /// The root-level footnote definitions of `source` (see `rill::wasm::footnotes`).
+        #[$crate::wasm::wasm_bindgen::prelude::wasm_bindgen(
+            js_name = footnotes,
+            wasm_bindgen = $crate::wasm::wasm_bindgen
+        )]
+        pub fn __rill_footnotes(source: &str, syntax: u32, $($arg: $ty),*) -> Vec<String> {
+            let options: $crate::Options = $options;
+            $crate::wasm::footnotes(source, &$crate::wasm::with_plugins(options, syntax, ""))
         }
 
         /// Whether no root child of `source` spans UTF-16 offset `at`.

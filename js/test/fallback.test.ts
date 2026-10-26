@@ -163,6 +163,8 @@ function brokenEngine(fail: () => never) {
     renderMarkup: fail,
     pieces: () => false,
     definitions: fail,
+    footnotes: fail,
+    renderPiece: fail,
     splitsAt: fail,
     remendStream: fail,
     remendMiddle: fail,

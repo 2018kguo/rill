@@ -380,12 +380,18 @@ const hasCarriageReturn = (text: string): boolean => {
   return carriageReturn;
 };
 
-/** The input `parseMarkdownIntoBlocks` last kept in one block for its link definitions. */
+/** The input `parseMarkdownIntoBlocks` last kept in one block for its link definitions
+ * or footnotes. */
 let definitionInput: string | null = null;
 
 /** Streamdown's `parseMarkdownIntoBlocks`. */
 export const parseMarkdownIntoBlocks = (markdown: string): string[] => {
-  if (hasFootnotes(markdown)) return [markdown];
+  if (hasFootnotes(markdown)) {
+    // Footnotes number across the whole text, which stays one block; rill renders it as
+    // pieces too (see `splitDefinitionBlock`), when its line endings are already `\n`.
+    definitionInput = hasCarriageReturn(markdown) ? null : markdown;
+    return [markdown];
+  }
   const input = hasCarriageReturn(markdown)
     ? markdown.replace(lineEndingPattern, "\n")
     : markdown;
@@ -406,7 +412,7 @@ let lastChunks: ParseCache | null = null;
 
 /**
  * The pieces of a text `parseMarkdownIntoBlocks` kept in one block for its link
- * definitions: the blocks it would have made without them, or `null` for a text it did
+ * definitions or footnotes: the blocks it would have made without them, or `null` for a text it did
  * not keep so (or one marked did not cut into pieces of itself: it drops a repeated
  * definition and rewrites some blockquotes). rill renders the pieces one by one, with
  * the text's definitions, and reuses all but the last as the text grows.

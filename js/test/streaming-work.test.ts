@@ -30,6 +30,8 @@ const count = <F extends (source: string, ...rest: never[]) => unknown>(
     return run(source, ...rest);
   }) as F;
 rill.markup = count("markup", rill.markup!);
+rill.piece = count("markup", rill.piece!);
+rill.footnotes = count("definitions", rill.footnotes!);
 rill.definitions = count("definitions", rill.definitions!);
 rill.splitsAt = count("splitsAt", rill.splitsAt!);
 const blockTokens = Lexer.prototype.blockTokens;
@@ -76,6 +78,10 @@ const bounded: Record<string, (n: number) => string> = {
     `[an aside that never closes\n\n${fill("A paragraph with no brackets at all, *emphasis* and `code`.\n\n", n)}`,
   "reference links": (n) =>
     `[spec]: https://example.com/spec\n[1]: https://www.rfc-editor.org/rfc/rfc9114\n\n${fill("See [the spec][spec] and [RFC 9114][1] for details, plus [spec].\n\n", n)}`,
+  // Footnotes number across the answer, which Streamdown keeps in one block: rill renders
+  // it as pieces too, each after the calls before it.
+  "prose after footnotes": (n) =>
+    `Rust checks ownership[^own] at compile time[^zero].\n\n[^own]: The binding that holds a value.\n[^zero]: No cost at run time.\n\n${fill("More prose citing the owner[^own], with *emphasis* and `code`.\n\n", n)}`,
   // Definitions that keep arriving: each new one may change any earlier reference.
   "definitions streaming": (n) =>
     `${numbered(n / 2, (index) => `See [r${index}] here.\n\n`)}${numbered(n / 2, (index) => `[r${index}]: https://example.com/${index}\n\n`)}`,
@@ -88,9 +94,9 @@ const growing: Record<string, (n: number) => string> = {
   list: (n) => numbered(n, (index) => `- item ${index} with *a*\n`),
   "long paragraph": (n) => numbered(n, (index) => `line ${index} with *a* and \`b\`\n`),
   blockquote: (n) => numbered(n, (index) => `> line ${index} with *a*\n`),
-  // Footnotes make the answer one block in Streamdown, whose numbering and footnote
-  // section depend on all of it: rill renders it whole on each update, as Streamdown does.
-  footnotes: (n) => `${numbered(n / 2, (index) => `Text[^${index}].\n\n`)}${numbered(n / 2, (index) => `[^${index}]: Note ${index}.\n\n`)}`,
+  // Footnote definitions being written: the footnote section (one element after the
+  // answer) holds them all, and renders whole on each update.
+  "footnote definitions": (n) => `${numbered(n / 2, (index) => `Text[^${index}].\n\n`)}${numbered(n / 2, (index) => `[^${index}]: Note ${index}.\n\n`)}`,
 };
 
 const SIZES = [2000, 4000, 8000, 16000];

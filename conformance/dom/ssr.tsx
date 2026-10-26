@@ -3,11 +3,12 @@
 // rendering touches (code blocks render through Streamdown's own CodeBlock there).
 //
 //   bun conformance/dom/ssr.tsx [--config default|code] [--variant default|prefix|...]
-//        [--corpus examples,real,chat,<file.md>] [--definitions] [--every N]
+//        [--corpus examples,real,chat,<file.md>] [--definitions] [--footnotes] [--every N]
 //
 // `--definitions` gives each document link definitions (and references to them), which
-// make Streamdown render it as one block; `--every N` also renders every Nth prefix of
-// each document, in order, as a stream does.
+// make Streamdown render it as one block; `--footnotes` gives it footnotes (calls before
+// and after the middle, a definition there and the rest at the end), which do too;
+// `--every N` also renders every Nth prefix of each document, in order, as a stream does.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -70,12 +71,22 @@ const withDefinitions = (source: string) => {
   const at = middle < 0 ? source.length : middle;
   return `[early]: https://example.com/early "Early"\n\n${source.slice(0, at)}\n\nSee [late], [the early one][early] and [early].\n\n[late]: https://example.com/late\n${source.slice(at)}`;
 };
+// Calls in the first paragraph and after the middle one (one called twice, one never
+// defined), a definition at the middle (citing another) and the rest at the end.
+const withFootnotes = (source: string) => {
+  const first = source.indexOf("\n\n");
+  const lead = first < 0 ? source.length : first;
+  const middle = source.indexOf("\n\n", source.length >> 1);
+  const at = middle < 0 ? source.length : Math.max(middle, lead);
+  return `${source.slice(0, lead)}[^a]\n\nCited twice[^a], once[^b] and never defined[^none].\n${source.slice(lead, at)}\n\n[^b]: The middle note, citing [^c].\n\nAfter the middle[^c].\n${source.slice(at)}\n\n[^a]: The first note.\n[^c]: The last note, with *emphasis*.\n`;
+};
 const every = Number(option("--every", "0"));
 const chosen = option("--corpus", "examples,real,chat").split(",");
 for (const name of Object.keys(corpora)) if (!chosen.includes(name)) delete corpora[name];
 for (const name of chosen) if (name.endsWith(".md")) corpora[name] = [readFileSync(name, "utf8")];
 for (const [name, documents] of Object.entries(corpora)) {
   let list = args.includes("--definitions") ? documents.map(withDefinitions) : documents;
+  if (args.includes("--footnotes")) list = list.map(withFootnotes);
   if (every > 0) {
     list = list.flatMap((source) => {
       const prefixes: string[] = [];

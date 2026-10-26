@@ -980,7 +980,7 @@ export const Block = memo(function Block(props: BlockProps) {
     // pieces (an update renders the last one); one that does not renders it in one call.
     // rehype-slug numbers repeated headings across the whole block.
     const chunks =
-      !settings.whole && !plan.slug && rill.definitions && rill.splitsAt && content.length <= DEFAULT_MAX_SOURCE_LENGTH
+      !settings.whole && !plan.slug && rill.definitions && rill.splitsAt && rill.piece && content.length <= DEFAULT_MAX_SOURCE_LENGTH
         ? splitDefinitionBlock(content)
         : null;
     if (chunks) {
@@ -1059,6 +1059,11 @@ type Piece = {
   /** The definitions it was rendered with: those whose label its text may hold ("" for
    * a piece with no `]`, which has no reference). */
   definitions: string;
+  /** The defined footnote labels and the calls before it, when it may call one (or is
+   * the footnote section); "" otherwise. */
+  footnotes: string;
+  /** The footnote calls after it (as `Rill.piece` returns them). */
+  calls: string;
   last: boolean;
   /** The block's `isIncomplete` when it holds a code block (each one reads it). */
   incomplete: boolean | null;
@@ -1074,6 +1079,9 @@ type Pieces = {
   rendered: Piece[];
   /** Each piece's root-level definitions, `null` when it holds one elsewhere. */
   definitions: Map<string, string[] | null>;
+  /** Each piece's root-level footnote definitions with their labels, `null` when it
+   * holds one elsewhere. */
+  notes: Map<string, [string, string][] | null>;
   /** Per place between two pieces, the pieces found to split there (no block spans
    * them). */
   joins: [string, string][];
@@ -1083,6 +1091,7 @@ type Pieces = {
 const newPieces = (): Pieces => ({
   rendered: [],
   definitions: new Map(),
+  notes: new Map(),
   joins: [],
   references: newReferences(),
 });
@@ -1252,9 +1261,13 @@ function renderChunks(
   pieces: Pieces
 ): ReactNode[] | null {
   const chunks = joinChunks(split, rill, plan, pieces);
-  // The text's definitions, in order (the first of a label wins, as in the whole text).
+  // The text's definitions, in order (the first of a label wins, as in the whole text),
+  // and its footnote definitions, with their labels.
   const definitions: string[] = [];
   const known = new Map<string, string[] | null>();
+  const notes: string[] = [];
+  const labels: string[] = [];
+  const knownNotes = new Map<string, [string, string][] | null>();
   for (const chunk of chunks) {
     if (!chunk.includes("]:")) continue;
     let found = pieces.definitions.get(chunk);
@@ -1266,8 +1279,27 @@ function renderChunks(
     // A definition in a container: render the whole block.
     if (found === null) return null;
     definitions.push(...found);
+    if (!chunk.includes("[^")) continue;
+    let foundNotes = knownNotes.get(chunk) ?? pieces.notes.get(chunk);
+    if (foundNotes === undefined) {
+      const ranges = rill.footnotes!(chunk, plan);
+      foundNotes = ranges && ranges.map(([start, end, label]) => [chunk.slice(start, end), label]);
+    }
+    knownNotes.set(chunk, foundNotes);
+    if (foundNotes === null) return null;
+    for (const [note, label] of foundNotes) {
+      notes.push(note);
+      labels.push(label);
+    }
   }
   pieces.definitions = known;
+  pieces.notes = knownNotes;
+  // Footnotes number across the text: a piece that may call one renders after the calls
+  // before it, with the labels the text defines (a call resolves only to a definition).
+  // Without a definition, `[^x]` is text, as in a piece of its own.
+  const footnoted = notes.length > 0;
+  const defined = labels.join("\0");
+  let calls = "";
   const usableBy = definitionsFor(pieces.references, chunks, definitions);
   const out: ReactNode[] = [];
   const counts = new Map<string, number>();
@@ -1275,49 +1307,76 @@ function renderChunks(
   /** Root children so far, and whether the last one was removed (it rendered nothing). */
   let slots = 0;
   let barrier = false;
-  for (let index = 0; index < chunks.length; index += 1) {
-    const chunk = chunks[index]!;
-    const last = index === chunks.length - 1;
-    const usable = usableBy.get(chunk) ?? "";
+  /** Renders `source` as the piece at `index` (or takes the one rendered last time). */
+  const take = (
+    index: number,
+    chunk: string,
+    source: string,
+    usable: string,
+    last: boolean,
+    section: boolean
+  ): Piece | null => {
     const at = countsKey(counts);
-    let piece: Piece | undefined = pieces.rendered[index];
+    const footnotes = section || (footnoted && chunk.includes("[^")) ? `${defined}\u0001${calls}` : "";
+    const piece: Piece | undefined = pieces.rendered[index];
     if (
-      !(
-        piece &&
-        piece.chunk === chunk &&
-        piece.definitions === usable &&
-        piece.last === last &&
-        piece.before === at &&
-        (piece.incomplete === null || piece.incomplete === env.isIncomplete)
-      )
+      piece &&
+      piece.chunk === chunk &&
+      piece.definitions === usable &&
+      piece.footnotes === footnotes &&
+      piece.last === last &&
+      piece.before === at &&
+      (piece.incomplete === null || piece.incomplete === env.isIncomplete)
     ) {
-      const source = usable + chunk;
-      let reader: HastReader | string;
-      try {
-        reader = rill.markup!(source, plan, { ...options, spine: Boolean(options.spine) && last });
-      } catch {
-        return null;
-      }
-      if (typeof reader === "string") return null;
-      const own = new Map(counts);
-      const coded = { code: false };
-      const nodes = segments(reader, env, own, coded);
-      for (const [tag, count] of counts) own.set(tag, (own.get(tag) ?? 0) - count);
-      const incomplete = coded.code ? env.isIncomplete : null;
-      piece = { chunk, definitions: usable, last, incomplete, before: at, nodes, counts: own };
+      return piece;
     }
+    const spine = Boolean(options.spine) && last && !section;
+    let reader: HastReader | string;
+    let after = calls;
+    try {
+      if (footnotes) {
+        const result = rill.piece!(source, plan, { ...options, spine }, {
+          defined: section ? "" : defined,
+          calls,
+          section,
+        });
+        reader = result.reader;
+        after = result.calls;
+      } else {
+        reader = rill.markup!(source, plan, { ...options, spine });
+      }
+    } catch {
+      return null;
+    }
+    if (typeof reader === "string") return null;
+    const own = new Map(counts);
+    const coded = { code: false };
+    const nodes = segments(reader, env, own, coded);
+    for (const [tag, count] of counts) own.set(tag, (own.get(tag) ?? 0) - count);
+    // The section joins the root after the text's last node, as one more root child.
+    if (section && typeof nodes[0] === "string" && nodes[0].startsWith("\n")) {
+      nodes[0] = nodes[0].slice(1);
+      if (nodes[0] === "") nodes.shift();
+    }
+    const incomplete = coded.code ? env.isIncomplete : null;
+    return { chunk, definitions: usable, footnotes, calls: after, last, incomplete, before: at, nodes, counts: own };
+  };
+  /** Joins `piece` to the root's children, as its nodes sit in the whole text. */
+  const place = (piece: Piece, removed: boolean, opens: boolean) => {
     rendered.push(piece);
+    // A piece that cannot call a footnote passes the calls before it on, whatever they
+    // were when it rendered.
+    if (piece.footnotes) calls = piece.calls;
     for (const [tag, count] of piece.counts) counts.set(tag, (counts.get(tag) ?? 0) + count);
     // A piece of definitions alone has no node in the whole text's root; one whose
     // nodes sanitize removed (an HTML comment) had one, with a line ending on each side.
-    if (piece.nodes.length === 0 && !removedNode(chunk, known.get(chunk))) continue;
+    if (piece.nodes.length === 0 && !removed) return;
     // The root's children join with a line ending, which merges with text beside it
     // (parse5 merges adjacent text: newlines it moves out of a table), but not across a
     // removed node (it was still there when parse5 ran).
     // At the root, text is only the line endings between nodes; one that a piece starts
     // (or ends) with sits after (or before) a node of its own that sanitize removed (an
     // HTML comment, a wrapper tag's start or end), which keeps it apart.
-    const opens = /^\s*</.test(chunk);
     let first = 0;
     if (slots > 0) {
       const previous = out.length - 1;
@@ -1337,8 +1396,26 @@ function renderChunks(
     slots += 1;
     barrier =
       piece.nodes.length === 0 ||
-      (typeof piece.nodes.at(-1) === "string" && />\s*$/.test(chunk));
+      (typeof piece.nodes.at(-1) === "string" && />\s*$/.test(piece.chunk));
     for (let node = first; node < piece.nodes.length; node += 1) out.push(piece.nodes[node]);
+  };
+  for (let index = 0; index < chunks.length; index += 1) {
+    const chunk = chunks[index]!;
+    const usable = usableBy.get(chunk) ?? "";
+    const piece = take(index, chunk, usable + chunk, usable, index === chunks.length - 1, false);
+    if (!piece) return null;
+    const removed =
+      piece.nodes.length === 0 &&
+      removedNode(chunk, [...(known.get(chunk) ?? []), ...(knownNotes.get(chunk) ?? []).map(([note]) => note)]);
+    place(piece, removed, /^\s*</.test(chunk));
+  }
+  if (footnoted) {
+    // The section: every footnote definition, with the link definitions their text may
+    // use, after the calls of every piece.
+    const source = [...definitions, ...notes].join("\n\n");
+    const piece = take(chunks.length, source, source, "", false, true);
+    if (!piece) return null;
+    place(piece, false, true);
   }
   pieces.rendered = rendered;
   return out;

@@ -1177,6 +1177,7 @@ pub struct Converted<'s> {
     pub root: NodeId,
     pub raw_boundary: bool,
     pub math: bool,
+    pub footnote_calls: Vec<(String, usize)>,
 }
 
 /// mdast-util-to-hast. `katex`: rehype-katex runs later, so ```math blocks count as math.
@@ -1202,7 +1203,15 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
         },
         definitions: HashMap::new(),
         footnotes: HashMap::new(),
-        footnote_calls: Vec::new(),
+        footnote_calls: options
+            .footnotes
+            .calls
+            .iter()
+            .map(|(id, count)| FootnoteCalls {
+                id: id.clone(),
+                count: *count,
+            })
+            .collect(),
         raw_boundary: false,
         simple_raw: false,
         link_depth: 0,
@@ -1214,7 +1223,14 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
     };
     state.collect(mdast::Tree::ROOT);
     let root = state.one(mdast::Tree::ROOT, mdast::Tree::ROOT).first;
-    if let Some(section) = state.footer() {
+    // A piece before the text's last: the definitions render (and cite) only in the
+    // section, after every piece.
+    let section = if options.footnotes.no_section {
+        None
+    } else {
+        state.footer()
+    };
+    if let Some(section) = section {
         let mut children = state.hast.children_of(root);
         let newline = state.hast.text("\n");
         state.hast.append(&mut children, newline);
@@ -1231,6 +1247,11 @@ fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
         root,
         raw_boundary: state.raw_boundary,
         math: state.math,
+        footnote_calls: state
+            .footnote_calls
+            .into_iter()
+            .map(|calls| (calls.id, calls.count))
+            .collect(),
         tree: state.hast,
     }
 }
@@ -2819,6 +2840,22 @@ pub struct Options {
     /// A comment still streaming (no `-->` yet) is removed as parse5 and sanitize remove
     /// it, too.
     pub close_open_raw: bool,
+    /// A piece of a text with footnotes (see [`Footnotes`]).
+    pub footnotes: Footnotes,
+}
+
+/// What a piece of a text with footnotes needs from the pieces before it, so that it
+/// renders as it does in the whole text: the footnotes cited before it, in the order
+/// that numbers them, with how many times each was cited (which suffixes the ids of
+/// later calls). [`crate::markup`] reports the calls after the piece the same way.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Footnotes {
+    /// Uppercased identifiers and their call counts, in first-citation order.
+    pub calls: Vec<(String, usize)>,
+    /// Labels of the footnotes the rest of the text defines: their calls resolve here.
+    pub defined: Vec<String>,
+    /// Leave out the footnote section (a piece other than the text's last).
+    pub no_section: bool,
 }
 
 impl Default for Options {
@@ -2836,6 +2873,7 @@ impl Default for Options {
             sanitize: Sanitize::default(),
             plugins: Vec::new(),
             close_open_raw: false,
+            footnotes: Footnotes::default(),
         }
     }
 }
@@ -3171,6 +3209,8 @@ pub(crate) struct Built<'s> {
     pub(crate) points: Points,
     pub(crate) tree: Tree<'s>,
     pub(crate) root: NodeId,
+    /// The footnote calls after the tree (see [`Footnotes::calls`]).
+    pub(crate) footnote_calls: Vec<(String, usize)>,
 }
 
 impl Built<'_> {
@@ -3215,7 +3255,7 @@ fn nested_deeper(tree: &Tree<'_>, root: NodeId, limit: usize) -> bool {
 }
 
 pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>, Error> {
-    let mut mdast = mdast::parse_arena(source, options.syntax())?;
+    let mut mdast = mdast::parse_arena_with(source, options.syntax(), &options.footnotes.defined)?;
     if options.cjk {
         mdast::cjk_autolink_boundary(&mut mdast, mdast::Tree::ROOT);
     }
@@ -3230,6 +3270,7 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         root,
         raw_boundary,
         math,
+        footnote_calls,
     } = convert(&mdast, options);
     // Raw tags paired into elements nest as deep as the text has them.
     if nested_deeper(&tree, root, mdast::MAX_DEPTH) {
@@ -3243,6 +3284,7 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
             points,
             tree,
             root,
+            footnote_calls,
         });
     }
     let context = Context {
@@ -3281,6 +3323,7 @@ pub(crate) fn build<'s>(source: &'s str, options: &Options) -> Result<Built<'s>,
         points,
         tree,
         root,
+        footnote_calls,
     })
 }
 
@@ -3292,6 +3335,7 @@ pub fn render_ops(source: &str, options: &Options) -> Result<Encoded, Error> {
         points,
         tree,
         root,
+        ..
     } = build(source, options)?;
     let mut encoder = Encoder::new(&tree, &points, source);
     encoder.node(root);
