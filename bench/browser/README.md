@@ -45,6 +45,14 @@ It runs unthrottled. At 10× throttle on a loaded machine, Shiki's 500 ms tokeni
 per line can cut a long line short in Streamdown, so its DOM node count in a benchmark
 report can vary a little between runs.
 
+What each page loads (`rill-code` is rill with `code` from `@2018kguo/rill/code`, which
+`bun build.ts rill-code` builds from `stage/engine.rill-code.ts`):
+
+```sh
+SOURCEMAP=1 bun build.ts streamdown rill rill-code
+node bytes.mjs --by package streamdown rill rill-code   # gzipped, and by source package
+```
+
 ## What is measured
 
 Every number comes from a Chrome trace (`@paulirish/trace_engine`) or the browser's own

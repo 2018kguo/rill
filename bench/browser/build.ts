@@ -55,6 +55,8 @@ async function bundle(entry: string, outdir: string, engine: string) {
     minify: process.env.PROFILE ? { whitespace: true, syntax: true, identifiers: false } : true,
     define: { "process.env.NODE_ENV": '"production"' },
     plugins: [resolveHere(engine)],
+    // SOURCEMAP=1: maps for bytes.mjs to attribute each file's bytes to its sources.
+    sourcemap: process.env.SOURCEMAP ? "external" : "none",
   });
   if (!result.success) {
     for (const log of result.logs) console.error(log);
