@@ -1905,10 +1905,17 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
     // first entry gathers `parent`'s own.
     let mut levels = vec![(parent, EMPTY)];
     let mut cursor = tree.nodes[parent as usize].first;
+    // After a comment still streaming: it ends where the raw node ends and is gone before
+    // the text around it is joined, so that text is one node, as in Streamdown's tree.
+    let mut joins = false;
     while cursor != NIL {
         let next = tree.nodes[cursor as usize].next;
         let mut keep = Some(cursor);
         match simple_raw_at(tree, cursor) {
+            Some(SimpleRaw::Comment) if SimpleRaw::open_comment(raw_value(tree, cursor)) => {
+                keep = None;
+                joins = true;
+            }
             Some(SimpleRaw::Open(tag)) => {
                 let element = tree.element(tag, raw_node_props(tree, cursor), At::None);
                 tree.nodes[element as usize].start = tree.nodes[cursor as usize].start;
@@ -1937,6 +1944,25 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
         }
         if let Some(node) = keep {
             let (_, children) = levels.last_mut().expect("the parent's level stays");
+            let before = children.last;
+            if joins
+                && before != NIL
+                && let (NodeKind::Text(after), NodeKind::Text(_)) = (
+                    &tree.nodes[node as usize].kind,
+                    &tree.nodes[before as usize].kind,
+                )
+            {
+                let after = after.clone();
+                let end = tree.nodes[node as usize].end;
+                if let NodeKind::Text(value) = &mut tree.nodes[before as usize].kind {
+                    crate::mdast::push_cow(value, &after);
+                }
+                tree.nodes[before as usize].end = end;
+                joins = false;
+                cursor = next;
+                continue;
+            }
+            joins = false;
             tree.append(children, node);
         }
         cursor = next;
