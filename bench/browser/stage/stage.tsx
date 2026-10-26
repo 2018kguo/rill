@@ -33,9 +33,14 @@ const rate = Number(params.get("rate") ?? 1200);
 // is the bottleneck and the run's length measures its throughput.
 const chunk = Number(params.get("chunk") ?? 0);
 const turns = Number(params.get("turns") ?? 18);
+// from=N: the answer starts with its first N characters already there (a long answer that
+// is still streaming), for recordings.
+const from = Number(params.get("from") ?? 0);
 const source = documents[params.get("doc") ?? "lru-cache"] ?? lruCache;
 // nocode=1: no highlighting (prices what highlighting adds to a run).
 const plugins = params.get("nocode") === "1" ? {} : { code };
+// tablemax=none: tables grow with their rows instead of scrolling inside 300 px (recordings).
+const tableProps = params.has("tablemax") ? { tableMaxHeight: params.get("tablemax")! } : {};
 
 const $ = (id: string) => document.getElementById(id)!;
 const frames: number[] = [];
@@ -132,14 +137,14 @@ function follow() {
 }
 
 function Stream() {
-  const [shown, setShown] = useState("");
+  const [shown, setShown] = useState(() => source.slice(0, from));
   const [done, setDone] = useState(false);
   useEffect(() => {
     let frame = 0;
     const tick = () => {
       const now = performance.now();
       frames.push(now);
-      revealed = Math.min(source.length, chunk ? revealed + chunk : Math.floor(((now - stats.started) * rate) / 1000));
+      revealed = Math.min(source.length, chunk ? revealed + chunk : from + Math.floor(((now - stats.started) * rate) / 1000));
       setShown(source.slice(0, revealed));
       follow();
       overlay(now);
@@ -149,7 +154,7 @@ function Stream() {
         setDone(true);
       }
     };
-    let revealed = 0;
+    let revealed = from;
     (window as unknown as { go: () => void }).go = () => {
       begin();
       stats.started = performance.now();
@@ -160,7 +165,7 @@ function Stream() {
   }, []);
   // noanim=1: a page that never passes isAnimating (the drop-in cannot tell it streams).
   const animating = params.get("noanim") === "1" ? {} : { isAnimating: !done };
-  return createElement(Streamdown, { plugins, ...answerProps(done, shown), ...animating }, shown);
+  return createElement(Streamdown, { plugins, ...tableProps, ...answerProps(done, shown), ...animating }, shown);
 }
 
 const asked: Record<string, string> = {
@@ -183,7 +188,7 @@ function History() {
         "div",
         { key: index, className: "turn" },
         createElement("p", { className: "question" }, questions[index % questions.length]),
-        createElement(Streamdown, { plugins, ...answerProps(true, answers[index % answers.length]!) }, answers[index % answers.length]),
+        createElement(Streamdown, { plugins, ...tableProps, ...answerProps(true, answers[index % answers.length]!) }, answers[index % answers.length]),
       ),
     ),
   );
@@ -214,7 +219,13 @@ function startHistory() {
 if (params.get("cv") === "1") document.head.append(Object.assign(document.createElement("style"), { textContent: ".turn{content-visibility:auto;contain-intrinsic-size:auto 1200px}" }));
 // composer=1: a chat input under the answer (plain DOM, outside React), for recordings
 // of typing while the page renders: what's typed shows once the main thread is free.
-if (params.get("composer") === "1") $("composer").hidden = false;
+const typed: { at: number; length: number }[] = [];
+(window as unknown as { stage: { typed?: unknown } }).stage.typed = typed;
+if (params.get("composer") === "1") {
+  $("composer").hidden = false;
+  // When each keystroke reached the page (an input event runs once the main thread is free).
+  $("ask").addEventListener("input", (event) => typed.push({ at: performance.now() - stats.started, length: (event.target as HTMLTextAreaElement).value.length }));
+}
 $("engine").textContent = engineName;
 document.body.dataset.engine = engineName.includes("rill") ? "rill" : "streamdown";
 if (scene === "history") {
