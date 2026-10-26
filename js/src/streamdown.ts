@@ -1362,7 +1362,7 @@ function renderChunks(
     return { chunk, definitions: usable, footnotes, calls: after, last, incomplete, before: at, nodes, counts: own };
   };
   /** Joins `piece` to the root's children, as its nodes sit in the whole text. */
-  const place = (piece: Piece, removed: boolean, opens: boolean) => {
+  const place = (piece: Piece, removed: boolean, opens: boolean, streamingComment = false) => {
     rendered.push(piece);
     // A piece that cannot call a footnote passes the calls before it on, whatever they
     // were when it rendered.
@@ -1394,8 +1394,10 @@ function renderChunks(
       }
     }
     slots += 1;
+    // A comment still streaming at the text's end is gone before parse5 runs (see
+    // `close_open_raw`): the line endings around it merge, as nothing kept them apart.
     barrier =
-      piece.nodes.length === 0 ||
+      (piece.nodes.length === 0 && !streamingComment) ||
       (typeof piece.nodes.at(-1) === "string" && />\s*$/.test(piece.chunk));
     for (let node = first; node < piece.nodes.length; node += 1) out.push(piece.nodes[node]);
   };
@@ -1407,7 +1409,8 @@ function renderChunks(
     const removed =
       piece.nodes.length === 0 &&
       removedNode(chunk, [...(known.get(chunk) ?? []), ...(knownNotes.get(chunk) ?? []).map(([note]) => note)]);
-    place(piece, removed, /^\s*</.test(chunk));
+    const last = index === chunks.length - 1;
+    place(piece, removed, /^\s*</.test(chunk), last && /<!--(?![\s\S]*-->)/.test(chunk));
   }
   if (footnoted) {
     // The section: every footnote definition, with the link definitions their text may
