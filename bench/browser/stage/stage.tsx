@@ -212,6 +212,9 @@ function startHistory() {
 // cv=1: settled turns skip layout and paint while off screen (a page's own CSS; the DOM
 // stays the same).
 if (params.get("cv") === "1") document.head.append(Object.assign(document.createElement("style"), { textContent: ".turn{content-visibility:auto;contain-intrinsic-size:auto 1200px}" }));
+// composer=1: a chat input under the answer (plain DOM, outside React), for recordings
+// of typing while the page renders: what's typed shows once the main thread is free.
+if (params.get("composer") === "1") $("composer").hidden = false;
 $("engine").textContent = engineName;
 document.body.dataset.engine = engineName.includes("rill") ? "rill" : "streamdown";
 if (scene === "history") {

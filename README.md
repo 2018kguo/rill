@@ -42,6 +42,11 @@ server rendering and hydration, `components` overrides and `plugins`.
 build** needs the highlighter's WebAssembly URL. See
 [Setup per bundler](docs/reference.md#setup-per-bundler).
 
+If your `<Streamdown>` has `remarkPlugins` or `rehypePlugins` of its own, or Markdown
+syntax of its own (mentions, citations, custom links), see
+[customizing.md](docs/customizing.md): which plugins rill reproduces as they are, and
+how to ship your own as a custom build.
+
 ## How much faster
 
 Chromium with a phone-sized screen and the CPU throttled 10×, Streamdown 2.7.1 vs rill
@@ -122,6 +127,7 @@ when they scroll near.
 
 - [how-it-works.md](docs/how-it-works.md): where the time goes and what rill does about it
 - [benchmarks.md](docs/benchmarks.md): every number, how it's measured, how to rerun it
+- [customizing.md](docs/customizing.md): your own plugins, custom builds, and shipping them
 - [reference.md](docs/reference.md): API, setup per bundler, plugins, fallbacks, custom builds
 - [conformance.md](docs/conformance.md): how rill is checked against Streamdown
 - [development.md](docs/development.md): the demo, the benchmarks and the repository layout
