@@ -9,7 +9,9 @@
 //
 // Scenarios are named in scenarios.mjs (all four by default); the engines default to
 // what `npm run build` built.
-import { writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { readFileSync, writeFileSync } from "node:fs";
+import { cpus, platform, release, totalmem } from "node:os";
 import { chromium } from "playwright";
 import * as Trace from "@paulirish/trace_engine/models/trace/trace.js";
 
@@ -133,6 +135,29 @@ function ratioInterval(a, b, draws = 2000) {
 const servers = engines.map(([name, root]) => ({ name, ...serve(root) }));
 const browser = await chromium.launch({ args: ["--disable-background-timer-throttling", "--disable-renderer-backgrounding"] });
 const results = [];
+// What the numbers were measured on, written beside them.
+const versionOf = (name) => JSON.parse(readFileSync(new URL(`node_modules/${name}/package.json`, import.meta.url), "utf8")).version;
+const git = (command) => {
+  try {
+    return execSync(`git ${command}`, { cwd: new URL(".", import.meta.url), encoding: "utf8" }).trim();
+  } catch {
+    return null;
+  }
+};
+const environment = {
+  date: new Date().toISOString(),
+  commit: git("rev-parse HEAD"),
+  dirty: git("status --porcelain -- ../../js ../../crates ../browser") !== "",
+  rill: JSON.parse(readFileSync(new URL("../../js/package.json", import.meta.url), "utf8")).version,
+  streamdown: versionOf("streamdown"),
+  react: versionOf("react"),
+  chromium: browser.version(),
+  node: process.version,
+  os: `${platform()} ${release()}`,
+  cpu: `${cpus()[0]?.model} (${cpus().length} cores)`,
+  memoryGB: Math.round(totalmem() / 2 ** 30),
+  settings: { throttles, runs, warmups, screen },
+};
 for (const [scenario, query] of scenarios) {
   for (const throttle of throttles) {
     const samples = Object.fromEntries(engines.map(([name]) => [name, []]));
@@ -170,7 +195,7 @@ for (const [scenario, query] of scenarios) {
       if (v && Number.isFinite(v.median)) console.log(`  visible ratio ${v.median.toFixed(2)}× [95% CI ${v.ci95[0].toFixed(2)}–${v.ci95[1].toFixed(2)}]`);
       console.log(`  wall ratio ${r.median.toFixed(2)}× [95% CI ${r.ci95[0].toFixed(2)}–${r.ci95[1].toFixed(2)}], busy ratio ${summary.busyMsRatio.median.toFixed(2)}× [${summary.busyMsRatio.ci95.map((x) => x.toFixed(2)).join("–")}], script+gc ratio ${summary.scriptGcMsRatio.median.toFixed(2)}× [${summary.scriptGcMsRatio.ci95.map((x) => x.toFixed(2)).join("–")}]`);
     }
-    writeFileSync(out, JSON.stringify(results, null, 1));
+    writeFileSync(out, JSON.stringify({ environment, results }, null, 1));
   }
 }
 await browser.close();

@@ -7,7 +7,10 @@
     "tables": "node crates/rill-cmark/gen-unicode-tables.mjs",
     "wasm": "sh scripts/build-wasm.sh",
     "demo": "npm run demo:build && bun demo/serve.js",
-    "demo:build": "sh scripts/build-wasm.sh && bun build demo/main.js --outdir demo/dist --target browser && mkdir -p demo/dist/katex && cp js/wasm/rill_bg.wasm demo/dist/ && cp -R node_modules/katex/dist/katex.min.css node_modules/katex/dist/fonts demo/dist/katex/"
+    "demo:build": "sh scripts/build-wasm.sh && bun build demo/main.js --outdir demo/dist --target browser && mkdir -p demo/dist/katex && cp js/wasm/rill_bg.wasm demo/dist/ && cp -R node_modules/katex/dist/katex.min.css node_modules/katex/dist/fonts demo/dist/katex/",
+    "bench": "cd bench/browser && npm install && bun build.ts && node bench.mjs",
+    "bench:native": "cargo run --release -p rill --example bench",
+    "bench:bytes": "cd bench/browser && SOURCEMAP=1 bun build.ts streamdown rill rill-code && node bytes.mjs --by package streamdown rill rill-code"
   },
   "dependencies": {
     "@streamdown/cjk": "1.0.4",
