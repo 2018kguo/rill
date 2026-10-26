@@ -96,10 +96,15 @@ await check("Enter on the focused copy button copies, and the button keeps the f
 
 await check("the table's copy menu copies it as CSV", async (page) => {
   await mount(page);
+  // The browser's clipboard outlives a context: an earlier check's copy can still land.
+  await page.evaluate(() => navigator.clipboard.writeText(""));
   await page.click('button[title="Copy table"]');
   await page.click('button:text-is("CSV")');
-  await page.waitForFunction(async () => (await navigator.clipboard.readText()).includes("Name"));
-  assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r/g, ""), "Name,Value\na,1\nb,2");
+  const expected = "Name,Value\na,1\nb,2";
+  await page
+    .waitForFunction(async (csv) => (await navigator.clipboard.readText()).replace(/\r/g, "") === csv, expected)
+    .catch(() => {});
+  assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r/g, ""), expected);
 });
 
 await check("the table's download menu saves it as Markdown", async (page) => {
