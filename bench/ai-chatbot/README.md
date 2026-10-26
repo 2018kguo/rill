@@ -7,7 +7,7 @@ import, and traced in Chromium.
 
 ## What changes in the template
 
-- `template.patch`, in both builds: Streamdown 2.3.0 → 2.7.1 and its plugins to their
+- `template.patch`, in both builds: Streamdown 2.3.0 to 2.7.1 and its plugins to their
   current versions (rill is a drop-in for 2.7.1; Streamdown 2.7.1's stricter prop types
   need one `Omit` in `reasoning.tsx`), and a local mode without keys: the template's own
   mock model (`PLAYWRIGHT=True`) for every model id, streaming `answer.md` when the prompt

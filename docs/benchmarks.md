@@ -12,16 +12,16 @@ A chat page (production React, Tailwind, Streamdown's `code` plugin) built once 
 Streamdown and once with rill's drop-in, loaded in Chromium with a phone-sized screen
 (412×915 at 2.625×) and the CPU throttled 10× (about a budget Android phone). Medians of
 5 runs per engine after a warm-up, interleaved; the brackets are 95% bootstrap intervals
-on the ratio.
+on the ratio. Where a cell has two values, the first is Streamdown's.
 
 | Scenario | Finished sooner | Less main-thread JS + GC | Long-frame blocking | JS heap after |
 |---|---:|---:|---:|---:|
-| Open a chat of 18 long answers (231 KB: code, tables, lists) | 4.4× [3.7–5.4] | 6.6× [5.3–8.0] | 6.1 s → 1.4 s | 41.8 → 13.9 MB |
-| Open a code-heavy chat (18 answers, four languages of code) | 8.2× [5.5–9.3] | 11.9× [8.4–13.5] | 5.1 s → 0.5 s | 41.8 → 9.1 MB |
-| Stream the 118-element periodic table as one table | 4.2× [4.0–4.4] | 14.5× [13.6–16.5] | 15.4 s → 44 ms | 12.4 → 8.5 MB |
-| Stream the Rust Book's ownership chapter (56 KB) | 5.2× [4.8–7.3] | 13.7× [9.5–19.6] | 123 s → 99 ms | 20.3 → 11.6 MB |
-| The same chapter below the 18 answers | 4.2× [3.7–5.4] | 9.0× [7.9–12.5] | 141 s → 0.5 s | 51.1 → 19.0 MB |
-| The same, at a realistic 2,400 characters a second | stream-bound (1.0×) | 1.8× [1.7–1.8] | 8.6 s → 0.2 s | 48.6 → 18.4 MB |
+| Open a chat of 18 long answers (231 KB: code, tables, lists) | 4.4× [3.7–5.4] | 6.6× [5.3–8.0] | 6.1 s to 1.4 s | 41.8 to 13.9 MB |
+| Open a code-heavy chat (18 answers, four languages of code) | 8.2× [5.5–9.3] | 11.9× [8.4–13.5] | 5.1 s to 0.5 s | 41.8 to 9.1 MB |
+| Stream the 118-element periodic table as one table | 4.2× [4.0–4.4] | 14.5× [13.6–16.5] | 15.4 s to 44 ms | 12.4 to 8.5 MB |
+| Stream the Rust Book's ownership chapter (56 KB) | 5.2× [4.8–7.3] | 13.7× [9.5–19.6] | 123 s to 99 ms | 20.3 to 11.6 MB |
+| The same chapter below the 18 answers | 4.2× [3.7–5.4] | 9.0× [7.9–12.5] | 141 s to 0.5 s | 51.1 to 19.0 MB |
+| The same, at a realistic 2,400 characters a second | stream-bound (1.0×) | 1.8× [1.7–1.8] | 8.6 s to 0.2 s | 48.6 to 18.4 MB |
 
 How to read it:
 
@@ -91,14 +91,14 @@ npm run bench:native                  # rill natively
 Streamdown with its `cjk`, `code`, `math` and `mermaid` plugins), built for production as
 it is and with rill's import changed in the two files that render Markdown, using the
 template's mock model. Measured on October 24 2026 with a rill 0.3 development build;
-medians of 5 interleaved runs with 95% bootstrap intervals, Streamdown 2.7.1 → rill:
+medians of 5 interleaved runs with 95% bootstrap intervals; Streamdown 2.7.1's value first:
 
 | Scenario | CPU | Settled | Main-thread JS + GC | Long-frame blocking |
 |---|---:|---:|---:|---:|
-| Open a chat of 18 long answers (239 KB) | 4× | 2,991 → 1,942 ms (1.54×) | 2,735 → 1,535 ms (1.78×) | 2,150 → 1,221 ms |
-| | 10× | 7,964 → 2,863 ms (2.78× [2.71–2.84]) | 7,338 → 2,214 ms (3.31× [3.23–3.39]) | 6,820 → 2,135 ms |
-| Stream an 8 KB answer at 2,400 characters a second | 4× | stream-bound | 3,404 → 2,239 ms (1.52×) | 497 → 4 ms |
-| | 10× | 10,056 → 6,427 ms (1.56×) | 9,360 → 5,638 ms (1.66×) | 8,401 → 4,070 ms |
+| Open a chat of 18 long answers (239 KB) | 4× | 2,991 to 1,942 ms (1.54×) | 2,735 to 1,535 ms (1.78×) | 2,150 to 1,221 ms |
+| | 10× | 7,964 to 2,863 ms (2.78× [2.71–2.84]) | 7,338 to 2,214 ms (3.31× [3.23–3.39]) | 6,820 to 2,135 ms |
+| Stream an 8 KB answer at 2,400 characters a second | 4× | stream-bound | 3,404 to 2,239 ms (1.52×) | 497 to 4 ms |
+| | 10× | 10,056 to 6,427 ms (1.56×) | 9,360 to 5,638 ms (1.66×) | 8,401 to 4,070 ms |
 
 In a real app React also re-renders the app around each answer (the message list, the
 chat state), which is most of what remains at 10× and why the gains are smaller than on

@@ -241,7 +241,7 @@ setFallbackListener((reason, detail) => track("rill-fallback", { reason, detail 
 | Stage | Package ported | Runs in |
 |---|---|---|
 | Parse | remark-parse 11, remark-gfm 4, Streamdown's remarkCodeMeta; `plugins.math`: remark-math 6 (either dollar rule); `plugins.cjk`: remark-cjk-friendly 2.3 (and its strikethrough) and its autolink boundary; remark-breaks 4 | Rust |
-| MDAST → HAST | remark-rehype 11 (`allowDangerousHtml`) | Rust |
+| MDAST to HAST | remark-rehype 11 (`allowDangerousHtml`) | Rust |
 | Raw HTML | rehype-raw 7 | Rust without raw HTML, else JavaScript |
 | Sanitize | rehype-sanitize 6, Streamdown 2.7.1's schema | Rust |
 | Harden | rehype-harden 1.1.8 with Streamdown's options | Rust |
