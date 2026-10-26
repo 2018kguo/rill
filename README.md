@@ -51,21 +51,28 @@ how to ship your own as a custom build.
 
 ## How much faster
 
-Chromium with a phone-sized screen and the CPU throttled 10×, Streamdown 2.7.1 vs rill
-0.4.0, the same final HTML on both sides; medians of interleaved runs. Where a cell has two
-values, the first is Streamdown's:
+Measured in Chromium on a phone-sized screen, with the CPU slowed 10× to roughly match a
+budget Android phone. Both engines produce the same final HTML. Each number is the median
+of runs that alternate between the two engines.
 
-| Scenario | Finished sooner | Less main-thread JavaScript | Stutter (long-frame blocking) | Memory after |
+| Scenario | Done sooner | Less JavaScript work | Stutter, Streamdown / rill | Memory, Streamdown / rill |
 |---|---:|---:|---:|---:|
-| Open a chat of 18 long answers | 4.4× | 6.6× | 6.1 s to 1.4 s | 41.8 to 13.9 MB |
-| Open a code-heavy chat | 8.2× | 11.9× | 5.1 s to 0.5 s | 41.8 to 9.1 MB |
-| Stream a 118-row table | 4.2× | 14.5× | 15.4 s to 44 ms | 12.4 to 8.5 MB |
-| Stream a 56 KB answer | 5.2× | 13.7× | 123 s to 99 ms | 20.3 to 11.6 MB |
+| Open a chat of 18 long answers | 4.4× | 6.6× | 6.1 s / 1.4 s | 41.8 / 13.9 MB |
+| Open a code-heavy chat | 8.2× | 11.9× | 5.1 s / 0.5 s | 41.8 / 9.1 MB |
+| Stream a 118-row table | 4.2× | 14.5× | 15.4 s / 44 ms | 12.4 / 8.5 MB |
+| Stream a 56 KB answer | 5.2× | 13.7× | 123 s / 99 ms | 20.3 / 11.6 MB |
 
-In Vercel's [ai-chatbot](https://github.com/vercel/ai-chatbot) template, with one import
-changed, an 18-answer chat opens 2.8× faster with 3.3× less main-thread JavaScript.
+*Less JavaScript work* is time the main thread spent running JavaScript and collecting
+its garbage. *Stutter* is how long the main thread stayed busy past 50 ms in a frame,
+which is what a user feels as lag. *Memory* is the JavaScript heap once the page settles.
+
+In a full app the gains are smaller, because React also re-renders the app around each
+answer. In Vercel's [ai-chatbot](https://github.com/vercel/ai-chatbot) template, changing
+the one import made an 18-answer chat open 2.8× faster, with 3.3× less JavaScript work
+(measured with rill 0.3).
+
 [benchmarks.md](docs/benchmarks.md) has every scenario with confidence intervals, page
-weight, the raw results and how to rerun them (`npm run bench`).
+weight and the raw results. `npm run bench` reruns them.
 
 ## What's different
 
