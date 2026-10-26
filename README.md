@@ -3,14 +3,16 @@
 **A drop-in replacement for Streamdown that's much faster. Same DOM, byte for byte.**
 
 rill is a drop-in for [Streamdown](https://github.com/vercel/streamdown) 2.7.1, the
-Markdown component behind a lot of AI chat UIs. Change one import and the same component
-renders the same page, down to every class, attribute and text node, doing a fraction of
-the work. On a throttled phone profile, long chats open 4 to 8 times sooner and answers
-stream without stutter.
+Markdown component behind a lot of AI chat UIs. Change one import and you get the same
+component and the same page, down to every class, attribute and text node, built with a
+fraction of the work. On a CPU slowed to phone speed, long chats open 4 to 8 times sooner and long
+answers stream without stutter.
 
-[![Streamdown and rill streaming the Rust Book's ownership chapter side by side at 10× CPU throttle: 28 fps vs 65 fps](docs/rill-0.2.jpg)](https://github.com/2018kguo/rill/releases/tag/v0.2.0)
+![Streamdown on the left and rill on the right, recorded at 10× CPU throttle: streaming a table, streaming a long answer, typing while a long chat opens, then the benchmark results](docs/rill-film.gif)
 
-*The launch film (70 s, real recordings): [watch it on the release page](https://github.com/2018kguo/rill/releases/tag/v0.2.0).*
+*Real recordings (of rill 0.2), Streamdown on the left and rill on the right, on a CPU
+slowed 10× to match a budget phone. The counters at the top of each pane are measured in
+the page; the results at the end are 0.4's.*
 
 ## Use it
 
@@ -108,7 +110,7 @@ setFallbackListener((reason, detail) => track("rill-fallback", { reason, detail 
 
 The common plugins (remark-breaks, remark-math with rehype-katex, rehype-slug,
 rehype-external-links) stay on the fast path, and plugins of your own can run there as a
-[custom build](docs/reference.md#custom-builds). Every reason is listed in
+[custom build](docs/customizing.md#how-a-custom-build-works). Every reason is listed in
 [the reference](docs/reference.md#fallbacks).
 
 ## One line of CSS for long chats
@@ -128,7 +130,7 @@ when they scroll near.
 - [how-it-works.md](docs/how-it-works.md): where the time goes and what rill does about it
 - [benchmarks.md](docs/benchmarks.md): every number, how it's measured, how to rerun it
 - [customizing.md](docs/customizing.md): your own plugins, custom builds, and shipping them
-- [reference.md](docs/reference.md): API, setup per bundler, plugins, fallbacks, custom builds
+- [reference.md](docs/reference.md): every entry point, setup per bundler, which plugins run fast, fallbacks
 - [conformance.md](docs/conformance.md): how rill is checked against Streamdown
 - [development.md](docs/development.md): the demo, the benchmarks and the repository layout
 

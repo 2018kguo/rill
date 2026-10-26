@@ -29,6 +29,7 @@ throttled 10×), Streamdown 2.7.1 vs rill 0.4.0:
 
 - [How it works](https://github.com/2018kguo/rill/blob/main/docs/how-it-works.md)
 - [Benchmarks](https://github.com/2018kguo/rill/blob/main/docs/benchmarks.md), with raw results and how to rerun them
-- [Reference](https://github.com/2018kguo/rill/blob/main/docs/reference.md): setup per bundler, API, plugins, fallbacks, custom builds
+- [Customizing](https://github.com/2018kguo/rill/blob/main/docs/customizing.md): your own plugins, as a custom build
+- [Reference](https://github.com/2018kguo/rill/blob/main/docs/reference.md): setup per bundler, every entry point, plugins, fallbacks
 
 MIT. Source: [github.com/2018kguo/rill](https://github.com/2018kguo/rill)

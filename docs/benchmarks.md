@@ -10,9 +10,11 @@ reproduces it.
 
 A chat page (production React, Tailwind, Streamdown's `code` plugin) built once with
 Streamdown and once with rill's drop-in, loaded in Chromium with a phone-sized screen
-(412×915 at 2.625×) and the CPU throttled 10× (about a budget Android phone). Medians of
-5 runs per engine after a warm-up, interleaved; the brackets are 95% bootstrap intervals
-on the ratio. Where a cell has two values, the first is Streamdown's.
+(412×915 at 2.625×) and the CPU throttled 10× (about a budget Android phone). Each number
+is the median of 5 runs per engine after a warm-up, alternating engines run by run. The
+brackets are 95% confidence intervals on the ratio (bootstrapped: resampled from the runs
+to see how much the ratio could move). Where a cell has two values, the first is
+Streamdown's.
 
 | Scenario | Finished sooner | Less main-thread JS + GC | Long-frame blocking | JS heap after |
 |---|---:|---:|---:|---:|
@@ -30,8 +32,10 @@ How to read it:
   characters a frame, except the last row, which feeds it at a fixed pace: there both
   finish when the text does, and what differs is how hard the main thread works and how
   often it blocks.
-- **Less main-thread JS + GC** is the engine's own work. Layout and paint are the same
-  on both sides (the DOM is the same), so this is the part rill changes.
+- **Less main-thread JS + GC** is time spent running JavaScript and collecting its
+  garbage on the main thread, the thread that also handles input and drawing. Layout and
+  paint are the same on both sides (the DOM is the same), so this is the part rill
+  changes.
 - **Long-frame blocking** is the time the main thread was busy past 50 ms in a frame,
   from the browser's Long Animation Frames entries: how much a user would feel as
   stutter or delayed input.
