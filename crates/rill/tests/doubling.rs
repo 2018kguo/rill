@@ -7,7 +7,7 @@
 //! prints the same families at larger sizes.
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 use std::time::Instant;
 
 mod common;
@@ -16,16 +16,29 @@ use common::families::FAMILIES;
 
 struct Counting;
 
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
-/// Bytes of fresh allocations only (not a buffer growing in place, which a stream's text
-/// does, by doubling, in whichever update it crosses a power of two).
-static FRESH: AtomicUsize = AtomicUsize::new(0);
+// Per thread: the tests in this file run on threads of their own, at once, and each
+// counts only what it allocates.
+thread_local! {
+    static ALLOCATED: Cell<usize> = const { Cell::new(0) };
+    /// Bytes of fresh allocations only (not a buffer growing in place, which a stream's
+    /// text does, by doubling, in whichever update it crosses a power of two).
+    static FRESH: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Adds `bytes` to this thread's `counter` (not while the thread's locals are torn down).
+fn add(counter: &'static std::thread::LocalKey<Cell<usize>>, bytes: usize) {
+    let _ = counter.try_with(|count| count.set(count.get() + bytes));
+}
+
+fn read(counter: &'static std::thread::LocalKey<Cell<usize>>) -> usize {
+    counter.with(Cell::get)
+}
 
 // SAFETY: forwards to the system allocator, counting the bytes asked for.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
-        FRESH.fetch_add(layout.size(), Ordering::Relaxed);
+        add(&ALLOCATED, layout.size());
+        add(&FRESH, layout.size());
         // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract.
         unsafe { System.alloc(layout) }
     }
@@ -36,7 +49,7 @@ unsafe impl GlobalAlloc for Counting {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATED.fetch_add(new_size, Ordering::Relaxed);
+        add(&ALLOCATED, new_size);
         // SAFETY: the caller upholds `GlobalAlloc::realloc`'s contract.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -49,9 +62,9 @@ const SIZES: [usize; 4] = [1_000, 2_000, 4_000, 8_000];
 
 /// Bytes allocated and the best time (ms) of `run`.
 fn measure(run: &dyn Fn()) -> (usize, f64) {
-    let before = ALLOCATED.load(Ordering::Relaxed);
+    let before = read(&ALLOCATED);
     run();
-    let bytes = ALLOCATED.load(Ordering::Relaxed) - before;
+    let bytes = read(&ALLOCATED) - before;
     let mut best = f64::INFINITY;
     for _ in 0..3 {
         let start = Instant::now();
@@ -134,17 +147,14 @@ fn last_heals(text: &str) -> (usize, f64) {
         let (mut bytes, mut time) = (0, Instant::now());
         for (index, &end) in ends.iter().enumerate() {
             if index == ends.len() - TIMED {
-                bytes = FRESH.load(Ordering::Relaxed);
+                bytes = read(&FRESH);
                 time = Instant::now();
             }
             let _ = stream.heal(&text[start..end], index == 0);
             start = end;
         }
         let elapsed = time.elapsed().as_secs_f64() * 1e3;
-        best = (
-            best.0.min(FRESH.load(Ordering::Relaxed) - bytes),
-            best.1.min(elapsed),
-        );
+        best = (best.0.min(read(&FRESH) - bytes), best.1.min(elapsed));
     }
     best
 }
