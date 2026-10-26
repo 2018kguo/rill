@@ -1,6 +1,6 @@
 # Benchmarks
 
-Every number here was measured on rill 0.4.0 against Streamdown 2.7.1, with
+Every number here was measured on the current rill against Streamdown 2.7.1, with
 byte-identical final HTML on both sides, unless a section says otherwise. The raw results,
 with the machine and versions they came from, are in
 [`bench/results/0.4.0/`](../bench/results/0.4.0). Each section ends with the command that
@@ -94,8 +94,8 @@ npm run bench:native                  # rill natively
 [vercel/ai-chatbot](https://github.com/vercel/ai-chatbot) (Next.js 16, React 19,
 Streamdown with its `cjk`, `code`, `math` and `mermaid` plugins), built for production as
 it is and with rill's import changed in the two files that render Markdown, using the
-template's mock model. Measured on October 24 2026 with a rill 0.3 development build;
-medians of 5 interleaved runs with 95% bootstrap intervals; Streamdown 2.7.1's value first:
+template's mock model. Measured on October 24 2026 with an earlier rill build than the
+rest of this page; medians of 5 interleaved runs with 95% bootstrap intervals; Streamdown 2.7.1's value first:
 
 | Scenario | CPU | Settled | Main-thread JS + GC | Long-frame blocking |
 |---|---:|---:|---:|---:|
@@ -104,10 +104,14 @@ medians of 5 interleaved runs with 95% bootstrap intervals; Streamdown 2.7.1's v
 | Stream an 8 KB answer at 2,400 characters a second | 4× | stream-bound | 3,404 to 2,239 ms (1.52×) | 497 to 4 ms |
 | | 10× | 10,056 to 6,427 ms (1.56×) | 9,360 to 5,638 ms (1.66×) | 8,401 to 4,070 ms |
 
-In a real app React also re-renders the app around each answer (the message list, the
-chat state), which is most of what remains at 10× and why the gains are smaller than on
-the Markdown-only page. That run's memory numbers predate a fix in 0.3 for pages that
-stream without `isAnimating` and are left out here.
+The ratios are smaller than on the Markdown-only page above (2.8× against 4.4× to open
+the chat, 3.3× against 6.6× less JavaScript work) because the app does work of its own
+that rill doesn't touch. On every update React also re-renders the app around the answer
+(the message list, the sidebar, the chat state), and that costs the same with either
+engine. At 10× it's most of what remains on the rill side.
+
+Memory isn't shown: that run came before a fix for pages that stream without
+`isAnimating`, so its memory numbers don't reflect rill today.
 
 ```sh
 # see bench/ai-chatbot/README.md: two production builds, a local Postgres, then

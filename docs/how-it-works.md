@@ -159,7 +159,7 @@ the answer length and check the cost per update, and why the benchmark streams a
 answer instead of a 2 KB one.
 
 **Comparing every streamed step finds bugs that comparing final pages misses.** Two
-examples from 0.4: a footnote cited twice lost its second back-link while a later
+examples: a footnote cited twice lost its second back-link while a later
 definition was still arriving, and a comment cut off mid-stream split one line break
 into two text nodes in animated messages. A single render of the finished answer
 showed neither; the step-by-step comparison caught both.

@@ -10,9 +10,8 @@ answers stream without stutter.
 
 ![Streamdown on the left and rill on the right, recorded at 10× CPU throttle: streaming a table, streaming a long answer, typing while a long chat opens, then the benchmark results](docs/rill-film.gif)
 
-*Real recordings (of rill 0.2), Streamdown on the left and rill on the right, on a CPU
-slowed 10× to match a budget phone. The counters at the top of each pane are measured in
-the page; the results at the end are 0.4's.*
+*Real recordings, Streamdown on the left and rill on the right, on a CPU slowed 10× to
+match a budget phone. The counters at the top of each pane are measured in the page.*
 
 ## Use it
 
@@ -66,10 +65,12 @@ of runs that alternate between the two engines.
 its garbage. *Stutter* is how long the main thread stayed busy past 50 ms in a frame,
 which is what a user feels as lag. *Memory* is the JavaScript heap once the page settles.
 
-In a full app the gains are smaller, because React also re-renders the app around each
-answer. In Vercel's [ai-chatbot](https://github.com/vercel/ai-chatbot) template, changing
-the one import made an 18-answer chat open 2.8× faster, with 3.3× less JavaScript work
-(measured with rill 0.3).
+The table times a page that does nothing but render Markdown. A real app does other
+work on top, and that part is the same with either engine: React rendering the message
+list, the sidebar and the chat state. So the ratios come out smaller. In Vercel's
+[ai-chatbot](https://github.com/vercel/ai-chatbot) template, changing the one import made
+an 18-answer chat open 2.8× faster (4.4× on the Markdown-only page) with 3.3× less
+JavaScript work (6.6× there).
 
 [benchmarks.md](docs/benchmarks.md) has every scenario with confidence intervals, page
 weight and the raw results. `npm run bench` reruns them.
