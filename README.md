@@ -65,12 +65,16 @@ of runs that alternate between the two engines.
 its garbage. *Stutter* is how long the main thread stayed busy past 50 ms in a frame,
 which is what a user feels as lag. *Memory* is the JavaScript heap once the page settles.
 
-The table times a page that does nothing but render Markdown. A real app does other
-work on top, and that part is the same with either engine: React rendering the message
-list, the sidebar and the chat state. So the ratios come out smaller. In Vercel's
-[ai-chatbot](https://github.com/vercel/ai-chatbot) template, changing the one import made
-an 18-answer chat open 2.8× faster (4.4× on the Markdown-only page) with 3.3× less
-JavaScript work (6.6× there).
+The table measures a page that does nothing but render Markdown. A real app spends time
+on other work too, and that time is the same with either engine: React rendering the
+message list, the sidebar and the chat state. So the time ratios come out smaller. In
+Vercel's [ai-chatbot](https://github.com/vercel/ai-chatbot) template, changing the one
+import made an 18-answer chat open 2.8× faster (4.4× on the Markdown-only page) with 3.3×
+less JavaScript work (6.6× there).
+
+Memory wasn't measured in that app. The megabytes rill saves (about 28 MB on the 18-answer
+chat) come from rendering the Markdown, so they should carry over, but the ratio would be
+smaller because the app keeps memory of its own.
 
 [benchmarks.md](docs/benchmarks.md) has every scenario with confidence intervals, page
 weight and the raw results. `npm run bench` reruns them.
