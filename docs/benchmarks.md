@@ -106,9 +106,9 @@ rest of this page; medians of 5 interleaved runs with 95% bootstrap intervals; S
 
 The ratios are smaller than on the Markdown-only page above (2.8× against 4.4× to open
 the chat, 3.3× against 6.6× less JavaScript work) because the app does work of its own
-that rill doesn't touch. On every update React also re-renders the app around the answer
-(the message list, the sidebar, the chat state), and that costs the same with either
-engine. At 10× it's most of what remains on the rill side.
+that rill doesn't touch. React also renders the app around the answers (the message
+list, the sidebar, the chat state) when the chat opens and again on every streamed
+update, and that costs the same with either engine. At 10× it's most of what remains on the rill side.
 
 Memory isn't shown: that run came before a fix for pages that stream without
 `isAnimating`, so its memory numbers don't reflect rill today.
