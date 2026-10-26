@@ -11,3 +11,6 @@ export const engineName = "rill drop-in";
 
 /** Props each answer adds (`settled`: it is not streaming; `text`: what it shows). */
 export const answerProps = (_settled: boolean, _text: string): Record<string, unknown> => ({});
+
+/** The code plugin the page passes as `plugins.code`. */
+export { code } from "@streamdown/code";

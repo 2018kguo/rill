@@ -8,9 +8,8 @@
 // `window.go()` starts the scene (both windows of a side-by-side recording at once).
 import { createElement, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { code } from "@streamdown/code";
 
-import { answerProps, engineName, Streamdown } from "./engine.ts";
+import { answerProps, code, engineName, Streamdown } from "./engine.ts";
 import elements from "./elements.md" with { type: "text" };
 import japan from "./japan.md" with { type: "text" };
 import lruCache from "./lru-cache.md" with { type: "text" };
