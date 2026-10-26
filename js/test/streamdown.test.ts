@@ -162,6 +162,8 @@ test("a document rill fails on renders with Streamdown's plugins", () => {
     renderMarkup: boom,
     pieces: () => false,
     definitions: boom,
+    footnotes: boom,
+    renderPiece: boom,
     splitsAt: boom,
     remendStream: boom,
     remendMiddle: boom,

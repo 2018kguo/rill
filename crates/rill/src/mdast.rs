@@ -1705,6 +1705,16 @@ fn reference_kind(link_type: LinkType) -> Option<ReferenceKind> {
 /// Parses `source` (NUL-free; see [`without_nul`]) with `syntax` into an arena MDAST,
 /// including mdast-util-gfm-autolink-literal's text transform.
 pub fn parse_arena(source: &str, syntax: Syntax) -> Result<Tree<'_>, Error> {
+    parse_arena_with(source, syntax, &[])
+}
+
+/// [`parse_arena`], with the footnotes `footnotes` labels defined as well (see
+/// [`crate::hast::Footnotes::defined`]).
+pub fn parse_arena_with<'s>(
+    source: &'s str,
+    syntax: Syntax,
+    footnotes: &[String],
+) -> Result<Tree<'s>, Error> {
     if source.contains('\0') {
         return Err(Error::Nul);
     }
@@ -1733,7 +1743,7 @@ pub fn parse_arena(source: &str, syntax: Syntax) -> Result<Tree<'_>, Error> {
         failed_runs: Vec::new(),
         previous: Vec::new(),
     };
-    let events = Parser::with_syntax(source, syntax).into_offset_iter();
+    let events = Parser::with_footnotes(source, syntax, footnotes).into_offset_iter();
     for (event, range) in events {
         builder.event(event, range.start, range.end)?;
     }
@@ -2602,8 +2612,8 @@ fn trim_blank_lines(source: &str, start: usize, mut end: usize) -> usize {
 }
 
 /// Where `source`'s link definitions are, as UTF-16 `[start, end)` ranges, when each
-/// is a child of the root; `None` when one sits in a container or the text has a
-/// footnote definition.
+/// is a child of the root; `None` when one sits in a container (a footnote definition
+/// is one).
 #[must_use]
 pub fn root_definitions(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32)>> {
     let tree = parse_arena(source, syntax).ok()?;
@@ -2620,11 +2630,32 @@ pub fn root_definitions(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32)>>
         .iter()
         .filter(|node| matches!(node.kind, NodeKind::Definition(_)))
         .count();
-    let footnotes = tree
+    (all == ranges.len()).then_some(ranges)
+}
+
+/// `source`'s footnote definitions as UTF-16 `[start, end)` ranges with their labels,
+/// when each is a child of the root; `None` when one sits in a container.
+#[must_use]
+pub fn root_footnotes(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32, Box<str>)>> {
+    let tree = parse_arena(source, syntax).ok()?;
+    let mut found = Vec::new();
+    for child in tree.children(Tree::ROOT) {
+        if let (NodeKind::FootnoteDefinition(association), At::Bytes(start, end)) =
+            (&tree.node(child).kind, tree.node(child).at)
+        {
+            found.push((
+                tree.points.units(start),
+                tree.points.units(end),
+                association.label.clone(),
+            ));
+        }
+    }
+    let all = tree
         .nodes
         .iter()
-        .any(|node| matches!(node.kind, NodeKind::FootnoteDefinition(_)));
-    (all == ranges.len() && !footnotes).then_some(ranges)
+        .filter(|node| matches!(node.kind, NodeKind::FootnoteDefinition(_)))
+        .count();
+    (all == found.len()).then_some(found)
 }
 
 /// Whether `source` parses into root children none of which spans UTF-16 offset `at`,

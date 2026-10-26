@@ -229,6 +229,21 @@ impl<'input> Parser<'input> {
         }
     }
 
+    /// [`Parser::with_syntax`], with footnotes that `footnotes` labels defined as well:
+    /// their calls resolve as if the definitions were in the text (a piece of a longer
+    /// text, whose definitions are elsewhere in it).
+    pub fn with_footnotes(text: &'input str, syntax: Syntax, footnotes: &[String]) -> Self {
+        let mut parser = Self::with_syntax(text, syntax);
+        for label in footnotes {
+            parser
+                .allocs
+                .footdefs
+                .0
+                .insert(crate::linklabel::normalize_label(label));
+        }
+        parser
+    }
+
     /// Use a link label to fetch a url and title.
     ///
     /// This function enforces the [`link_ref_expansion_limit`].

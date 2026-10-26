@@ -73,6 +73,8 @@ export type RenderedHast = {
   strings(): string;
   /** After an animated render: `[chars, cursor]` (see `AnimatePass`). */
   animated?(): Float64Array;
+  /** After `renderPiece`: the footnote calls so far (see `FootnoteCalls`). */
+  footnotes?(): string;
   free(): void;
 };
 
@@ -91,15 +93,27 @@ export type Glue<A extends Args = []> = {
     timing: Float64Array,
     ...args: A
   ): RenderedHast;
+  renderPiece(
+    source: string,
+    syntax: number,
+    extra: string,
+    prefix: string,
+    flags: number,
+    overrides: string,
+    defined: string,
+    calls: string,
+    ...args: A
+  ): RenderedHast;
   pieces(...args: A): boolean;
   definitions(source: string, syntax: number, ...args: A): Uint32Array;
+  footnotes(source: string, syntax: number, ...args: A): string[];
   splitsAt(source: string, syntax: number, at: number, ...args: A): boolean;
   remendStream(appended: string, reset: boolean): number;
   remendMiddle(): string;
 };
 
 /** The `rill::wasm::ABI` this package reads. */
-export const ABI = 5;
+export const ABI = 6;
 
 /** rill for one set of a build's arguments. */
 export type Rill = {
@@ -116,9 +130,25 @@ export type Rill = {
    */
   markup?: (source: string, syntax: Syntax, options: MarkupOptions) => HastReader | string;
   /** The link definitions at the root of `source`, as UTF-16 `[start, end)` ranges, or
-   * `null` when one sits in a container or `source` has a footnote definition. Only
-   * builds without plugins of their own (a plugin may read the whole text) have it. */
+   * `null` when one sits in a container. Only builds without plugins of their own (a
+   * plugin may read the whole text) have it. */
   definitions?: (source: string, syntax: Syntax) => [number, number][] | null;
+  /** The footnote definitions at the root of `source`, as UTF-16 `[start, end)` ranges
+   * with their labels, or `null` when one sits in a container. With `definitions`
+   * only. */
+  footnotes?: (source: string, syntax: Syntax) => [number, number, string][] | null;
+  /**
+   * `markup` for one piece of a text with footnotes: its calls resolve to the footnotes
+   * `defined` labels (defined elsewhere in the text), numbered after the calls before
+   * it (`calls`, as the piece before returned them), and the footnote section renders
+   * only with `section`. With `definitions` only.
+   */
+  piece?: (
+    source: string,
+    syntax: Syntax,
+    options: MarkupOptions,
+    footnotes: { defined: string; calls: string; section: boolean }
+  ) => { reader: HastReader | string; calls: string };
   /** Whether no root-level block of `source` spans UTF-16 offset `at`. With
    * `definitions` only. */
   splitsAt?: (source: string, syntax: Syntax, at: number) => boolean;
@@ -126,6 +156,14 @@ export type Rill = {
    * for text it cannot take (lone surrogates). */
   remend?: (text: string) => string | null;
 };
+
+const markupFlags = (options: MarkupOptions) =>
+  (options.linkSafety ? 1 : 0) |
+  (options.ssr ? 2 : 0) |
+  (options.spine ? 4 : 0) |
+  (options.deep ? 128 : 0) |
+  (options.katex ? 8 : 0) |
+  (options.incomplete ? 16 : 0);
 
 /** The `<Streamdown>` props the markup depends on (`rill::MarkupOptions`). */
 export type MarkupOptions = {
@@ -225,6 +263,8 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
   const renderHast = guard(glue.renderHast.bind(glue));
   const renderMarkup = guard(glue.renderMarkup.bind(glue));
   const ranges = guard(glue.definitions.bind(glue));
+  const renderPiece = guard(glue.renderPiece.bind(glue));
+  const footnoteRanges = guard(glue.footnotes.bind(glue));
   const splitsAt = guard(glue.splitsAt.bind(glue));
   const pieces = guard(glue.pieces.bind(glue));
   const remendStream = guard(glue.remendStream.bind(glue));
@@ -296,13 +336,7 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
       if (!source.isWellFormed() || source.includes("\0")) {
         return "surrogates";
       }
-      const flags =
-        (options.linkSafety ? 1 : 0) |
-        (options.ssr ? 2 : 0) |
-        (options.spine ? 4 : 0) |
-        (options.deep ? 128 : 0) |
-        (options.katex ? 8 : 0) |
-        (options.incomplete ? 16 : 0);
+      const flags = markupFlags(options);
       const bits = syntaxBits(syntax);
       const extra = syntaxExtra(syntax);
       const flagsKey = `${flags} ${bits} ${extra} ${options.prefix} ${options.overrides}`;
@@ -394,6 +428,46 @@ export function createRill<A extends Args = []>(glue: Glue<A>): RillBuild<A> {
           out.push([flat[index]!, flat[index + 1]!]);
         }
         return out;
+      };
+      rill.footnotes = (source: string, syntax: Syntax) => {
+        if (!source.isWellFormed() || source.includes("\0")) return null;
+        let flat: string[];
+        try {
+          flat = footnoteRanges(source, syntaxBits(syntax), ...args);
+        } catch {
+          return null;
+        }
+        if (flat.length === 1) return null;
+        const out: [number, number, string][] = [];
+        for (let index = 0; index < flat.length; index += 3) {
+          out.push([Number(flat[index]), Number(flat[index + 1]), flat[index + 2]!]);
+        }
+        return out;
+      };
+      rill.piece = (source, syntax, options, footnotes) => {
+        if (!source.isWellFormed() || source.includes("\0")) {
+          return { reader: "surrogates", calls: footnotes.calls };
+        }
+        const result = renderPiece(
+          source,
+          syntaxBits(syntax),
+          syntaxExtra(syntax),
+          options.prefix,
+          (markupFlags(options) & 31) | (options.deep ? 32 : 0) | (footnotes.section ? 0 : 64),
+          options.overrides,
+          footnotes.defined,
+          footnotes.calls,
+          ...args
+        );
+        try {
+          if (result.kind !== "markup") return { reader: result.kind, calls: footnotes.calls };
+          return {
+            reader: new HastReader(result.ops(), result.strings(), source),
+            calls: result.footnotes!(),
+          };
+        } finally {
+          result.free();
+        }
       };
       rill.splitsAt = (source: string, syntax: Syntax, at: number) => {
         if (!source.isWellFormed() || source.includes("\0")) return false;
