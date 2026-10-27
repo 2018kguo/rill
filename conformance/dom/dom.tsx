@@ -162,11 +162,16 @@ const candidates: Record<string, Component> = {
 // (aborted) request fails, but the error event, in which Streamdown's image hides itself,
 // runs as a later task: a snapshot between the two would miss the `hidden` class.
 const firedImages = new WeakMap<HTMLImageElement, string>();
+/** When the last image event fired: the component hides an image in a React update that
+ * commits in a later task, so a settled DOM is also quiet since then. */
+let lastImageEvent = 0;
 for (const type of ["load", "error"]) {
   document.addEventListener(
     type,
     (event) => {
-      if (event.target instanceof HTMLImageElement) firedImages.set(event.target, event.target.src);
+      if (!(event.target instanceof HTMLImageElement)) return;
+      firedImages.set(event.target, event.target.src);
+      lastImageEvent = performance.now();
     },
     true
   );
@@ -198,7 +203,9 @@ function settle(element: HTMLElement, quietMs: number, timeoutMs = 15000): Promi
     });
     function done() {
       // An image whose (aborted) request has not failed yet still flips to `hidden`.
-      const loading = [...element.querySelectorAll("img")].some((image) => !imageDone(image));
+      const loading =
+        [...element.querySelectorAll("img")].some((image) => !imageDone(image)) ||
+        performance.now() - lastImageEvent < quietMs;
       const unhighlighted = plugins?.code !== undefined && element.querySelector(UNHIGHLIGHTED) !== null;
       if ((loading || unhighlighted || pendingHighlights() > 0 || codePending() > 0) && performance.now() < started + timeoutMs) {
         timer = setTimeout(done, quietMs);
