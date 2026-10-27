@@ -42,6 +42,12 @@ component is checked separately:
 - Streamed answers are compared at every step as they arrive, not only once finished.
   Bugs hide in half-written Markdown: an unclosed code fence, a link whose URL hasn't
   arrived, a footnote cited before its definition.
+- Every short document is checked, not only a sample: every stream of up to four or five
+  pieces over small alphabets of Markdown's tricky characters (emphasis and links, block
+  starts and fences, table rows, link definitions and footnotes, and a long paragraph
+  before a fence) streams through both components in one DOM each, a piece at a time
+  and cut back between documents, compared after every update
+  (`js/test/exhaustive.test.ts`), and the same alphabets render on the server.
 - Server rendering and hydration are compared, and the interactive parts (copy buttons,
   table menus, the link modal) are clicked in a browser.
 - Tests stream answers of n, 2n, 4n and 8n characters and fail if the cost of one update
@@ -92,6 +98,8 @@ node conformance/dom/interactions.mjs                             # buttons, men
 node conformance/remend.mjs --fuzz 100000 --streams 400           # the streaming repair
 node conformance/blocks.mjs --fuzz 3000                           # the block splitter
 bun conformance/dom/ssr.tsx --definitions --every 13 --corpus chat # answers with link definitions
+bun conformance/dom/ssr.tsx --config code --pieces '["*","[","a","\n"]' --length 5 # every short document
+DEEPER=1 node --test js/test/exhaustive.test.ts                    # every short stream, one piece longer
 ```
 
 `dom-diff.mjs` renders each document with Streamdown 2.7.1 and with rill in Chromium,
