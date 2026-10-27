@@ -1,0 +1,923 @@
+{
+  "environment": {
+    "date": "2026-10-26",
+    "rillCommit": "2a3a3ad",
+    "aiChatbotCommit": "c2f8235e1f3ea903ad8b7f61447c4f74164b5c58",
+    "streamdown": "2.7.1",
+    "node": "v24.22.1",
+    "cpu": "Apple M5 Pro",
+    "os": "macOS-26.6.1-arm64-arm-64bit",
+    "runs": 4,
+    "warmups": 1
+  },
+  "results": [
+    {
+      "scenario": "open",
+      "throttle": 4,
+      "screen": "412x915@2.625",
+      "runs": 4,
+      "apps": {
+        "streamdown": {
+          "wallMs": 3180.0969999999998,
+          "afterDataMs": 2732.7469999985096,
+          "busyMs": 3159.599999999986,
+          "scriptMs": 2732.738499999985,
+          "scriptGcMs": 2902.3004999999857,
+          "styleLayoutMs": 184.9355,
+          "paintMs": 70.43050000000002,
+          "gcMs": 181.24150000000026,
+          "workerMs": 0,
+          "frames": 65,
+          "droppedPct": 95.3125,
+          "loafBlockingMs": 2305.2,
+          "heapMB": 49.147242000000006,
+          "domNodes": 16662
+        },
+        "rill": {
+          "wallMs": 1673.6435000000001,
+          "afterDataMs": 1207.7434999940397,
+          "busyMs": 1614.1269999999786,
+          "scriptMs": 1221.0094999999787,
+          "scriptGcMs": 1301.6819999999786,
+          "styleLayoutMs": 238.2225,
+          "paintMs": 72.12950000000002,
+          "gcMs": 80.67250000000006,
+          "workerMs": 101.67450000000002,
+          "frames": 62,
+          "droppedPct": 94.3891402714932,
+          "loafBlockingMs": 1062.6000000000001,
+          "heapMB": 23.036250000000003,
+          "domNodes": 16652.5
+        }
+      },
+      "wallMsRatio": {
+        "median": 1.9001041739175635,
+        "ci95": [
+          1.4835115980944453,
+          2.807440195843879
+        ]
+      },
+      "afterDataMsRatio": {
+        "median": 2.2626882280980984,
+        "ci95": [
+          1.5836246282504163,
+          3.855243574382178
+        ]
+      },
+      "busyMsRatio": {
+        "median": 1.9574667916465234,
+        "ci95": [
+          1.519614161518895,
+          2.9327952148544596
+        ]
+      },
+      "scriptGcMsRatio": {
+        "median": 2.2296540168797243,
+        "ci95": [
+          1.7182399487277245,
+          3.452045678372139
+        ]
+      },
+      "loafBlockingMsRatio": {
+        "median": 2.169395821569734,
+        "ci95": [
+          1.6778513720066963,
+          3.3264069264069263
+        ]
+      },
+      "heapMBRatio": {
+        "median": 2.1334740680449293,
+        "ci95": [
+          2.01357226672286,
+          2.250847995347891
+        ]
+      },
+      "samples": {
+        "streamdown": [
+          {
+            "wallMs": 3096.19,
+            "afterDataMs": 2668.8900000029803,
+            "busyMs": 3062.888999999984,
+            "scriptMs": 2667.430999999984,
+            "scriptGcMs": 2813.5499999999843,
+            "styleLayoutMs": 180.08500000000004,
+            "paintMs": 69.254,
+            "gcMs": 146.11900000000014,
+            "workerMs": 0,
+            "frames": 64,
+            "droppedPct": 95.3125,
+            "loafBlockingMs": 2248.9,
+            "heapMB": 49.618052,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 3045.335,
+            "afterDataMs": 2638.335,
+            "busyMs": 3038.5080000000007,
+            "scriptMs": 2627.6020000000003,
+            "scriptGcMs": 2805.7510000000007,
+            "styleLayoutMs": 171.121,
+            "paintMs": 61.635999999999946,
+            "gcMs": 178.14900000000026,
+            "workerMs": 0,
+            "frames": 64,
+            "droppedPct": 95.3125,
+            "loafBlockingMs": 2237.3,
+            "heapMB": 48.535796,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 3264.004,
+            "afterDataMs": 2796.6039999940394,
+            "busyMs": 3256.310999999987,
+            "scriptMs": 2798.045999999986,
+            "scriptGcMs": 2991.0509999999867,
+            "styleLayoutMs": 189.78599999999997,
+            "paintMs": 75.47399999999999,
+            "gcMs": 193.0050000000004,
+            "workerMs": 0,
+            "frames": 66,
+            "droppedPct": 95.45454545454545,
+            "loafBlockingMs": 2361.5,
+            "heapMB": 49.594988,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 3428.688,
+            "afterDataMs": 2991.188,
+            "busyMs": 3424.5359999999882,
+            "scriptMs": 2954.805999999988,
+            "scriptGcMs": 3139.1399999999885,
+            "styleLayoutMs": 213.78899999999993,
+            "paintMs": 71.60700000000003,
+            "gcMs": 184.33400000000023,
+            "workerMs": 0,
+            "frames": 72,
+            "droppedPct": 94.44444444444444,
+            "loafBlockingMs": 2581.4,
+            "heapMB": 48.699496,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          }
+        ],
+        "rill": [
+          {
+            "wallMs": 1983.084,
+            "afterDataMs": 1561.4839999910594,
+            "busyMs": 1920.5619999999744,
+            "scriptMs": 1484.3979999999744,
+            "scriptGcMs": 1585.3659999999745,
+            "styleLayoutMs": 267.19399999999996,
+            "paintMs": 68.00200000000001,
+            "gcMs": 100.96800000000015,
+            "workerMs": 89.21900000000005,
+            "frames": 85,
+            "droppedPct": 96.47058823529412,
+            "loafBlockingMs": 1252.6000000000001,
+            "heapMB": 24.258952,
+            "domNodes": 16653,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 1132.739,
+            "afterDataMs": 708.8389999940396,
+            "busyMs": 1077.3339999999903,
+            "scriptMs": 791.2239999999904,
+            "scriptGcMs": 840.7479999999904,
+            "styleLayoutMs": 170.72799999999998,
+            "paintMs": 65.85799999999999,
+            "gcMs": 49.523999999999965,
+            "workerMs": 91.60700000000003,
+            "frames": 33,
+            "droppedPct": 90.9090909090909,
+            "loafBlockingMs": 693,
+            "heapMB": 22.036564,
+            "domNodes": 16652,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 2143.628,
+            "afterDataMs": 1725.6280000000002,
+            "busyMs": 2079.2119999999745,
+            "scriptMs": 1556.039999999974,
+            "scriptGcMs": 1685.0159999999744,
+            "styleLayoutMs": 317.939,
+            "paintMs": 76.25700000000003,
+            "gcMs": 128.97600000000025,
+            "workerMs": 113.34900000000012,
+            "frames": 92,
+            "droppedPct": 97.82608695652173,
+            "loafBlockingMs": 1373.8999999999999,
+            "heapMB": 24.030992,
+            "domNodes": 16653,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 1364.203,
+            "afterDataMs": 854.0029999970197,
+            "busyMs": 1307.6919999999827,
+            "scriptMs": 957.6209999999828,
+            "scriptGcMs": 1017.9979999999828,
+            "styleLayoutMs": 209.25100000000003,
+            "paintMs": 80.44300000000003,
+            "gcMs": 60.37699999999997,
+            "workerMs": 111.742,
+            "frames": 39,
+            "droppedPct": 92.3076923076923,
+            "loafBlockingMs": 872.6,
+            "heapMB": 22.041508,
+            "domNodes": 16652,
+            "hash": "e3ab3e184cd9"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "open",
+      "throttle": 10,
+      "screen": "412x915@2.625",
+      "runs": 4,
+      "apps": {
+        "streamdown": {
+          "wallMs": 12157.659,
+          "afterDataMs": 10431.62350000894,
+          "busyMs": 12144.488500000063,
+          "scriptMs": 10690.649000000063,
+          "scriptGcMs": 11254.633500000062,
+          "styleLayoutMs": 648.21,
+          "paintMs": 228.00300000000001,
+          "gcMs": 493.38999999999874,
+          "workerMs": 0,
+          "frames": 248.5,
+          "droppedPct": 97.92431315254962,
+          "loafBlockingMs": 10620.25,
+          "heapMB": 48.958110000000005,
+          "domNodes": 16662
+        },
+        "rill": {
+          "wallMs": 3928.0335,
+          "afterDataMs": 2404.93349999851,
+          "busyMs": 3916.660000000007,
+          "scriptMs": 2909.8280000000073,
+          "scriptGcMs": 3057.9250000000075,
+          "styleLayoutMs": 634.6990000000002,
+          "paintMs": 224.0359999999999,
+          "gcMs": 148.0970000000001,
+          "workerMs": 122.02600000000002,
+          "frames": 131.5,
+          "droppedPct": 96.36791128579449,
+          "loafBlockingMs": 2939.1499999999996,
+          "heapMB": 22.12,
+          "domNodes": 16652
+        }
+      },
+      "wallMsRatio": {
+        "median": 3.0951006400530954,
+        "ci95": [
+          2.4723085742383426,
+          3.8708723174879314
+        ]
+      },
+      "afterDataMsRatio": {
+        "median": 4.337593326391521,
+        "ci95": [
+          3.4008774071869845,
+          5.340496317529839
+        ]
+      },
+      "busyMsRatio": {
+        "median": 3.100725745916174,
+        "ci95": [
+          2.4740571601557813,
+          3.877621176375187
+        ]
+      },
+      "scriptGcMsRatio": {
+        "median": 3.6804805546244705,
+        "ci95": [
+          2.936561728789461,
+          4.642774609156825
+        ]
+      },
+      "loafBlockingMsRatio": {
+        "median": 3.613374615109811,
+        "ci95": [
+          2.775375006533215,
+          4.507746179966044
+        ]
+      },
+      "heapMBRatio": {
+        "median": 2.2132961121157324,
+        "ci95": [
+          2.209999480053179,
+          2.214670268258019
+        ]
+      },
+      "samples": {
+        "streamdown": [
+          {
+            "wallMs": 12629.516,
+            "afterDataMs": 10741.61600000894,
+            "busyMs": 12614.389000000083,
+            "scriptMs": 11438.012000000084,
+            "scriptGcMs": 11818.194000000083,
+            "styleLayoutMs": 593.4439999999997,
+            "paintMs": 202.751,
+            "gcMs": 380.1819999999997,
+            "workerMs": 0,
+            "frames": 231,
+            "droppedPct": 97.40259740259741,
+            "loafBlockingMs": 11115.1,
+            "heapMB": 48.940028,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 12621.287,
+            "afterDataMs": 10798.98700000298,
+            "busyMs": 12608.172000000077,
+            "scriptMs": 11182.770000000079,
+            "scriptGcMs": 11744.413000000077,
+            "styleLayoutMs": 639.8369999999999,
+            "paintMs": 223.92200000000008,
+            "gcMs": 561.6429999999984,
+            "workerMs": 0,
+            "frames": 278,
+            "droppedPct": 98.20143884892086,
+            "loafBlockingMs": 11054.699999999999,
+            "heapMB": 48.981844,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 11694.031,
+            "afterDataMs": 10121.631000008942,
+            "busyMs": 11680.80500000005,
+            "scriptMs": 10198.52800000005,
+            "scriptGcMs": 10764.854000000048,
+            "styleLayoutMs": 683.867,
+            "paintMs": 232.08399999999995,
+            "gcMs": 566.3259999999982,
+            "workerMs": 0,
+            "frames": 266,
+            "droppedPct": 97.74436090225564,
+            "loafBlockingMs": 10185.8,
+            "heapMB": 48.964996,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 10977.555,
+            "afterDataMs": 9787.95500000596,
+            "busyMs": 10958.216999999979,
+            "scriptMs": 9640.359999999979,
+            "scriptGcMs": 10065.496999999978,
+            "styleLayoutMs": 656.5830000000001,
+            "paintMs": 236.1369999999999,
+            "gcMs": 425.13699999999903,
+            "workerMs": 0,
+            "frames": 211,
+            "droppedPct": 98.10426540284361,
+            "loafBlockingMs": 9681.4,
+            "heapMB": 48.951224,
+            "domNodes": 16662,
+            "hash": "e3ab3e184cd9"
+          }
+        ],
+        "rill": [
+          {
+            "wallMs": 4917.533,
+            "afterDataMs": 3067.33299999702,
+            "busyMs": 4908.733999999973,
+            "scriptMs": 3576.1259999999734,
+            "scriptGcMs": 3775.3559999999734,
+            "styleLayoutMs": 807.405,
+            "paintMs": 325.9729999999999,
+            "gcMs": 199.23000000000002,
+            "workerMs": 152.38699999999997,
+            "frames": 161,
+            "droppedPct": 97.51552795031056,
+            "loafBlockingMs": 3826.6,
+            "heapMB": 22.156112,
+            "domNodes": 16652,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 3946.465,
+            "afterDataMs": 2293.26499999702,
+            "busyMs": 3934.371000000005,
+            "scriptMs": 2924.4380000000046,
+            "scriptGcMs": 3079.9380000000046,
+            "styleLayoutMs": 628.7900000000003,
+            "paintMs": 225.64299999999997,
+            "gcMs": 155.50000000000014,
+            "workerMs": 119.67300000000003,
+            "frames": 126,
+            "droppedPct": 95.23809523809524,
+            "loafBlockingMs": 2912,
+            "heapMB": 22.115776,
+            "domNodes": 16652,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 3909.602,
+            "afterDataMs": 2516.602,
+            "busyMs": 3898.9490000000096,
+            "scriptMs": 2895.21800000001,
+            "scriptGcMs": 3035.91200000001,
+            "styleLayoutMs": 640.6080000000001,
+            "paintMs": 222.42899999999983,
+            "gcMs": 140.69400000000007,
+            "workerMs": 124.37900000000002,
+            "frames": 137,
+            "droppedPct": 95.62043795620438,
+            "loafBlockingMs": 2966.2999999999997,
+            "heapMB": 22.124224,
+            "domNodes": 16652,
+            "hash": "e3ab3e184cd9"
+          },
+          {
+            "wallMs": 3140.806,
+            "afterDataMs": 1953.306,
+            "busyMs": 3131.943000000008,
+            "scriptMs": 2297.483000000008,
+            "scriptGcMs": 2424.118000000008,
+            "styleLayoutMs": 514.9589999999998,
+            "paintMs": 192.86600000000007,
+            "gcMs": 126.63500000000009,
+            "workerMs": 103.83700000000009,
+            "frames": 104,
+            "droppedPct": 97.11538461538461,
+            "loafBlockingMs": 2356,
+            "heapMB": 22.113188,
+            "domNodes": 16652,
+            "hash": "e3ab3e184cd9"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "stream",
+      "throttle": 4,
+      "screen": "412x915@2.625",
+      "runs": 4,
+      "apps": {
+        "streamdown": {
+          "wallMs": 4070.7855,
+          "afterDataMs": null,
+          "busyMs": 3926.3950000000027,
+          "scriptMs": 3300.8625,
+          "scriptGcMs": 3534.6805000000004,
+          "styleLayoutMs": 141.69799999999998,
+          "paintMs": 226.77300000000048,
+          "gcMs": 240.1865000000003,
+          "workerMs": 0,
+          "frames": 198,
+          "droppedPct": 56.56714325763947,
+          "loafBlockingMs": 745.9,
+          "heapMB": 27.467816,
+          "domNodes": 1240
+        },
+        "rill": {
+          "wallMs": 4132.352000000001,
+          "afterDataMs": null,
+          "busyMs": 3877.896000000009,
+          "scriptMs": 2318.577000000015,
+          "scriptGcMs": 2498.1740000000154,
+          "styleLayoutMs": 580.2869999999998,
+          "paintMs": 785.6364999999955,
+          "gcMs": 178.2415000000001,
+          "workerMs": 113.8030000000002,
+          "frames": 248.5,
+          "droppedPct": 35.024914765276684,
+          "loafBlockingMs": 20,
+          "heapMB": 18.957982,
+          "domNodes": 1233
+        }
+      },
+      "wallMsRatio": {
+        "median": 0.9851013418024407,
+        "ci95": [
+          0.9758626225033338,
+          0.996536914651397
+        ]
+      },
+      "busyMsRatio": {
+        "median": 1.0125065241563966,
+        "ci95": [
+          1.0005206431528848,
+          1.0220712379145571
+        ]
+      },
+      "scriptGcMsRatio": {
+        "median": 1.414905647084622,
+        "ci95": [
+          1.314038884196495,
+          1.4482029942630932
+        ]
+      },
+      "loafBlockingMsRatio": {
+        "median": 37.295,
+        "ci95": [
+          29.986666666666668,
+          93.2375
+        ]
+      },
+      "heapMBRatio": {
+        "median": 1.4488786833957326,
+        "ci95": [
+          1.4460982641913855,
+          1.4496935380569513
+        ]
+      },
+      "samples": {
+        "streamdown": [
+          {
+            "wallMs": 4072.351,
+            "afterDataMs": null,
+            "busyMs": 3928.023000000003,
+            "scriptMs": 3364.3100000000018,
+            "scriptGcMs": 3604.555000000002,
+            "styleLayoutMs": 132.00099999999998,
+            "paintMs": 191.46700000000044,
+            "gcMs": 240.2450000000002,
+            "workerMs": 0,
+            "frames": 174,
+            "droppedPct": 54.59770114942529,
+            "loafBlockingMs": 674.7,
+            "heapMB": 27.483264,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 4069.22,
+            "afterDataMs": null,
+            "busyMs": 3943.0539999999987,
+            "scriptMs": 3287.0689999999986,
+            "scriptGcMs": 3509.104999999999,
+            "styleLayoutMs": 157.21600000000007,
+            "paintMs": 276.7329999999997,
+            "gcMs": 222.03600000000037,
+            "workerMs": 0,
+            "frames": 205,
+            "droppedPct": 58.53658536585366,
+            "loafBlockingMs": 759.8000000000001,
+            "heapMB": 27.474064,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 4040.376,
+            "afterDataMs": null,
+            "busyMs": 3879.915000000008,
+            "scriptMs": 3267.356000000007,
+            "scriptGcMs": 3507.4840000000077,
+            "styleLayoutMs": 144.987,
+            "paintMs": 227.44400000000041,
+            "gcMs": 240.1280000000004,
+            "workerMs": 0,
+            "frames": 191,
+            "droppedPct": 52.87958115183246,
+            "loafBlockingMs": 847.1,
+            "heapMB": 27.43812,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 4097.988,
+            "afterDataMs": null,
+            "busyMs": 3924.7670000000026,
+            "scriptMs": 3314.6560000000018,
+            "scriptGcMs": 3560.256000000002,
+            "styleLayoutMs": 138.409,
+            "paintMs": 226.10200000000052,
+            "gcMs": 245.60000000000053,
+            "workerMs": 0,
+            "frames": 205,
+            "droppedPct": 58.53658536585366,
+            "loafBlockingMs": 731.9999999999999,
+            "heapMB": 27.461568,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          }
+        ],
+        "rill": [
+          {
+            "wallMs": 4155.091,
+            "afterDataMs": null,
+            "busyMs": 3841.6060000000125,
+            "scriptMs": 2325.253000000016,
+            "scriptGcMs": 2496.4820000000163,
+            "styleLayoutMs": 579.1829999999998,
+            "paintMs": 765.9409999999963,
+            "gcMs": 171.22900000000035,
+            "workerMs": 111.29500000000026,
+            "frames": 249,
+            "droppedPct": 33.734939759036145,
+            "loafBlockingMs": 8,
+            "heapMB": 18.952808,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 4152.475,
+            "afterDataMs": null,
+            "busyMs": 3876.50000000001,
+            "scriptMs": 2510.473000000013,
+            "scriptGcMs": 2689.9360000000133,
+            "styleLayoutMs": 525.859,
+            "paintMs": 660.704999999997,
+            "gcMs": 179.4630000000001,
+            "workerMs": 116.50800000000024,
+            "frames": 249,
+            "droppedPct": 40.562248995983936,
+            "loafBlockingMs": 19.8,
+            "heapMB": 18.990112,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 4112.229,
+            "afterDataMs": null,
+            "busyMs": 3879.292000000007,
+            "scriptMs": 2279.010000000011,
+            "scriptGcMs": 2456.030000000011,
+            "styleLayoutMs": 598.0799999999999,
+            "paintMs": 825.1819999999963,
+            "gcMs": 177.0200000000001,
+            "workerMs": 107.96500000000003,
+            "frames": 248,
+            "droppedPct": 33.87096774193548,
+            "loafBlockingMs": 20.2,
+            "heapMB": 18.958544,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 4090.33,
+            "afterDataMs": null,
+            "busyMs": 3886.589000000009,
+            "scriptMs": 2311.901000000014,
+            "scriptGcMs": 2499.866000000014,
+            "styleLayoutMs": 581.391,
+            "paintMs": 805.3319999999949,
+            "gcMs": 187.96500000000017,
+            "workerMs": 116.31100000000013,
+            "frames": 246,
+            "droppedPct": 36.17886178861789,
+            "loafBlockingMs": 24.8,
+            "heapMB": 18.95742,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "stream",
+      "throttle": 10,
+      "screen": "412x915@2.625",
+      "runs": 4,
+      "apps": {
+        "streamdown": {
+          "wallMs": 10516.3745,
+          "afterDataMs": null,
+          "busyMs": 10456.56150000008,
+          "scriptMs": 9391.480500000083,
+          "scriptGcMs": 10057.138000000079,
+          "styleLayoutMs": 199.18599999999995,
+          "paintMs": 210.87600000000003,
+          "gcMs": 647.0694999999979,
+          "workerMs": 0,
+          "frames": 552.5,
+          "droppedPct": 95.41958128998532,
+          "loafBlockingMs": 9262,
+          "heapMB": 26.721526,
+          "domNodes": 1240
+        },
+        "rill": {
+          "wallMs": 7042.684,
+          "afterDataMs": null,
+          "busyMs": 7036.582000000014,
+          "scriptMs": 6209.137000000014,
+          "scriptGcMs": 6551.438000000014,
+          "styleLayoutMs": 238.684,
+          "paintMs": 230.41500000000008,
+          "gcMs": 358.0379999999996,
+          "workerMs": 128.753,
+          "frames": 423,
+          "droppedPct": 94.12437891056311,
+          "loafBlockingMs": 5681.200000000001,
+          "heapMB": 18.652594,
+          "domNodes": 1233
+        }
+      },
+      "wallMsRatio": {
+        "median": 1.493233900598124,
+        "ci95": [
+          1.4471832671597018,
+          1.5414819840958807
+        ]
+      },
+      "busyMsRatio": {
+        "median": 1.4860285149807193,
+        "ci95": [
+          1.4402792911691753,
+          1.5293377182985737
+        ]
+      },
+      "scriptGcMsRatio": {
+        "median": 1.535103896274384,
+        "ci95": [
+          1.4729002253344654,
+          1.5765666047658085
+        ]
+      },
+      "loafBlockingMsRatio": {
+        "median": 1.6302893754840524,
+        "ci95": [
+          1.5471951428082775,
+          1.6949705598191658
+        ]
+      },
+      "heapMBRatio": {
+        "median": 1.4325903410539038,
+        "ci95": [
+          1.4308981629065332,
+          1.4354360339190495
+        ]
+      },
+      "samples": {
+        "streamdown": [
+          {
+            "wallMs": 10819.251,
+            "afterDataMs": null,
+            "busyMs": 10723.04200000009,
+            "scriptMs": 9676.139000000092,
+            "scriptGcMs": 10304.64900000009,
+            "styleLayoutMs": 205.88399999999993,
+            "paintMs": 212.5090000000001,
+            "gcMs": 628.5099999999984,
+            "workerMs": 0,
+            "frames": 578,
+            "droppedPct": 95.15570934256056,
+            "loafBlockingMs": 9486.000000000002,
+            "heapMB": 26.72006,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 10574.273,
+            "afterDataMs": null,
+            "busyMs": 10493.243000000079,
+            "scriptMs": 9422.07500000008,
+            "scriptGcMs": 10087.704000000078,
+            "styleLayoutMs": 196.2959999999999,
+            "paintMs": 209.24299999999997,
+            "gcMs": 665.6289999999974,
+            "workerMs": 0,
+            "frames": 556,
+            "droppedPct": 95.68345323741008,
+            "loafBlockingMs": 9298.099999999999,
+            "heapMB": 26.722992,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 10458.476,
+            "afterDataMs": null,
+            "busyMs": 10419.880000000081,
+            "scriptMs": 9360.886000000086,
+            "scriptGcMs": 10026.572000000082,
+            "styleLayoutMs": 195.77499999999998,
+            "paintMs": 197.53300000000004,
+            "gcMs": 665.6859999999967,
+            "workerMs": 0,
+            "frames": 549,
+            "droppedPct": 95.99271402550092,
+            "loafBlockingMs": 9225.900000000001,
+            "heapMB": 26.731636,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 10278.899,
+            "afterDataMs": null,
+            "busyMs": 10182.421000000102,
+            "scriptMs": 9174.737000000103,
+            "scriptGcMs": 9755.083000000102,
+            "styleLayoutMs": 202.076,
+            "paintMs": 225.26199999999997,
+            "gcMs": 580.3459999999986,
+            "workerMs": 0,
+            "frames": 533,
+            "droppedPct": 94.74671669793621,
+            "loafBlockingMs": 8794.8,
+            "heapMB": 26.704808,
+            "domNodes": 1240,
+            "hash": "1b2a88aeb8ee"
+          }
+        ],
+        "rill": [
+          {
+            "wallMs": 7199.772,
+            "afterDataMs": null,
+            "busyMs": 7185.137000000008,
+            "scriptMs": 6412.521000000009,
+            "scriptGcMs": 6775.954000000008,
+            "styleLayoutMs": 212.80399999999992,
+            "paintMs": 196.37900000000002,
+            "gcMs": 363.43299999999937,
+            "workerMs": 131.23100000000022,
+            "frames": 432,
+            "droppedPct": 94.9074074074074,
+            "loafBlockingMs": 5847,
+            "heapMB": 18.647092,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 6955.666,
+            "afterDataMs": null,
+            "busyMs": 6954.372000000011,
+            "scriptMs": 6147.873000000012,
+            "scriptGcMs": 6479.832000000011,
+            "styleLayoutMs": 234.046,
+            "paintMs": 240.49400000000009,
+            "gcMs": 331.9589999999994,
+            "workerMs": 130.98099999999997,
+            "frames": 418,
+            "droppedPct": 94.25837320574162,
+            "loafBlockingMs": 5485.700000000001,
+            "heapMB": 18.615616,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 7129.702,
+            "afterDataMs": null,
+            "busyMs": 7118.792000000017,
+            "scriptMs": 6270.401000000016,
+            "scriptGcMs": 6623.044000000016,
+            "styleLayoutMs": 253.435,
+            "paintMs": 242.31299999999985,
+            "gcMs": 352.64299999999986,
+            "workerMs": 126.52500000000002,
+            "frames": 428,
+            "droppedPct": 93.69158878504673,
+            "loafBlockingMs": 5701.3,
+            "heapMB": 18.658096,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          },
+          {
+            "wallMs": 6922.877,
+            "afterDataMs": null,
+            "busyMs": 6918.486000000025,
+            "scriptMs": 6080.054000000026,
+            "scriptGcMs": 6454.828000000025,
+            "styleLayoutMs": 243.322,
+            "paintMs": 220.33600000000007,
+            "gcMs": 374.77399999999915,
+            "workerMs": 117.16300000000012,
+            "frames": 416,
+            "droppedPct": 93.99038461538461,
+            "loafBlockingMs": 5661.1,
+            "heapMB": 18.673628,
+            "domNodes": 1233,
+            "hash": "1b2a88aeb8ee"
+          }
+        ]
+      }
+    }
+  ],
+  "hashes": {
+    "open@4 streamdown": [
+      "e3ab3e184cd9"
+    ],
+    "open@4 rill": [
+      "e3ab3e184cd9"
+    ],
+    "open@10 streamdown": [
+      "e3ab3e184cd9"
+    ],
+    "open@10 rill": [
+      "e3ab3e184cd9"
+    ],
+    "stream@4 streamdown": [
+      "1b2a88aeb8ee"
+    ],
+    "stream@4 rill": [
+      "1b2a88aeb8ee"
+    ],
+    "stream@10 streamdown": [
+      "1b2a88aeb8ee"
+    ],
+    "stream@10 rill": [
+      "1b2a88aeb8ee"
+    ]
+  }
+}

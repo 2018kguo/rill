@@ -92,26 +92,45 @@ npm run bench:native                  # rill natively
 ## In a real app: Vercel's ai-chatbot
 
 [vercel/ai-chatbot](https://github.com/vercel/ai-chatbot) (Next.js 16, React 19,
-Streamdown with its `cjk`, `code`, `math` and `mermaid` plugins), built for production as
-it is and with rill's import changed in the two files that render Markdown, using the
-template's mock model. Measured on October 24 2026 with an earlier rill build than the
-rest of this page; medians of 5 interleaved runs with 95% bootstrap intervals; Streamdown 2.7.1's value first:
+Streamdown with its `cjk`, `code`, `math` and `mermaid` plugins), built for production
+twice: as it is, and with rill's import changed in the two files that render Markdown.
+Both use the template's mock model, so the answers are the same every run. Measured on
+October 26 2026; medians of 4 interleaved runs per engine, with 95% bootstrap intervals on
+the ratios. The final HTML of the answers is identical on both sides.
 
-| Scenario | CPU | Settled | Main-thread JS + GC | Long-frame blocking |
+**Opening a chat of 18 long answers (239 KB)**
+
+| CPU | Done, Streamdown / rill | JavaScript work, Streamdown / rill | Stutter, Streamdown / rill | Memory, Streamdown / rill |
 |---|---:|---:|---:|---:|
-| Open a chat of 18 long answers (239 KB) | 4× | 2,991 to 1,942 ms (1.54×) | 2,735 to 1,535 ms (1.78×) | 2,150 to 1,221 ms |
-| | 10× | 7,964 to 2,863 ms (2.78× [2.71–2.84]) | 7,338 to 2,214 ms (3.31× [3.23–3.39]) | 6,820 to 2,135 ms |
-| Stream an 8 KB answer at 2,400 characters a second | 4× | stream-bound | 3,404 to 2,239 ms (1.52×) | 497 to 4 ms |
-| | 10× | 10,056 to 6,427 ms (1.56×) | 9,360 to 5,638 ms (1.66×) | 8,401 to 4,070 ms |
+| 4× | 3.18 s / 1.67 s (1.9× [1.5–2.8]) | 2.90 s / 1.30 s (2.2× [1.7–3.5]) | 2.31 s / 1.06 s | 49.1 / 23.0 MB |
+| 10× | 12.16 s / 3.93 s (3.1× [2.5–3.9]) | 11.26 s / 3.06 s (3.7× [2.9–4.6]) | 10.62 s / 2.94 s | 49.0 / 22.1 MB |
 
-The ratios are smaller than on the Markdown-only page above (2.8× against 4.4× to open
-the chat, 3.3× against 6.6× less JavaScript work) because the app does work of its own
-that rill doesn't touch. React also renders the app around the answers (the message
+**Streaming an 8 KB answer at 2,400 characters a second** (five code blocks, three tables,
+a 30-item list)
+
+| CPU | Done, Streamdown / rill | JavaScript work, Streamdown / rill | Stutter, Streamdown / rill | Memory, Streamdown / rill |
+|---|---:|---:|---:|---:|
+| 4× | 4.07 s / 4.13 s (paced by the stream) | 3.54 s / 2.50 s (1.4× [1.3–1.5]) | 746 ms / 20 ms | 27.5 / 19.0 MB |
+| 10× | 10.52 s / 7.04 s (1.5× [1.5–1.5]) | 10.06 s / 6.55 s (1.5× [1.5–1.6]) | 9.26 s / 5.68 s | 26.7 / 18.7 MB |
+
+The time ratios are smaller than on the Markdown-only page above (3.1× against 4.4× to
+open the chat, 3.7× against 6.6× less JavaScript work) because the app does work of its
+own that rill doesn't touch. React also renders the app around the answers (the message
 list, the sidebar, the chat state) when the chat opens and again on every streamed
-update, and that costs the same with either engine. At 10× it's most of what remains on the rill side.
+update, and that costs the same with either engine. While streaming at 10×, it is most of
+what remains on the rill side.
 
-Memory isn't shown: that run came before a fix for pages that stream without
-`isAnimating`, so its memory numbers don't reflect rill today.
+Memory carries over: opening the chat, rill's heap is 27 MB smaller, about what it saves
+on the Markdown-only page (28 MB).
+
+At 4× while streaming, both engines finish when the text does. rill's main thread is
+just as busy, but it spends the time drawing: it shows 65% of frames against
+Streamdown's 43%, and its frames ran past 50 ms for 20 ms in total instead of 746.
+
+The raw results are in
+[`bench/results/0.4.0/ai-chatbot.json`](../bench/results/0.4.0/ai-chatbot.json). Both
+builds log React's hydration error #418 when the page loads; it comes from the template
+and happens with either engine.
 
 ```sh
 # see bench/ai-chatbot/README.md: two production builds, a local Postgres, then
