@@ -16,6 +16,7 @@ pub mod remend;
 
 mod autolink;
 mod json;
+mod text;
 mod url;
 
 pub use hast::{

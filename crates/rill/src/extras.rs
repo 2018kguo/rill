@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use crate::hast::{self, NodeKind, Tree, Value};
 use crate::mdast::{self, At, NIL, NodeId};
+use crate::text::{in_ranges, slice_cow};
 
 // ---------------------------------------------------------------------------------
 // remark-breaks 4 (mdast-util-newline-to-break)
@@ -72,7 +73,7 @@ fn split_lines<'s>(tree: &mut mdast::Tree<'s>, value: Cow<'s, str>) -> (NodeId, 
         };
         if start < index {
             nodes.push(tree.push(
-                mdast::NodeKind::Text(hast::slice_cow(&value, start..index)),
+                mdast::NodeKind::Text(slice_cow(&value, start..index)),
                 At::None,
             ));
         }
@@ -82,7 +83,7 @@ fn split_lines<'s>(tree: &mut mdast::Tree<'s>, value: Cow<'s, str>) -> (NodeId, 
     }
     if start < bytes.len() {
         nodes.push(tree.push(
-            mdast::NodeKind::Text(hast::slice_cow(&value, start..bytes.len())),
+            mdast::NodeKind::Text(slice_cow(&value, start..bytes.len())),
             At::None,
         ));
     }
@@ -848,12 +849,6 @@ const SLUG_REMOVED_ASTRAL: &[(u32, u32)] = &[
     (0x3134b, 0xe00ff),
     (0xe01f0, 0x10ffff),
 ];
-
-/// Whether `c` falls in one of `ranges` (sorted, disjoint).
-fn in_ranges<T: Copy + Ord>(ranges: &[(T, T)], c: T) -> bool {
-    let after = ranges.partition_point(|&(start, _)| start <= c);
-    after > 0 && c <= ranges[after - 1].1
-}
 
 fn slug_removes(c: char) -> bool {
     match u16::try_from(u32::from(c)) {

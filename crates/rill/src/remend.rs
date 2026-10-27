@@ -6,6 +6,8 @@
 
 use std::cell::OnceCell;
 
+use crate::text::js_space;
+
 type Units = Vec<u16>;
 
 const NEWLINE: u16 = b'\n' as u16;
@@ -438,24 +440,6 @@ fn last_index_of(text: &[u16], pattern: &[u16], from: Option<isize>) -> Option<u
         end = found;
     }
     None
-}
-
-/// JavaScript's `\s` (and what `trim` removes).
-fn js_space(unit: u16) -> bool {
-    matches!(
-        unit,
-        0x09..=0x0d
-            | 0x20
-            | 0xa0
-            | 0x1680
-            | 0x2000..=0x200a
-            | 0x2028
-            | 0x2029
-            | 0x202f
-            | 0x205f
-            | 0x3000
-            | 0xfeff
-    )
 }
 
 fn line_terminator(unit: u16) -> bool {

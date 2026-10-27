@@ -13,8 +13,8 @@ use std::fmt::Write as _;
 use crate::json::{json_string, json_u32};
 use crate::mdast::{
     self, AlignKind, At, Error, NIL, NodeId, Point, Points, Reference, ReferenceKind, Syntax,
-    push_cow,
 };
+use crate::text::{js_space, push_cow, slice_cow, utf16_len};
 use crate::url::Url;
 
 // ---------------------------------------------------------------------------
@@ -354,14 +354,6 @@ pub fn get<'p, 's>(props: &'p Props<'s>, key: &str) -> Option<&'p Value<'s>> {
 // String helpers
 // ---------------------------------------------------------------------------
 
-/// Slices a `Cow`, keeping a borrow borrowed.
-pub(crate) fn slice_cow<'s>(value: &Cow<'s, str>, range: std::ops::Range<usize>) -> Cow<'s, str> {
-    match value {
-        Cow::Borrowed(borrowed) => Cow::Borrowed(&borrowed[range]),
-        Cow::Owned(owned) => Cow::Owned(owned[range].to_owned()),
-    }
-}
-
 fn trim_markdown_space_start<'s>(value: &Cow<'s, str>) -> Cow<'s, str> {
     let trimmed = value.len() - value.trim_start_matches([' ', '\t']).len();
     slice_cow(value, trimmed..value.len())
@@ -451,10 +443,6 @@ pub fn normalize_uri(value: Cow<'_, str>) -> Cow<'_, str> {
         index += character.len_utf8();
     }
     Cow::Owned(out)
-}
-
-pub(crate) fn js_whitespace(c: char) -> bool {
-    rill_cmark::autolink_literal::unicode_whitespace(c)
 }
 
 /// The id footnote hrefs use for `id`, an uppercased identifier.
@@ -655,7 +643,7 @@ impl<'s> ToHast<'_, 's> {
                 let mut props = Vec::new();
                 if let Some(lang) = code.lang.as_deref().filter(|lang| !lang.is_empty()) {
                     let first = lang
-                        .split(js_whitespace)
+                        .split(js_space)
                         .next()
                         .expect("split yields at least one piece");
                     // rehype-katex renders ```math blocks too (`language-math`).
@@ -1944,7 +1932,7 @@ fn rewrite_simple_raw(tree: &mut Tree<'_>, parent: NodeId) {
                 let after = after.clone();
                 let end = tree.nodes[node as usize].end;
                 if let NodeKind::Text(value) = &mut tree.nodes[before as usize].kind {
-                    crate::mdast::push_cow(value, &after);
+                    push_cow(value, &after);
                 }
                 tree.nodes[before as usize].end = end;
                 joins = false;
@@ -3092,11 +3080,7 @@ impl<'a, 's> Encoder<'a, 's> {
     fn table(&mut self, value: &str) -> (u32, u32) {
         let start = self.units;
         self.strings.push_str(value);
-        // Every byte that starts a character is one unit; four-byte ones are two.
-        self.units += value
-            .bytes()
-            .map(|byte| u32::from(byte & 0xC0 != 0x80) + u32::from(byte >= 0xF0))
-            .sum::<u32>();
+        self.units += utf16_len(value);
         (start, self.units)
     }
 
