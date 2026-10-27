@@ -50,6 +50,7 @@ import {
 import type { Pluggable } from "unified";
 
 import { parseMarkdownIntoBlocks, splitDefinitionBlock } from "./blocks.ts";
+import { CARET_VIEW_MIN, caretView } from "./caret.ts";
 import { CodeSegment, shellLabels, type ShellLabels } from "./code-block.ts";
 import {
   argsKey,
@@ -519,7 +520,12 @@ export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<A
       ...(animation.current ? { animated: undefined } : {}),
       // The same blocks, without Streamdown's whole-text tests on every update.
       parseMarkdownIntoBlocksFn:
-        props.parseMarkdownIntoBlocksFn ?? (whole ? wholeText : parseMarkdownIntoBlocks),
+        props.parseMarkdownIntoBlocksFn ??
+        (whole
+          ? wholeText
+          : isAnimating && !props.BlockComponent && props.dir !== "auto"
+            ? streamingBlocks
+            : parseMarkdownIntoBlocks),
       BlockComponent: props.BlockComponent
         ? healed === null
           ? props.BlockComponent
@@ -531,6 +537,16 @@ export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<A
   props: StreamdownProps<A>
 ) => ReactElement) & { displayName?: string };
 Streamdown.displayName = "Streamdown";
+
+/** The blocks, with a long last block as a `caretView` (rill's Block takes it back). */
+const streamingBlocks = (text: string): string[] => {
+  const blocks = parseMarkdownIntoBlocks(text);
+  const last = blocks.at(-1);
+  if (last === undefined || last.length < CARET_VIEW_MIN) return blocks;
+  const viewed = blocks.slice();
+  viewed[viewed.length - 1] = caretView(last);
+  return viewed;
+};
 
 /** The text as one block when Streamdown would split it (Block splits it again). */
 const wholeText = (text: string): string[] => {
@@ -806,7 +822,9 @@ const useServerFormat = () => {
 };
 
 /** Streamdown's `Block`, rendered by rill. Same props, same DOM. */
-export const Block = memo(function Block(props: BlockProps) {
+export const Block = memo(function Block(given: BlockProps) {
+  // The last block while streaming may be a `caretView`.
+  const props = typeof given.content === "string" ? given : { ...given, content: String(given.content) };
   const settings = useContext(RillContext);
   const context = useContext(StreamdownContext);
   const { linkSafety } = context;
@@ -1086,6 +1104,25 @@ type Pieces = {
    * them). */
   joins: [string, string][];
   references: References;
+  /** The last update's pieces, the definitions each rendered with, the footnote labels
+   * the text defined, the root's children, and the state after each piece joined them:
+   * the pieces before the first that changed join the same way again. */
+  chunks: string[];
+  usable: string[];
+  defined: string | null;
+  out: ReactNode[];
+  marks: Mark[];
+};
+
+/** The state after a piece joined the root's children. */
+type Mark = {
+  counts: Map<string, number>;
+  calls: string;
+  slots: number;
+  barrier: boolean;
+  /** How many children there were, and the last one (a later piece may extend it). */
+  length: number;
+  tail: ReactNode;
 };
 
 const newPieces = (): Pieces => ({
@@ -1094,6 +1131,11 @@ const newPieces = (): Pieces => ({
   notes: new Map(),
   joins: [],
   references: newReferences(),
+  chunks: [],
+  usable: [],
+  defined: null,
+  out: [],
+  marks: [],
 });
 
 // A piece renders with the definitions whose label its text may reference, so that a
@@ -1268,8 +1310,10 @@ function renderChunks(
   const notes: string[] = [];
   const labels: string[] = [];
   const knownNotes = new Map<string, [string, string][] | null>();
-  for (const chunk of chunks) {
-    if (!chunk.includes("]:")) continue;
+  for (const [index, chunk] of chunks.entries()) {
+    // A piece the same as last time has definitions when it had them then.
+    const same = chunk === pieces.chunks[index];
+    if (same ? !pieces.definitions.has(chunk) : !chunk.includes("]:")) continue;
     let found = pieces.definitions.get(chunk);
     if (found === undefined) {
       const ranges = rill.definitions!(chunk, plan);
@@ -1279,7 +1323,7 @@ function renderChunks(
     // A definition in a container: render the whole block.
     if (found === null) return null;
     definitions.push(...found);
-    if (!chunk.includes("[^")) continue;
+    if (same ? !pieces.notes.has(chunk) : !chunk.includes("[^")) continue;
     let foundNotes = knownNotes.get(chunk) ?? pieces.notes.get(chunk);
     if (foundNotes === undefined) {
       const ranges = rill.footnotes!(chunk, plan);
@@ -1299,14 +1343,33 @@ function renderChunks(
   // Without a definition, `[^x]` is text, as in a piece of its own.
   const footnoted = notes.length > 0;
   const defined = labels.join("\0");
-  let calls = "";
   const usableBy = definitionsFor(pieces.references, chunks, definitions);
-  const out: ReactNode[] = [];
-  const counts = new Map<string, number>();
-  const rendered: Piece[] = [];
+  const usable = chunks.map((chunk) => usableBy.get(chunk) ?? "");
+  // The pieces before the first whose text or definitions changed render and join as
+  // last time (the last piece of either update renders again: whether it is last
+  // changes), when the text defines the same footnotes: start after them.
+  let from = 0;
+  if (pieces.defined === defined) {
+    const limit = Math.min(chunks.length, pieces.chunks.length) - 1;
+    while (
+      from < limit &&
+      chunks[from] === pieces.chunks[from] &&
+      usable[from] === pieces.usable[from] &&
+      (pieces.rendered[from]!.incomplete === null || pieces.rendered[from]!.incomplete === env.isIncomplete)
+    ) {
+      from += 1;
+    }
+  }
+  const marks = pieces.marks.slice(0, from);
+  const mark = marks.at(-1);
+  const out: ReactNode[] = mark ? pieces.out.slice(0, mark.length) : [];
+  if (mark && mark.length > 0) out[mark.length - 1] = mark.tail;
+  const counts = new Map<string, number>(mark?.counts);
+  const rendered: Piece[] = pieces.rendered.slice(0, from);
+  let calls = mark?.calls ?? "";
   /** Root children so far, and whether the last one was removed (it rendered nothing). */
-  let slots = 0;
-  let barrier = false;
+  let slots = mark?.slots ?? 0;
+  let barrier = mark?.barrier ?? false;
   /** Renders `source` as the piece at `index` (or takes the one rendered last time). */
   const take = (
     index: number,
@@ -1401,16 +1464,16 @@ function renderChunks(
       (typeof piece.nodes.at(-1) === "string" && />\s*$/.test(piece.chunk));
     for (let node = first; node < piece.nodes.length; node += 1) out.push(piece.nodes[node]);
   };
-  for (let index = 0; index < chunks.length; index += 1) {
+  for (let index = from; index < chunks.length; index += 1) {
     const chunk = chunks[index]!;
-    const usable = usableBy.get(chunk) ?? "";
-    const piece = take(index, chunk, usable + chunk, usable, index === chunks.length - 1, false);
+    const piece = take(index, chunk, usable[index] + chunk, usable[index]!, index === chunks.length - 1, false);
     if (!piece) return null;
     const removed =
       piece.nodes.length === 0 &&
       removedNode(chunk, [...(known.get(chunk) ?? []), ...(knownNotes.get(chunk) ?? []).map(([note]) => note)]);
     const last = index === chunks.length - 1;
     place(piece, removed, /^\s*</.test(chunk), last && /<!--(?![\s\S]*-->)/.test(chunk));
+    marks.push({ counts: new Map(counts), calls, slots, barrier, length: out.length, tail: out.at(-1) });
   }
   if (footnoted) {
     // The section: every footnote definition, with the link definitions their text may
@@ -1421,6 +1484,11 @@ function renderChunks(
     place(piece, false, true);
   }
   pieces.rendered = rendered;
+  pieces.chunks = chunks;
+  pieces.usable = usable;
+  pieces.defined = defined;
+  pieces.marks = marks;
+  pieces.out = out;
   return out;
 }
 
