@@ -756,7 +756,7 @@ impl<'input> Parser<'input> {
     ) -> Option<(TreeIndex, Option<TreeIndex>)> {
         use crate::autolink_literal::{scan, LiteralKind};
         let item = self.tree[cur_ix].item;
-        let line_start = prev.map_or(true, |prev_ix| {
+        let line_start = prev.is_none_or(|prev_ix| {
             matches!(
                 self.tree[prev_ix].item.body,
                 ItemBody::SoftBreak | ItemBody::HardBreak(_)
@@ -1478,7 +1478,7 @@ impl InlineStack {
                 if c == b'~' && run_length != el.run_length {
                     return false;
                 }
-                el.c == c && (!both && !el.both || (count + el.count) % 3 != 0 || count % 3 == 0)
+                el.c == c && (!both && !el.both || !(count + el.count).is_multiple_of(3) || count.is_multiple_of(3))
             });
 
         if let Some((matching_ix, matching_el)) = res {

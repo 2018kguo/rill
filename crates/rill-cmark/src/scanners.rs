@@ -1376,6 +1376,35 @@ pub(crate) fn scan_inline_html_processing(
     None
 }
 
+/// rill: micromark `decodeString` — character escapes and references only; line endings stay.
+pub fn decode_string(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut result = String::with_capacity(input.len());
+    let mut mark = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i..] {
+            [b'\\', cx, ..] if is_ascii_punctuation(cx) => {
+                result.push_str(&input[mark..i]);
+                mark = i + 1;
+                i += 2;
+            }
+            [b'&', ..] => match scan_entity(&bytes[i..]) {
+                (n, Some(value)) => {
+                    result.push_str(&input[mark..i]);
+                    result.push_str(&value);
+                    i += n;
+                    mark = i;
+                }
+                _ => i += 1,
+            },
+            _ => i += 1,
+        }
+    }
+    result.push_str(&input[mark..]);
+    result
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1419,33 +1448,4 @@ mod test {
             assert!(scan_email(email, 1).is_none());
         }
     }
-}
-
-/// rill: micromark `decodeString` — character escapes and references only; line endings stay.
-pub fn decode_string(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut result = String::with_capacity(input.len());
-    let mut mark = 0;
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i..] {
-            [b'\\', cx, ..] if is_ascii_punctuation(cx) => {
-                result.push_str(&input[mark..i]);
-                mark = i + 1;
-                i += 2;
-            }
-            [b'&', ..] => match scan_entity(&bytes[i..]) {
-                (n, Some(value)) => {
-                    result.push_str(&input[mark..i]);
-                    result.push_str(&value);
-                    i += n;
-                    mark = i;
-                }
-                _ => i += 1,
-            },
-            _ => i += 1,
-        }
-    }
-    result.push_str(&input[mark..]);
-    result
 }
