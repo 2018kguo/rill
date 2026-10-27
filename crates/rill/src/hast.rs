@@ -2541,14 +2541,14 @@ impl<'s> Finisher<'_, 's> {
         self.tree.nodes[ix as usize].drop_partial_position();
         let props = self.tree.properties_mut(ix).expect("an element");
         *props = sanitize_props(tag, std::mem::take(props), self.sanitize);
-        if self.harden(ix, tag, self.harden) {
+        if self.harden(ix, tag) {
             self.tree.append(out, ix);
         }
     }
 
     /// `rehype-harden` for one sanitized element whose children are final; `false`
     /// removes it.
-    fn harden(&mut self, ix: NodeId, tag: &'static str, harden: &Harden) -> bool {
+    fn harden(&mut self, ix: NodeId, tag: &'static str) -> bool {
         let (key, resource) = match tag {
             "a" => ("href", Resource::Link),
             "img" => ("src", Resource::Image),
@@ -2561,7 +2561,7 @@ impl<'s> Finisher<'_, 's> {
         };
         let changed = match transformed {
             Ok(changed) => changed,
-            Err(Blocked) => return self.blocked(ix, resource, harden),
+            Err(Blocked) => return self.blocked(ix, resource),
         };
         if let Some(changed) = changed {
             set(props, key, Value::Str(Cow::Owned(changed)));
@@ -2579,7 +2579,8 @@ impl<'s> Finisher<'_, 's> {
 
     /// harden's `resolveLinkBlockPolicy` / `resolveImageBlockPolicy`: the replacement is a
     /// new, unpositioned span.
-    fn blocked(&mut self, ix: NodeId, resource: Resource, harden: &Harden) -> bool {
+    fn blocked(&mut self, ix: NodeId, resource: Resource) -> bool {
+        let harden = self.harden;
         let policy = match resource {
             Resource::Link => harden.link_policy,
             Resource::Image => harden.image_policy,
@@ -3118,15 +3119,14 @@ impl<'a, 's> Encoder<'a, 's> {
 
     /// The child count, then the children: the count is patched in after them.
     fn children(&mut self, ix: NodeId) {
-        let count_slot = self.ops.len();
-        self.ops.push(0);
+        let slot = self.slot();
         let mut count = 0;
         let tree = self.tree;
         for child in tree.children(ix) {
             self.node(child);
             count += 1;
         }
-        self.ops[count_slot] = count;
+        self.patch(slot, count);
     }
 
     fn value(&mut self, value: &Value<'_>) {
