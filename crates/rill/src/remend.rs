@@ -743,6 +743,11 @@ fn paint_fences(
     open
 }
 
+/// The start of the line holding `index`.
+fn line_start(text: &[u16], index: usize) -> usize {
+    rfind_unit(&text[..index], NEWLINE).map_or(0, |newline| newline + 1)
+}
+
 fn backtick_run_end(text: &[u16], start: usize) -> usize {
     let mut end = start + 1;
     while end < text.len() && text[end] == BACKTICK {
@@ -818,10 +823,7 @@ fn paint_spans(text: &[u16], regions: &mut [u8]) -> Option<OpenSpan> {
 }
 
 fn is_horizontal_rule(text: &[u16], marker_index: usize, marker: u16) -> bool {
-    let line_start = text[..marker_index]
-        .iter()
-        .rposition(|&unit| unit == NEWLINE)
-        .map_or(0, |index| index + 1);
+    let line_start = line_start(text, marker_index);
     let line_end = index_of_unit(text, NEWLINE, marker_index).unwrap_or(text.len());
     let mut count = 0;
     for &unit in &text[line_start..line_end] {
@@ -969,7 +971,7 @@ impl<'a> View<'a> {
         {
             return false;
         }
-        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
+        let line_start = line_start(text, position);
         let line_end = index_of_unit(text, NEWLINE, position).unwrap_or(text.len());
         let mut in_url = false;
         for i in line_start..position {
@@ -1000,7 +1002,7 @@ impl<'a> View<'a> {
         {
             return false;
         }
-        let line_start = rfind_unit(&text[..position], NEWLINE).map_or(0, |index| index + 1);
+        let line_start = line_start(text, position);
         let mut in_tag = false;
         for i in line_start..position {
             if self.region_at(i) != PROSE {
@@ -1009,9 +1011,7 @@ impl<'a> View<'a> {
             if text[i] == GREATER {
                 in_tag = false;
             } else if text[i] == LESS {
-                in_tag = text.get(i + 1).is_some_and(|&next| {
-                    (next < 0x80 && (next as u8).is_ascii_alphabetic()) || next == SLASH
-                });
+                in_tag = starts_tag(text, i);
             }
         }
         in_tag
@@ -1126,9 +1126,7 @@ fn skip_asterisk(view: &View<'_>, index: usize, previous: Option<u16>, next: Opt
     } else if previous == Some(STAR) {
         true
     } else {
-        let previous_space = previous.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
-        let next_space = next.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
-        previous_space && next_space
+        previous.is_none_or(whitespace_unit) && next.is_none_or(whitespace_unit)
     };
     skip || view.in_math(index as isize)
 }
@@ -1154,11 +1152,7 @@ fn count_single_asterisks(view: &View<'_>, from: usize, mut count: usize) -> usi
             chain = false;
             continue;
         }
-        let previous = if index > 0 {
-            Some(text[index - 1])
-        } else {
-            None
-        };
+        let previous = at(text, index as isize - 1);
         let next = text.get(index + 1).copied();
         if skip_asterisk(view, index, previous, next) {
             continue;
@@ -1186,11 +1180,7 @@ fn count_single_underscores(view: &View<'_>, from: usize) -> usize {
         if view.region_at(index) != PROSE {
             continue;
         }
-        let previous = if index > 0 {
-            Some(text[index - 1])
-        } else {
-            None
-        };
+        let previous = at(text, index as isize - 1);
         let next = text.get(index + 1).copied();
         // An or of `shouldSkipUnderscore`'s tests, the ones needing masks last.
         let skip = previous == Some(BACKSLASH)
@@ -1249,19 +1239,16 @@ fn unmatched_double_underscore(view: &View<'_>, from: usize) -> bool {
         if end < start + 2 {
             continue;
         }
-        let before = if start > 0 {
-            Some(text[start - 1])
+        let previous = if escaped {
+            Some(BACKSLASH)
         } else {
-            None
+            at(text, start as isize - 1)
         };
-        let previous = if escaped { Some(BACKSLASH) } else { before };
         let next = text.get(end).copied();
         if word_unit(previous) && word_unit(next) {
             continue;
         }
-        let boundary =
-            |unit: Option<u16>| unit.is_none_or(|unit| matches!(unit, SPACE | TAB | NEWLINE));
-        if boundary(previous) && boundary(next) {
+        if previous.is_none_or(whitespace_unit) && next.is_none_or(whitespace_unit) {
             if start as isize > memo.0 {
                 let line_end = index_of_unit(text, NEWLINE, start).unwrap_or(n);
                 memo = (
@@ -1755,10 +1742,7 @@ fn skip_completion(ctx: &Ctx<'_>, content: usize, marker_index: usize, rule: u16
     if content == text.len() || ctx.blank_from(content) {
         return true;
     }
-    let line_start = text[..marker_index]
-        .iter()
-        .rposition(|&unit| unit == NEWLINE)
-        .map_or(0, |index| index + 1);
+    let line_start = line_start(text, marker_index);
     if list_item_prefix(&text[line_start..marker_index]) && ctx.newline_from(content) {
         return true;
     }
@@ -2079,25 +2063,21 @@ fn unmatched_double_underscores(ctx: &Ctx<'_>) -> bool {
 }
 
 fn incomplete_double_underscore_italic(ctx: &mut Ctx<'_>) -> Option<()> {
-    let Some(content) = match_trailing(ctx, UNDERSCORE, 2, Tail::Plain) else {
-        if match_trailing(ctx, UNDERSCORE, 2, Tail::HalfComplete).is_some() {
-            let marker = ctx
-                .last_index(&[UNDERSCORE, UNDERSCORE], None, ctx.prefix.last_run[1])
-                .expect("the match holds __");
-            if !ctx.view().in_code(marker) && unmatched_double_underscores(ctx) {
-                return ctx.append("_");
-            }
-        }
-        return Some(());
+    let (content, suffix) = match match_trailing(ctx, UNDERSCORE, 2, Tail::Plain) {
+        Some(content) => (Some(content), "__"),
+        None if match_trailing(ctx, UNDERSCORE, 2, Tail::HalfComplete).is_some() => (None, "_"),
+        None => return Some(()),
     };
     let marker = ctx
         .last_index(&[UNDERSCORE, UNDERSCORE], None, ctx.prefix.last_run[1])
         .expect("the match holds __");
-    if ctx.view().in_code(marker) || skip_completion(ctx, content.start, marker, UNDERSCORE) {
+    if ctx.view().in_code(marker)
+        || content.is_some_and(|content| skip_completion(ctx, content.start, marker, UNDERSCORE))
+    {
         return Some(());
     }
     if unmatched_double_underscores(ctx) {
-        return ctx.append("__");
+        return ctx.append(suffix);
     }
     Some(())
 }
@@ -2236,31 +2216,19 @@ fn incomplete_inline_code(ctx: &mut Ctx<'_>) -> Option<()> {
 }
 
 fn incomplete_strikethrough(ctx: &mut Ctx<'_>) -> Option<()> {
-    if let Some(content) = match_trailing(ctx, TILDE, 2, Tail::Plain) {
-        if content.is_empty() || ctx.blank_from(content.start) {
-            return Some(());
-        }
-        let marker = ctx
-            .last_index(&[TILDE, TILDE], None, ctx.prefix.last_run[2])
-            .expect("the match holds ~~");
-        if ctx.view().in_code(marker) {
-            return Some(());
-        }
-        if ctx.pairs(1, TILDE) % 2 == 1 {
-            return ctx.append("~~");
-        }
-    } else if match_trailing(ctx, TILDE, 2, Tail::HalfComplete).is_some() {
-        let marker = ctx
-            .last_index(&[TILDE, TILDE], None, ctx.prefix.last_run[2])
-            .expect("the match holds ~~");
-        if ctx.view().in_code(marker) {
-            return Some(());
-        }
-        if ctx.pairs(1, TILDE) % 2 == 1 {
-            return ctx.append("~");
-        }
+    let suffix = match match_trailing(ctx, TILDE, 2, Tail::Plain) {
+        Some(content) if content.is_empty() || ctx.blank_from(content.start) => return Some(()),
+        Some(_) => "~~",
+        None if match_trailing(ctx, TILDE, 2, Tail::HalfComplete).is_some() => "~",
+        None => return Some(()),
+    };
+    let marker = ctx
+        .last_index(&[TILDE, TILDE], None, ctx.prefix.last_run[2])
+        .expect("the match holds ~~");
+    if ctx.view().in_code(marker) || ctx.pairs(1, TILDE).is_multiple_of(2) {
+        return Some(());
     }
-    Some(())
+    ctx.append(suffix)
 }
 
 fn incomplete_block_katex(ctx: &mut Ctx<'_>) -> Option<()> {
