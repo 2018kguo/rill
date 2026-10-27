@@ -10,6 +10,7 @@ use rill_cmark::{Alignment, CodeBlockKind, Event, LinkType, Parser, Tag, TagEnd}
 
 use crate::autolink::{self, Finder, Piece};
 use crate::json::{json_string, json_u32};
+use crate::text::{push_cow, utf16_units};
 
 /// mdast `referenceType`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,9 +125,7 @@ impl Points {
             let mut units = 0;
             for &byte in bytes {
                 utf16.push(units);
-                // Each character is one unit, counted at its first byte; four-byte ones
-                // (outside the BMP) are two.
-                units += u32::from(byte & 0xC0 != 0x80) + u32::from(byte >= 0xF0);
+                units += utf16_units(byte);
             }
             utf16.push(units);
         }
@@ -578,14 +577,6 @@ fn normalize_identifier(label: &str) -> String {
 fn source_offset(source: &str, slice: &str) -> Option<usize> {
     let start = (slice.as_ptr() as usize).checked_sub(source.as_ptr() as usize)?;
     (start + slice.len() <= source.len()).then_some(start)
-}
-
-/// Appends `value`, copying a borrowed `target` once, into a string that fits both.
-pub(crate) fn push_cow(target: &mut Cow<'_, str>, value: &str) {
-    match target {
-        Cow::Owned(owned) => owned.push_str(value),
-        Cow::Borrowed(borrowed) => *target = Cow::Owned([*borrowed, value].concat()),
-    }
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@ use std::borrow::Cow;
 
 use crate::hast::{self, NodeKind, Tree, Value};
 use crate::mdast::NodeId;
+use crate::text::{in_ranges, js_blank, js_space, slice_cow, utf16_len};
 
 /// One block's animation pass: the `animated` options and the timeline's state.
 #[derive(Clone, Debug, Default)]
@@ -55,21 +56,6 @@ fn void_animated(tag: &str) -> bool {
     matches!(tag, "img" | "hr")
 }
 
-/// JavaScript's `\s` (and what `trim()` removes).
-fn space(c: char) -> bool {
-    matches!(
-        c,
-        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
-
 /// Han, Hiragana and Katakana (by Script), CJK punctuation and fullwidth forms: the
 /// plugin's `CJK_RE`, generated from V8 (Unicode 17).
 const CJK: &[(u32, u32)] = &[
@@ -111,20 +97,8 @@ const CJK: &[(u32, u32)] = &[
 ];
 
 fn cjk(c: char) -> bool {
-    let c = c as u32;
-    if c < 0x2e80 {
-        return false;
-    }
-    let after = CJK.partition_point(|&(start, _)| start <= c);
-    after > 0 && c <= CJK[after - 1].1
-}
-
-fn units(text: &str) -> u32 {
-    text.chars().map(|c| c.len_utf16() as u32).sum()
-}
-
-fn blank(text: &str) -> bool {
-    text.chars().all(space)
+    let c = u32::from(c);
+    c >= 0x2e80 && in_ranges(CJK, c)
 }
 
 /// The plugin's `splitByWord`: a unit per run of non-space with the spaces after it,
@@ -135,7 +109,7 @@ fn split_by_word(text: &str, out: &mut Vec<(usize, usize)>) {
     let mut in_space = false;
     let mut previous_cjk = false;
     for (index, c) in text.char_indices() {
-        let is_space = space(c);
+        let is_space = js_space(c);
         let is_cjk = !is_space && cjk(c);
         let starts_unit = !is_space && !empty && (is_cjk || previous_cjk);
         if starts_unit {
@@ -164,9 +138,9 @@ fn split_by_char(text: &str, out: &mut Vec<(usize, usize)>) {
     let mut spaces: Option<(usize, usize)> = None;
     for (index, c) in text.char_indices() {
         let end = index + c.len_utf8();
-        if space(c) {
+        if js_space(c) {
             match out.last_mut() {
-                Some(last) if !blank(&text[last.0..last.1]) => last.1 = end,
+                Some(last) if !js_blank(&text[last.0..last.1]) => last.1 = end,
                 _ => {
                     spaces = Some(spaces.map_or((index, end), |(start, _)| (start, end)));
                 }
@@ -251,8 +225,8 @@ impl<'s> Pass<'_, '_, 's> {
             match &self.tree.nodes[child as usize].kind {
                 NodeKind::Text(text) => {
                     let text: &str = text;
-                    if blank(text) {
-                        self.count += units(text);
+                    if js_blank(text) {
+                        self.count += utf16_len(text);
                         continue;
                     }
                     let mut ranges = std::mem::take(&mut self.ranges);
@@ -260,8 +234,8 @@ impl<'s> Pass<'_, '_, 's> {
                     for &(start, end) in &ranges {
                         let part = &text[start..end];
                         let at = self.count;
-                        self.count += units(part);
-                        if !blank(part) && !self.shown(at) {
+                        self.count += utf16_len(part);
+                        if !js_blank(part) && !self.shown(at) {
                             *new += 1;
                         }
                     }
@@ -322,8 +296,8 @@ impl<'s> Pass<'_, '_, 's> {
             let tag = self.tree.tag_name(child);
             if let NodeKind::Text(text) = &self.tree.nodes[child as usize].kind {
                 let text = text.clone();
-                if blank(&text) {
-                    self.count += units(&text);
+                if js_blank(&text) {
+                    self.count += utf16_len(&text);
                     out.push(child);
                     continue;
                 }
@@ -374,10 +348,10 @@ impl<'s> Pass<'_, '_, 's> {
             _ => false,
         });
         for &(start, end) in &ranges {
-            let part = hast::slice_cow(&text, start..end);
+            let part = slice_cow(&text, start..end);
             let at = self.count;
-            self.count += units(&part);
-            if blank(&part) {
+            self.count += utf16_len(&part);
+            if js_blank(&part) {
                 out.push(self.tree.add(NodeKind::Text(part)));
                 continue;
             }

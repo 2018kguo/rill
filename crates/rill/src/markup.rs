@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use crate::animate::{self, Animate, Animated};
 use crate::hast::{self, Encoder, Kind, NodeKind, Options, Props, Tree, Value};
 use crate::mdast::{Error, NodeId};
+use crate::text::js_blank;
 
 /// The `<Streamdown>` props the markup depends on.
 #[derive(Clone, Debug, Default)]
@@ -234,23 +235,6 @@ fn html_whitespace(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0c'))
-}
-
-/// Whether JavaScript's `trim()` leaves nothing.
-fn js_blank(value: &str) -> bool {
-    value.chars().all(|c| {
-        matches!(
-            c,
-            '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-                ..='\u{200a}'
-                    | '\u{2028}'
-                    | '\u{2029}'
-                    | '\u{202f}'
-                    | '\u{205f}'
-                    | '\u{3000}'
-                    | '\u{feff}'
-        )
-    })
 }
 
 /// React's attribute and text escaping (`escapeTextForBrowser`). Outside `ssr`, the HTML
