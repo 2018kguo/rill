@@ -1394,36 +1394,19 @@ impl<'p> Brackets<'p> {
             .chain(self.settled[..open].iter().rev())
             .copied()
     }
-}
 
-/// A `Vec` of open `[`s is a [`Brackets`] with nothing settled.
-trait OpenBrackets {
-    fn push(&mut self, index: usize);
-    fn pop(&mut self) -> Option<usize>;
-}
-
-impl OpenBrackets for Vec<usize> {
-    fn push(&mut self, index: usize) {
-        Vec::push(self, index);
-    }
-    fn pop(&mut self) -> Option<usize> {
-        Vec::pop(self)
-    }
-}
-
-impl OpenBrackets for Brackets<'_> {
-    fn push(&mut self, index: usize) {
-        Brackets::push(self, index);
-    }
-    fn pop(&mut self) -> Option<usize> {
-        Brackets::pop(self)
+    /// The open ones, first first.
+    fn into_open(self) -> Vec<usize> {
+        let mut open = self.settled[..self.settled.len() - self.closed].to_vec();
+        open.extend(self.after);
+        open
     }
 }
 
 fn pair_brackets(
     text: &[u16],
     from: usize,
-    open: &mut impl OpenBrackets,
+    open: &mut Brackets<'_>,
     last_link: &mut Option<(usize, Option<usize>)>,
 ) {
     for_each_unit2(&text[from..], OPEN_BRACKET, CLOSE_BRACKET, |offset| {
@@ -1543,7 +1526,7 @@ impl Settled {
                     .rposition(|&unit| !whitespace_or_markers(&[unit]))
                     .map(|index| index + from),
             ),
-            open_brackets: self.open_brackets.clone(),
+            open_brackets: Vec::new(),
             last_link: self.last_link,
             tag_start: None,
         };
@@ -1557,7 +1540,9 @@ impl Settled {
         for (index, run) in RUNS.into_iter().enumerate() {
             next.last_run[index] = later(self.last_run[index], last_index_from(text, run, from));
         }
-        pair_brackets(text, from, &mut next.open_brackets, &mut next.last_link);
+        let mut open = Brackets::new(&self.open_brackets);
+        pair_brackets(text, from, &mut open, &mut next.last_link);
+        next.open_brackets = open.into_open();
         next.tag_start = match last_index_from(text, &[GREATER], from) {
             Some(greater) => first_tag_start(&view, greater + 1),
             None => self.tag_start.or_else(|| first_tag_start(&view, from)),
