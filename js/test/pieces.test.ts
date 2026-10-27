@@ -53,6 +53,15 @@ const PIECES = [
   "\n> ",
   "\n[d]:\n/d\n'title\nline'\n",
   "[d]",
+  "[^1]",
+  "[^n] ",
+  "\n\n[^1]: one\n\n",
+  "\n\n[^n]: a note with [a]\n\n",
+  "\n\n<!-- c -->\n\n",
+  "<!-- c -->",
+  "\n\n<!-- open ",
+  "\n\n<b>x</b>\n\n",
+  "\n\n</div>\n\n",
 ];
 
 /** A small seeded generator (mulberry32), so a failure can be replayed. */

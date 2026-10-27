@@ -1,8 +1,9 @@
 // What a streaming update costs, counted instead of timed: the drop-in <Streamdown> streams
 // each document family at n, 2n, 4n and 8n characters in a DOM (happy-dom, React's client
 // renderer, so memo and refs live across updates as in a browser), and every UTF-16 unit
-// handed to the WebAssembly (markup, definitions, splitsAt) or lexed by marked (the block
-// split) during its last updates is counted. That work must follow the block being
+// handed to the WebAssembly (markup, definitions, splitsAt), lexed by marked (the block
+// split) or split into lines (as Streamdown's root tests the last block for an open code
+// fence) during its last updates is counted. That work must follow the block being
 // written, not the whole answer: it may not grow with the answer, except in families
 // whose block being written is the answer (a table, a code block, a list, a text with
 // footnotes), where it may grow linearly but no faster.
@@ -19,8 +20,8 @@ const { Streamdown } = await import("../src/streamdown.ts");
 const rill = await initRill(readFileSync(new URL("../wasm/rill_bg.wasm", import.meta.url)));
 
 /** Units handed to each piece of work since the last reset. */
-const work = { markup: 0, definitions: 0, splitsAt: 0, lexed: 0 };
-const total = () => work.markup + work.definitions + work.splitsAt + work.lexed;
+const work = { markup: 0, definitions: 0, splitsAt: 0, lexed: 0, lines: 0 };
+const total = () => work.markup + work.definitions + work.splitsAt + work.lexed + work.lines;
 const count = <F extends (source: string, ...rest: never[]) => unknown>(
   name: keyof typeof work,
   run: F
@@ -39,6 +40,13 @@ Lexer.prototype.blockTokens = function (this: InstanceType<typeof Lexer>, source
   work.lexed += source.length;
   return (blockTokens as (...args: unknown[]) => unknown).call(this, source, ...rest);
 } as typeof blockTokens;
+
+const split = String.prototype.split;
+String.prototype.split = function (this: string, separator: unknown, ...rest: unknown[]) {
+  // With a limit (marked's list items take their first line), it stops early.
+  if (separator === "\n" && rest[0] === undefined) work.lines += this.length;
+  return (split as (...args: unknown[]) => string[]).call(this, separator, ...rest);
+} as typeof split;
 
 const CHUNK = 24;
 const TIMED = 20;
