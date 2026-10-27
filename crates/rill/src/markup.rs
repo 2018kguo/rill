@@ -38,8 +38,6 @@ pub struct MarkupOptions {
     /// Tag names the page gives its own component: elements holding one render
     /// through hast-util-to-jsx-runtime.
     pub overrides: Vec<String>,
-    /// Math elements are left for KaTeX (a [`crate::Kind::Math`] tree).
-    pub math: bool,
     /// JavaScript renders math with KaTeX: without it, a tree with math is
     /// [`Unsupported`].
     pub katex: bool,
@@ -341,6 +339,8 @@ struct Markup<'e, 't, 's, 'o> {
     options: &'o MarkupOptions,
     encoder: &'e mut Encoder<'t, 's>,
     needs: Vec<Option<Need>>,
+    /// Math elements are left for KaTeX (a [`Kind::Math`] tree).
+    math: bool,
     /// Footnote lists without the items that hold only a backreference.
     footnote_items: HashMap<NodeId, Vec<NodeId>>,
 }
@@ -391,7 +391,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
     /// A math element KaTeX replaces: `<code class="language-math">`, or the `<pre>`
     /// around one.
     fn math(&self, ix: NodeId) -> bool {
-        if !self.options.math {
+        if !self.math {
             return false;
         }
         match self.tag(ix) {
@@ -1163,12 +1163,9 @@ pub fn markup(
         Some(options) => Some(animate::animate(&mut built.tree, built.root, options)),
         None => None,
     };
-    let markup = MarkupOptions {
-        math: built.kind == Kind::Math,
-        ..markup.clone()
-    };
+    let math = built.kind == Kind::Math;
     let mut encoder = Encoder::new(&built.tree, &built.points, source);
-    encode(&mut encoder, &built.tree, built.root, &markup).map_err(Ok)?;
+    encode(&mut encoder, &built.tree, built.root, markup, math).map_err(Ok)?;
     let (ops, strings) = encoder.finish();
     Ok(EncodedMarkup {
         ops,
@@ -1184,12 +1181,14 @@ fn encode<'t, 's>(
     tree: &'t Tree<'s>,
     root: NodeId,
     options: &MarkupOptions,
+    math: bool,
 ) -> Result<(), Fallback> {
     let mut markup = Markup {
         tree,
         options,
         encoder,
         needs: vec![None; tree.nodes.len()],
+        math,
         footnote_items: HashMap::new(),
     };
     markup.prepare(root);

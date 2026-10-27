@@ -180,7 +180,6 @@ pub mod wasm {
             link_safety: flags & 1 != 0,
             ssr: flags & 2 != 0,
             overrides: overrides.split_whitespace().map(str::to_owned).collect(),
-            math: false,
             katex: flags & 8 != 0,
             incomplete: flags & 16 != 0,
             spine: flags & 4 != 0,

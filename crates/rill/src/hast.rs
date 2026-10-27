@@ -1172,26 +1172,15 @@ impl<'s> ToHast<'_, 's> {
 }
 
 /// HAST plus what the native raw stage must leave to JavaScript.
-pub struct Converted<'s> {
-    pub tree: Tree<'s>,
-    pub root: NodeId,
-    pub raw_boundary: bool,
-    pub math: bool,
-    pub footnote_calls: Vec<(String, usize)>,
+struct Converted<'s> {
+    tree: Tree<'s>,
+    root: NodeId,
+    raw_boundary: bool,
+    math: bool,
+    footnote_calls: Vec<(String, usize)>,
 }
 
-/// mdast-util-to-hast. `katex`: rehype-katex runs later, so ```math blocks count as math.
-/// With Streamdown's remarkCodeMeta.
-pub fn to_hast<'s>(mdast: &mdast::Tree<'s>, katex: bool) -> Converted<'s> {
-    convert(
-        mdast,
-        &Options {
-            math: katex,
-            ..Options::default()
-        },
-    )
-}
-
+/// mdast-util-to-hast, with Streamdown's remarkCodeMeta.
 fn convert<'s>(mdast: &mdast::Tree<'s>, options: &Options) -> Converted<'s> {
     let close_open_raw = options.close_open_raw;
     let mut state = ToHast {
