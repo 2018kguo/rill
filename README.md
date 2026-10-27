@@ -54,15 +54,15 @@ Measured in Chromium on a phone-sized screen, with the CPU slowed 10× to roughl
 budget Android phone. Both engines produce the same final HTML. Each number is the median
 of runs that alternate between the two engines.
 
-| Scenario | Done sooner | Less JavaScript work | Stutter, Streamdown / rill | Memory, Streamdown / rill |
+| Scenario | Done sooner | Less JS execution time | Stutter, Streamdown / rill | Memory, Streamdown / rill |
 |---|---:|---:|---:|---:|
 | Open a chat of 18 long answers | 4.4× | 6.6× | 6.1 s / 1.4 s | 41.8 / 13.9 MB |
 | Open a code-heavy chat | 8.2× | 11.9× | 5.1 s / 0.5 s | 41.8 / 9.1 MB |
 | Stream a 118-row table | 4.2× | 14.5× | 15.4 s / 44 ms | 12.4 / 8.5 MB |
 | Stream a 56 KB answer | 5.2× | 13.7× | 123 s / 99 ms | 20.3 / 11.6 MB |
 
-*Less JavaScript work* is time the main thread spent running JavaScript and collecting
-its garbage. *Stutter* is how long the main thread stayed busy past 50 ms in a frame,
+*JS execution time* is time the main thread spent running JavaScript, garbage collection
+included. *Stutter* is how long the main thread stayed busy past 50 ms in a frame,
 which is what a user feels as lag. *Memory* is the JavaScript heap once the page settles.
 
 The table measures a page that does nothing but render Markdown. A real app spends time
@@ -70,7 +70,7 @@ on other work too, and that time is the same with either engine: React rendering
 message list, the sidebar and the chat state. So the time ratios come out smaller, while
 the memory saved carries over. In Vercel's [ai-chatbot](https://github.com/vercel/ai-chatbot)
 template, changing the one import made an 18-answer chat open 3.1× faster (4.4× on the
-Markdown-only page), with 3.7× less JavaScript work (6.6× there) and a JavaScript heap of
+Markdown-only page), with 3.7× less JS execution time (6.6× there) and a JavaScript heap of
 22 MB instead of 49.
 
 [benchmarks.md](docs/benchmarks.md) has every scenario with confidence intervals, page

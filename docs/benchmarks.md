@@ -16,7 +16,7 @@ brackets are 95% confidence intervals on the ratio (bootstrapped: resampled from
 to see how much the ratio could move). Where a cell has two values, the first is
 Streamdown's.
 
-| Scenario | Finished sooner | Less main-thread JS + GC | Long-frame blocking | JS heap after |
+| Scenario | Finished sooner | Less JS execution time | Long-frame blocking | JS heap after |
 |---|---:|---:|---:|---:|
 | Open a chat of 18 long answers (231 KB: code, tables, lists) | 4.4× [3.7–5.4] | 6.6× [5.3–8.0] | 6.1 s to 1.4 s | 41.8 to 13.9 MB |
 | Open a code-heavy chat (18 answers, four languages of code) | 8.2× [5.5–9.3] | 11.9× [8.4–13.5] | 5.1 s to 0.5 s | 41.8 to 9.1 MB |
@@ -32,8 +32,8 @@ How to read it:
   characters a frame, except the last row, which feeds it at a fixed pace: there both
   finish when the text does, and what differs is how hard the main thread works and how
   often it blocks.
-- **Less main-thread JS + GC** is time spent running JavaScript and collecting its
-  garbage on the main thread, the thread that also handles input and drawing. Layout and
+- **JS execution time** is time spent running JavaScript on the main thread, the thread
+  that also handles input and drawing, with garbage collection included. Layout and
   paint are the same on both sides (the DOM is the same), so this is the part rill
   changes.
 - **Long-frame blocking** is the time the main thread was busy past 50 ms in a frame,
@@ -100,7 +100,7 @@ the ratios. The final HTML of the answers is identical on both sides.
 
 **Opening a chat of 18 long answers (239 KB)**
 
-| CPU | Done, Streamdown / rill | JavaScript work, Streamdown / rill | Stutter, Streamdown / rill | Memory, Streamdown / rill |
+| CPU | Done, Streamdown / rill | JS execution time, Streamdown / rill | Stutter, Streamdown / rill | Memory, Streamdown / rill |
 |---|---:|---:|---:|---:|
 | 4× | 3.18 s / 1.67 s (1.9× [1.5–2.8]) | 2.90 s / 1.30 s (2.2× [1.7–3.5]) | 2.31 s / 1.06 s | 49.1 / 23.0 MB |
 | 10× | 12.16 s / 3.93 s (3.1× [2.5–3.9]) | 11.26 s / 3.06 s (3.7× [2.9–4.6]) | 10.62 s / 2.94 s | 49.0 / 22.1 MB |
@@ -108,13 +108,13 @@ the ratios. The final HTML of the answers is identical on both sides.
 **Streaming an 8 KB answer at 2,400 characters a second** (five code blocks, three tables,
 a 30-item list)
 
-| CPU | Done, Streamdown / rill | JavaScript work, Streamdown / rill | Stutter, Streamdown / rill | Memory, Streamdown / rill |
+| CPU | Done, Streamdown / rill | JS execution time, Streamdown / rill | Stutter, Streamdown / rill | Memory, Streamdown / rill |
 |---|---:|---:|---:|---:|
 | 4× | 4.07 s / 4.13 s (paced by the stream) | 3.54 s / 2.50 s (1.4× [1.3–1.5]) | 746 ms / 20 ms | 27.5 / 19.0 MB |
 | 10× | 10.52 s / 7.04 s (1.5× [1.5–1.5]) | 10.06 s / 6.55 s (1.5× [1.5–1.6]) | 9.26 s / 5.68 s | 26.7 / 18.7 MB |
 
 The time ratios are smaller than on the Markdown-only page above (3.1× against 4.4× to
-open the chat, 3.7× against 6.6× less JavaScript work) because the app does work of its
+open the chat, 3.7× against 6.6× less JS execution time) because the app does work of its
 own that rill doesn't touch. React also renders the app around the answers (the message
 list, the sidebar, the chat state) when the chat opens and again on every streamed
 update, and that costs the same with either engine. While streaming at 10×, it is most of

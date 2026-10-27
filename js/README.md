@@ -21,7 +21,7 @@ With `@streamdown/code`, change that import too, and the page stops shipping Shi
 Same component, same props, same page. On a throttled phone profile (Chromium, CPU
 throttled 10×), Streamdown vs rill:
 
-| Scenario | Finished sooner | Less main-thread JavaScript |
+| Scenario | Finished sooner | Less JS execution time (main thread) |
 |---|---:|---:|
 | Open a chat of 18 long answers | 4.4× | 6.6× |
 | Open a code-heavy chat | 8.2× | 11.9× |

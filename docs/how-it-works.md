@@ -92,7 +92,7 @@ While a table streams, the table is the block being written, so Streamdown re-re
 all of it, every row, on each update. A table row's Markdown is one line, and once the
 line has ended, that row renders the same whatever comes after it. rill keeps the rows
 whose lines have ended and renders only the header and the line still arriving. Streaming
-the 118-row periodic table takes 14.5 times less JavaScript than in Streamdown.
+the 118-row periodic table takes 14.5 times less JS execution time than in Streamdown.
 
 ### Answers with footnotes stream in pieces
 
