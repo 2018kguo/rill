@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 
 pub use rill_cmark::Syntax;
-use rill_cmark::{Alignment, CodeBlockKind, Event, LinkType, Parser, Tag, TagEnd};
+use rill_cmark::{Alignment, CodeBlockKind, CowStr, Event, LinkType, Parser, Tag, TagEnd};
 
 use crate::autolink::{self, Finder, Piece};
 use crate::json::{json_string, json_u32};
@@ -573,6 +573,14 @@ fn normalize_identifier(label: &str) -> String {
     collapsed.to_lowercase().to_uppercase().to_lowercase()
 }
 
+/// A footnote's identifier and label.
+fn association(label: CowStr<'_>) -> Box<Association> {
+    Box::new(Association {
+        identifier: normalize_identifier(&label).into(),
+        label: label.into_string().into(),
+    })
+}
+
 /// Where `slice` sits in `source`, if it is a subslice of it.
 fn source_offset(source: &str, slice: &str) -> Option<usize> {
     let start = (slice.as_ptr() as usize).checked_sub(source.as_ptr() as usize)?;
@@ -1071,9 +1079,7 @@ impl<'s> Builder<'s> {
         // without `>`, so such lines close it earlier.
         let mut line_start = closing_line;
         while in_blockquote && line_start > 0 {
-            let previous = source[..line_start - 1]
-                .rfind(['\n', '\r'])
-                .map_or(0, |eol| eol + 1);
+            let previous = start_of_line(source, line_start - 1);
             let line = source[previous..line_start].trim_end_matches(['\n', '\r']);
             if previous == 0 || !line.trim_matches([' ', '\t']).is_empty() {
                 break;
@@ -1433,13 +1439,8 @@ impl<'s> Builder<'s> {
                     .and_then(|frame| self.tree.bytes(self.tree.nodes[frame.node as usize].last))
                     .map_or(0, |(_, end)| end as usize);
                 // An odd run of backslashes: the last one escapes this text's first byte.
-                let backslashes = bytes[previous_end.min(start)..start]
-                    .iter()
-                    .rev()
-                    .take_while(|b| **b == b'\\')
-                    .count();
                 let escaped = self.text.is_none()
-                    && backslashes % 2 == 1
+                    && odd_backslashes(&bytes[previous_end.min(start)..start])
                     && bytes.get(start).is_some_and(u8::is_ascii_punctuation);
                 self.note_failed_run(start - usize::from(escaped), end);
                 self.push_text(Cow::from(text), start - usize::from(escaped), end);
@@ -1462,10 +1463,7 @@ impl<'s> Builder<'s> {
                 self.leaf(NodeKind::InlineMath(Cow::from(value)), bytes(start, end))
             }
             Event::FootnoteReference(label) => self.leaf(
-                NodeKind::FootnoteReference(Box::new(Association {
-                    identifier: normalize_identifier(&label).into(),
-                    label: label.into_string().into(),
-                })),
+                NodeKind::FootnoteReference(association(label)),
                 bytes(start, end),
             ),
             Event::SoftBreak => {
@@ -1579,10 +1577,7 @@ impl<'s> Builder<'s> {
                 spread: false,
                 checked: None,
             },
-            Tag::FootnoteDefinition(label) => NodeKind::FootnoteDefinition(Box::new(Association {
-                identifier: normalize_identifier(&label).into(),
-                label: label.into_string().into(),
-            })),
+            Tag::FootnoteDefinition(label) => NodeKind::FootnoteDefinition(association(label)),
             Tag::Table(align) => {
                 NodeKind::Table(align.iter().copied().map(AlignKind::from).collect())
             }
@@ -1663,20 +1658,11 @@ fn reference_label_range(
 ) -> Option<(usize, usize)> {
     let bytes = source.as_bytes();
     let close = end.checked_sub(1).filter(|close| bytes[*close] == b']')?;
-    let escaped = |at: usize| {
-        bytes[..at]
-            .iter()
-            .rev()
-            .take_while(|b| **b == b'\\')
-            .count()
-            % 2
-            == 1
-    };
     let label_start = match kind {
         ReferenceKind::Full => {
             (start..close)
                 .rev()
-                .find(|&at| bytes[at] == b'[' && !escaped(at))?
+                .find(|&at| bytes[at] == b'[' && !odd_backslashes(&bytes[..at]))?
                 + 1
         }
         _ => start + open,
@@ -1849,14 +1835,14 @@ fn code_runs(text: &str, syntax: Syntax) -> impl Iterator<Item = usize> + '_ {
             || syntax.math
                 && bytes[at] == b'$'
                 && (syntax.single_dollar || bytes.get(at + 1) == Some(&b'$'));
-        run && bytes[..at]
-            .iter()
-            .rev()
-            .take_while(|b| **b == b'\\')
-            .count()
-            % 2
-            == 0
+        run && !odd_backslashes(&bytes[..at])
     })
+}
+
+/// Whether `before` ends with an odd run of backslashes: the last one escapes what
+/// follows.
+fn odd_backslashes(before: &[u8]) -> bool {
+    before.iter().rev().take_while(|b| **b == b'\\').count() % 2 == 1
 }
 
 /// Parses `source` with `syntax` into remark's MDAST JSON.
@@ -2089,17 +2075,11 @@ fn indented_tail(source: &str, end: usize) -> (usize, String) {
     while let Some(found) = source[at..].find(['\n', '\r']) {
         let eol = at + found;
         let line_start = eol + line_ending_len(source, eol);
-        let line_end = source[line_start..]
-            .find(['\n', '\r'])
-            .map_or(source.len(), |found| line_start + found);
+        let line_end = end_of_line(source, line_start);
         let mut column = 0;
         let mut cursor = line_start;
         while cursor < line_end && column < 4 && matches!(bytes[cursor], b' ' | b'\t') {
-            column = if bytes[cursor] == b'\t' {
-                column + 4 - column % 4
-            } else {
-                column + 1
-            };
+            column = next_column(column, bytes[cursor]);
             cursor += 1;
         }
         let rest = &source[cursor..line_end];
@@ -2135,9 +2115,7 @@ fn item_content_column(source: &str, start: usize) -> usize {
     while matches!(bytes.get(marker), Some(b' ' | b'\t' | b'\n' | b'\r')) {
         marker += 1;
     }
-    let line_start = source[..marker]
-        .rfind(['\n', '\r'])
-        .map_or(0, |eol| eol + 1);
+    let line_start = start_of_line(source, marker);
     let end = list_item_prefix_end(source, marker);
     let rest = source[end..].trim_start_matches([' ', '\t']);
     let blank = rest.is_empty() || rest.starts_with(['\n', '\r']);
@@ -2163,6 +2141,27 @@ fn list_item_prefix_end(source: &str, at: usize) -> usize {
         None | Some(b'\n' | b'\r') => marker,
         Some(_) if spaces > 4 => marker + 1,
         Some(_) => marker + spaces,
+    }
+}
+
+/// The start of the line holding byte `at`: just past the line ending before it.
+fn start_of_line(source: &str, at: usize) -> usize {
+    source[..at].rfind(['\n', '\r']).map_or(0, |eol| eol + 1)
+}
+
+/// The end of the line holding byte `at`: its line ending, or the end of `source`.
+fn end_of_line(source: &str, at: usize) -> usize {
+    source[at..]
+        .find(['\n', '\r'])
+        .map_or(source.len(), |found| at + found)
+}
+
+/// The column after `byte` at `column`: tabs stop every four columns.
+fn next_column(column: usize, byte: u8) -> usize {
+    if byte == b'\t' {
+        column + 4 - column % 4
+    } else {
+        column + 1
     }
 }
 
@@ -2253,7 +2252,7 @@ fn prefix_end(source: &str, prefixes: &[Prefix], line_start: usize) -> (usize, b
 fn fence_at_eof(source: &str, prefixes: &[Prefix], start: usize) -> (usize, String) {
     // On the fence's line an item may open with its marker: its prefix reaches the item's
     // content column whatever stands there.
-    let fence_line = source[..start].rfind(['\n', '\r']).map_or(0, |eol| eol + 1);
+    let fence_line = start_of_line(source, start);
     let mut own = fence_line;
     for prefix in prefixes {
         match *prefix {
@@ -2263,16 +2262,12 @@ fn fence_at_eof(source: &str, prefixes: &[Prefix], start: usize) -> (usize, Stri
     }
     let indent = start.saturating_sub(own);
     let mut value = String::new();
-    let mut at = source[start..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |eol| start + eol);
+    let mut at = end_of_line(source, start);
     let mut last_empty = false;
     let mut lines = 0;
     while at < source.len() {
         let eol_end = at + line_ending_len(source, at);
-        let line_end = source[eol_end..]
-            .find(['\n', '\r'])
-            .map_or(source.len(), |found| eol_end + found);
+        let line_end = end_of_line(source, eol_end);
         let (prefix, continued) = prefix_end(source, prefixes, eol_end);
         if !continued {
             break;
@@ -2304,13 +2299,9 @@ fn closing_line(source: &str, closing: usize) -> (usize, usize) {
     let line_start = if matches!(source.as_bytes().get(closing), Some(b'\n' | b'\r')) {
         closing + line_ending_len(source, closing)
     } else {
-        source[..closing.min(source.len())]
-            .rfind(['\n', '\r'])
-            .map_or(0, |eol| eol + 1)
+        start_of_line(source, closing.min(source.len()))
     };
-    let line_end = source[line_start..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |at| line_start + at);
+    let line_end = end_of_line(source, line_start);
     (line_start, line_end)
 }
 
@@ -2322,7 +2313,7 @@ fn container_exit(source: &str, point: usize, content_end: usize) -> usize {
     let mut end = point;
     let mut at = point;
     loop {
-        let line_start = source[..at].rfind(['\n', '\r']).map_or(0, |eol| eol + 1);
+        let line_start = start_of_line(source, at);
         if line_start == 0
             || !bytes[line_start..at]
                 .iter()
@@ -2363,17 +2354,11 @@ fn indented_code_start(source: &str, start: usize, synthesized: usize) -> usize 
     while region > 0 && matches!(bytes[region - 1], b' ' | b'\t') {
         region -= 1;
     }
-    let line_start = source[..start].rfind(['\n', '\r']).map_or(0, |at| at + 1);
+    let line_start = start_of_line(source, start);
     let column_at = |end: usize| {
-        let mut column = 0usize;
-        for &byte in &bytes[line_start..end] {
-            column = if byte == b'\t' {
-                column + 4 - column % 4
-            } else {
-                column + 1
-            };
-        }
-        column
+        bytes[line_start..end]
+            .iter()
+            .fold(0, |column, &byte| next_column(column, byte))
     };
     let target = column_at(start).saturating_sub(synthesized + 4);
     let mut at = region;
@@ -2392,9 +2377,7 @@ fn fence_info_raw(source: &str, start: usize) -> &str {
         at += 1;
     }
     let at = skip_blanks(bytes, at);
-    let end = source[at..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |found| at + found);
+    let end = end_of_line(source, at);
     &source[at..end]
 }
 
@@ -2445,10 +2428,8 @@ fn fence_end<'s>(
 /// An unclosed top-level fence's value: every line after the fence to EOF, less one final
 /// line ending, each without up to the fence's own indentation.
 fn unclosed_fence_body(source: &str, start: usize) -> Cow<'_, str> {
-    let indent = start - source[..start].rfind(['\n', '\r']).map_or(0, |eol| eol + 1);
-    let body_start = source[start..]
-        .find(['\n', '\r'])
-        .map_or(source.len(), |at| start + at);
+    let indent = start - start_of_line(source, start);
+    let body_start = end_of_line(source, start);
     let body = &source[body_start..];
     let body = body
         .strip_prefix("\r\n")
@@ -2575,7 +2556,7 @@ fn unterminated_raw_html(source: &str, start: usize, end: usize) -> bool {
 /// enclosing quotes is blank (concrete blocks open no containers, so more `>` is content).
 fn trim_quoted_blank_lines(source: &str, start: usize, mut end: usize, depth: usize) -> usize {
     loop {
-        let line_start = source[..end].rfind(['\n', '\r']).map_or(0, |eol| eol + 1);
+        let line_start = start_of_line(source, end);
         if line_start <= start
             || !strip_quotes(&source[line_start..end], depth)
                 .trim_matches([' ', '\t'])
@@ -2607,44 +2588,46 @@ fn trim_blank_lines(source: &str, start: usize, mut end: usize) -> usize {
 /// is one).
 #[must_use]
 pub fn root_definitions(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32)>> {
-    let tree = parse_arena(source, syntax).ok()?;
-    let mut ranges = Vec::new();
-    for child in tree.children(Tree::ROOT) {
-        if let (NodeKind::Definition(_), At::Bytes(start, end)) =
-            (&tree.node(child).kind, tree.node(child).at)
-        {
-            ranges.push((tree.points.units(start), tree.points.units(end)));
-        }
-    }
-    let all = tree
-        .nodes
-        .iter()
-        .filter(|node| matches!(node.kind, NodeKind::Definition(_)))
-        .count();
-    (all == ranges.len()).then_some(ranges)
+    let found = root_only(source, syntax, |kind| {
+        matches!(kind, NodeKind::Definition(_)).then_some(())
+    })?;
+    Some(
+        found
+            .into_iter()
+            .map(|(start, end, ())| (start, end))
+            .collect(),
+    )
 }
 
 /// `source`'s footnote definitions as UTF-16 `[start, end)` ranges with their labels,
 /// when each is a child of the root; `None` when one sits in a container.
 #[must_use]
 pub fn root_footnotes(source: &str, syntax: Syntax) -> Option<Vec<(u32, u32, Box<str>)>> {
+    root_only(source, syntax, |kind| match kind {
+        NodeKind::FootnoteDefinition(association) => Some(association.label.clone()),
+        _ => None,
+    })
+}
+
+/// What `pick` takes from each node of `source` it takes anything from, with the node's
+/// UTF-16 range, when each such node is a child of the root.
+fn root_only<T>(
+    source: &str,
+    syntax: Syntax,
+    pick: impl Fn(&NodeKind<'_>) -> Option<T>,
+) -> Option<Vec<(u32, u32, T)>> {
     let tree = parse_arena(source, syntax).ok()?;
     let mut found = Vec::new();
     for child in tree.children(Tree::ROOT) {
-        if let (NodeKind::FootnoteDefinition(association), At::Bytes(start, end)) =
-            (&tree.node(child).kind, tree.node(child).at)
-        {
-            found.push((
-                tree.points.units(start),
-                tree.points.units(end),
-                association.label.clone(),
-            ));
+        let node = tree.node(child);
+        if let (Some(value), At::Bytes(start, end)) = (pick(&node.kind), node.at) {
+            found.push((tree.points.units(start), tree.points.units(end), value));
         }
     }
     let all = tree
         .nodes
         .iter()
-        .filter(|node| matches!(node.kind, NodeKind::FootnoteDefinition(_)))
+        .filter(|node| pick(&node.kind).is_some())
         .count();
     (all == found.len()).then_some(found)
 }
