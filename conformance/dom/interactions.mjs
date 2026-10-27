@@ -96,15 +96,26 @@ await check("Enter on the focused copy button copies, and the button keeps the f
 
 await check("the table's copy menu copies it as CSV", async (page) => {
   await mount(page);
-  // The browser's clipboard outlives a context: an earlier check's copy can still land.
-  await page.evaluate(() => navigator.clipboard.writeText(""));
+  // What the menu hands the Clipboard API, not the system clipboard read back: on CI's
+  // headless Linux that read can come back empty after a copy that worked.
+  await page.evaluate(() => {
+    window.copied = [];
+    const { clipboard } = navigator;
+    const writeText = clipboard.writeText.bind(clipboard);
+    const write = clipboard.write.bind(clipboard);
+    clipboard.writeText = (text) => (window.copied.push(text), writeText(text));
+    clipboard.write = async (items) => {
+      for (const item of items) {
+        if (item.types.includes("text/plain")) window.copied.push(await (await item.getType("text/plain")).text());
+      }
+      return write(items);
+    };
+  });
   await page.click('button[title="Copy table"]');
   await page.click('button:text-is("CSV")');
   const expected = "Name,Value\na,1\nb,2";
-  await page
-    .waitForFunction(async (csv) => (await navigator.clipboard.readText()).replace(/\r/g, "") === csv, expected)
-    .catch(() => {});
-  assert.equal((await page.evaluate(() => navigator.clipboard.readText())).replace(/\r/g, ""), expected);
+  await page.waitForFunction(() => window.copied.length > 0, null, { timeout: 4000 }).catch(() => {});
+  assert.deepEqual(await page.evaluate(() => window.copied.map((text) => text.replace(/\r/g, ""))), [expected]);
 });
 
 await check("the table's download menu saves it as Markdown", async (page) => {
