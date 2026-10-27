@@ -20,7 +20,7 @@ Streamdown's.
 |---|---:|---:|---:|---:|
 | Open a chat of 18 long answers (231 KB: code, tables, lists) | 4.4× [3.7–5.4] | 6.6× [5.3–8.0] | 6.1 s to 1.4 s | 41.8 to 13.9 MB |
 | Open a code-heavy chat (18 answers, four languages of code) | 8.2× [5.5–9.3] | 11.9× [8.4–13.5] | 5.1 s to 0.5 s | 41.8 to 9.1 MB |
-| Stream the 118-element periodic table as one table | 4.2× [4.0–4.4] | 14.5× [13.6–16.5] | 15.4 s to 44 ms | 12.4 to 8.5 MB |
+| Stream the 118-element periodic table as one table | 4.2× [3.9–4.4] | 14.5× [13.6–16.5] | 15.4 s to 44 ms | 12.4 to 8.5 MB |
 | Stream the Rust Book's ownership chapter (56 KB) | 5.2× [4.8–7.3] | 13.7× [9.5–19.6] | 123 s to 99 ms | 20.3 to 11.6 MB |
 | The same chapter below the 18 answers | 4.2× [3.7–5.4] | 9.0× [7.9–12.5] | 141 s to 0.5 s | 51.1 to 19.0 MB |
 | The same, at a realistic 2,400 characters a second | stream-bound (1.0×) | 1.8× [1.7–1.8] | 8.6 s to 0.2 s | 48.6 to 18.4 MB |
