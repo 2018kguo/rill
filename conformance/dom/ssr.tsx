@@ -4,11 +4,13 @@
 //
 //   bun conformance/dom/ssr.tsx [--config default|code] [--variant default|prefix|...]
 //        [--corpus examples,real,chat,<file.md>] [--definitions] [--footnotes] [--every N]
+//        [--pieces '["*","a","\\n"]' --length N]
 //
 // `--definitions` gives each document link definitions (and references to them), which
 // make Streamdown render it as one block; `--footnotes` gives it footnotes (calls before
 // and after the middle, a definition there and the rest at the end), which do too;
-// `--every N` also renders every Nth prefix of each document, in order, as a stream does.
+// `--every N` also renders every Nth prefix of each document, in order, as a stream does;
+// `--pieces` renders every concatenation of up to `--length` pieces instead of the corpora.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -81,7 +83,17 @@ const withFootnotes = (source: string) => {
   return `${source.slice(0, lead)}[^a]\n\nCited twice[^a], once[^b] and never defined[^none].\n${source.slice(lead, at)}\n\n[^b]: The middle note, citing [^c].\n\nAfter the middle[^c].\n${source.slice(at)}\n\n[^a]: The first note.\n[^c]: The last note, with *emphasis*.\n`;
 };
 const every = Number(option("--every", "0"));
-const chosen = option("--corpus", "examples,real,chat").split(",");
+const pieces = option("--pieces", "");
+if (pieces) {
+  let layer = [""];
+  const all: string[] = [];
+  for (let size = Number(option("--length", "4")); size > 0; size -= 1) {
+    layer = layer.flatMap((prefix) => (JSON.parse(pieces) as string[]).map((piece) => prefix + piece));
+    all.push(...layer);
+  }
+  corpora.pieces = all;
+}
+const chosen = pieces ? ["pieces"] : option("--corpus", "examples,real,chat").split(",");
 for (const name of Object.keys(corpora)) if (!chosen.includes(name)) delete corpora[name];
 for (const name of chosen) if (name.endsWith(".md")) corpora[name] = [readFileSync(name, "utf8")];
 for (const [name, documents] of Object.entries(corpora)) {

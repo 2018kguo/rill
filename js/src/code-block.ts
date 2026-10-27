@@ -430,7 +430,9 @@ const CodeBody = memo(function CodeBody({
     ...rest,
   };
   if (whole) {
-    const html = wholeHtml(wholeState.current, result, `${lineClass}\0${startLine}`, (state) => {
+    // Everything the markup reads besides the result and the state it carries.
+    const key = `${names.pre}\0${lineNumbers ? names.code : ""}\0${lineClass}\0${names.token}\0${names.tokenWithBackground}\0${startLine}`;
+    const html = wholeHtml(wholeState.current, result, key, (state) => {
       // The <pre> and <code> styles as React would have updated them.
       const pre = (state.pre = updateStyle(state.pre, preStyle));
       const code = (state.code = updateStyle(state.code, codeStyle));

@@ -133,6 +133,12 @@ jobs:
           bun conformance/dom/ssr.tsx --config code --variant static
           bun conformance/dom/ssr.tsx --config code --variant engine
           bun conformance/dom/ssr.tsx --config code --variant animated
+          # Every document of up to four pieces, streaming and not.
+          for variant in default streaming; do
+            bun conformance/dom/ssr.tsx --config code --variant "$variant" --pieces '["*","_","`","[","]","(",")","a"," ","\n"]' --length 4
+            bun conformance/dom/ssr.tsx --config code --variant "$variant" --pieces '["# ","> ","- ","1. ","```","~~~","|","-","\n","a"," ","js"]' --length 4
+            bun conformance/dom/ssr.tsx --config code --variant "$variant" --pieces '["| a ","|","-",":"," ","\n","x","**","<br>","$$"]' --length 4
+          done
           node conformance/blocks.mjs --fuzz 3000
 
   # The package as npm would install it, for the example apps.
