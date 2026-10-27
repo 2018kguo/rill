@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::json::{json_string, json_u32};
+use crate::json::json_string;
 use crate::mdast::{
     self, AlignKind, At, Error, NIL, NodeId, Point, Points, Reference, ReferenceKind, Syntax,
 };
@@ -1269,15 +1269,19 @@ enum SimpleRaw {
     WrapClose,
 }
 
+/// A comment's body (after `<!--`) where parse5 ends it no earlier than micromark: it
+/// ends early at a leading `>` or `->` and at `--!>`.
+fn plain_comment(body: &str) -> bool {
+    !body.starts_with('>')
+        && !body.starts_with("->")
+        && !body.contains("--!>")
+        && !body.contains("-->")
+}
+
 impl SimpleRaw {
     /// A comment with no end, which parse5 ends where the raw node ends.
     fn open_comment(value: &str) -> bool {
-        value.strip_prefix("<!--").is_some_and(|body| {
-            !body.starts_with('>')
-                && !body.starts_with("->")
-                && !body.contains("--!>")
-                && !body.contains("-->")
-        })
+        value.strip_prefix("<!--").is_some_and(plain_comment)
     }
 
     fn parse(value: &str) -> Option<SimpleRaw> {
@@ -1285,12 +1289,7 @@ impl SimpleRaw {
             .strip_prefix("<!--")
             .and_then(|rest| rest.strip_suffix("-->"))
         {
-            // parse5 ends a comment early at a leading `>` or `->` and at `--!>`.
-            let plain = !body.starts_with('>')
-                && !body.starts_with("->")
-                && !body.contains("--!>")
-                && !body.contains("-->");
-            return plain.then_some(SimpleRaw::Comment);
+            return plain_comment(body).then_some(SimpleRaw::Comment);
         }
         // A comment still streaming (flow HTML runs to the end of its container): parse5
         // ends it with the raw node, but leaves the root without a position, so only
@@ -1476,17 +1475,21 @@ const PARSE5_TAGS: &[&str] = &[
 /// newline it would skip arrives as text, which parse5 does not skip). The Rust Book's
 /// `<Listing>` around its code listings is one.
 fn wrapper_tag(name: &str) -> bool {
-    if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
+    if !element_name(name) {
         return false;
     }
     let lower = name.to_ascii_lowercase();
     lower == "listing"
         || (PARSE5_TAGS.binary_search(&lower.as_str()).is_err()
             && TAG_NAMES.binary_search(&lower.as_str()).is_err())
+}
+
+/// Letters and digits, and `-` after the first (custom element names).
+fn element_name(name: &str) -> bool {
+    name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 /// parse5's whitespace in tags.
@@ -1516,12 +1519,7 @@ impl<'v> StartTag<'v> {
             .position(|&byte| tag_space(byte) || byte == b'/')
             .unwrap_or(bytes.len());
         let name = &inner[..name_end];
-        // Letters and digits, and `-` after the first (custom element names).
-        if !name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        {
+        if !element_name(name) {
             return None;
         }
         let mut tag = StartTag {
@@ -2428,7 +2426,9 @@ struct Finisher<'a, 's> {
     table_depth: usize,
 }
 
-fn table_section(tag: &str) -> bool {
+/// The elements a table is made of: parse5 foster-parents text out of them, and
+/// hast-util-to-jsx-runtime drops whitespace-only text in them.
+pub(crate) fn table_section(tag: &str) -> bool {
     matches!(tag, "table" | "thead" | "tbody" | "tfoot" | "tr")
 }
 
@@ -2667,16 +2667,9 @@ struct Json<'a, 's> {
 
 impl Json<'_, '_> {
     fn point(&mut self, edge: Edge) {
-        let Some(point) = edge.point(self.points) else {
-            return;
-        };
-        self.out.push_str("{\"line\":");
-        json_u32(&mut self.out, point.line);
-        self.out.push_str(",\"column\":");
-        json_u32(&mut self.out, point.column);
-        self.out.push_str(",\"offset\":");
-        json_u32(&mut self.out, point.offset);
-        self.out.push('}');
+        if let Some(point) = edge.point(self.points) {
+            mdast::write_point(&mut self.out, point);
+        }
     }
 
     fn position(&mut self, start: Edge, end: Edge) {

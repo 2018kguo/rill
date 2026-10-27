@@ -21,7 +21,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use crate::animate::{self, Animate, Animated};
-use crate::hast::{self, Encoder, Kind, NodeKind, Options, Props, Tree, Value};
+use crate::hast::{self, Encoder, Kind, NodeKind, Options, Props, Tree, Value, table_section};
 use crate::mdast::{Error, NodeId};
 use crate::text::js_blank;
 
@@ -223,11 +223,6 @@ fn katex_tag(tag: &str) -> bool {
 
 fn void(tag: &str) -> bool {
     matches!(tag, "br" | "hr" | "img" | "input")
-}
-
-/// hast-util-to-jsx-runtime drops whitespace-only text in these.
-fn table_part(tag: &str) -> bool {
-    matches!(tag, "table" | "thead" | "tbody" | "tfoot" | "tr")
 }
 
 /// hast-util-whitespace: only HTML whitespace.
@@ -663,7 +658,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         }
         let tag = self.tag(ix).unwrap_or_default();
         let children: Vec<NodeId> = self.tree.children(ix).collect();
-        if table_part(tag) {
+        if table_section(tag) {
             return children
                 .into_iter()
                 .filter(|&child| !self.text(child).is_some_and(html_whitespace))
@@ -853,7 +848,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         }
         html.out.push('>');
         let source = self.tag(ix).unwrap_or_default();
-        if table_part(source) || source == "li" || self.footnote_items.contains_key(&ix) {
+        if table_section(source) || source == "li" || self.footnote_items.contains_key(&ix) {
             self.html_children(html, self.children(ix))?;
         } else {
             self.html_children(html, self.tree.children(ix))?;
