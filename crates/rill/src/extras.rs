@@ -38,15 +38,7 @@ pub fn newline_to_break(tree: &mut mdast::Tree<'_>) {
                 }
             };
             if let Some((first, last)) = replaced {
-                if previous == NIL {
-                    tree.nodes[parent as usize].first = first;
-                } else {
-                    tree.nodes[previous as usize].next = first;
-                }
-                tree.nodes[last as usize].next = next;
-                if next == NIL {
-                    tree.nodes[parent as usize].last = last;
-                }
+                tree.splice(parent, previous, (first, last), next);
                 previous = last;
             } else {
                 previous = child;

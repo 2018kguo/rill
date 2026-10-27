@@ -348,6 +348,26 @@ impl<'s> Tree<'s> {
         self.nodes[parent as usize].last = child;
     }
 
+    /// Links the chain `first..=last` into `parent`'s children between `previous` (`NIL`
+    /// before the first) and `next` (`NIL` after the last).
+    pub(crate) fn splice(
+        &mut self,
+        parent: NodeId,
+        previous: NodeId,
+        (first, last): (NodeId, NodeId),
+        next: NodeId,
+    ) {
+        if previous == NIL {
+            self.nodes[parent as usize].first = first;
+        } else {
+            self.nodes[previous as usize].next = first;
+        }
+        self.nodes[last as usize].next = next;
+        if next == NIL {
+            self.nodes[parent as usize].last = last;
+        }
+    }
+
     #[must_use]
     pub fn node(&self, ix: NodeId) -> &Node<'s> {
         &self.nodes[ix as usize]
@@ -1909,15 +1929,7 @@ fn transform_children(tree: &mut Tree<'_>, parent: NodeId, finder: Finder) {
                         }
                         chain_last = ix;
                     }
-                    tree.nodes[chain_last as usize].next = next;
-                    if previous == NIL {
-                        tree.nodes[parent as usize].first = chain_first;
-                    } else {
-                        tree.nodes[previous as usize].next = chain_first;
-                    }
-                    if next == NIL {
-                        tree.nodes[parent as usize].last = chain_last;
-                    }
+                    tree.splice(parent, previous, (chain_first, chain_last), next);
                     previous = chain_last;
                     cursor = next;
                     continue;
