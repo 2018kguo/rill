@@ -2447,10 +2447,7 @@ fn unclosed_fence_body(source: &str, start: usize) -> Cow<'_, str> {
         .strip_prefix("\r\n")
         .or_else(|| body.strip_prefix(['\n', '\r']))
         .unwrap_or(body);
-    let body = body
-        .strip_suffix("\r\n")
-        .or_else(|| body.strip_suffix(['\n', '\r']))
-        .unwrap_or(body);
+    let body = &body[..without_line_ending(body)];
     if indent == 0 {
         return Cow::Borrowed(body);
     }
