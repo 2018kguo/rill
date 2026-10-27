@@ -27,6 +27,16 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_debug_implementations)]
+// rill: upstream's code predates these lints; it stays as upstream wrote it.
+#![allow(
+    clippy::assertions_on_constants,
+    clippy::get_first,
+    clippy::manual_contains,
+    clippy::match_ref_pats,
+    clippy::single_match,
+    clippy::type_complexity,
+    clippy::unnecessary_map_or
+)]
 
 mod attention;
 pub mod autolink_literal;

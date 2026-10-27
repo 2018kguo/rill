@@ -1898,7 +1898,7 @@ fn scan_paragraph_interrupt_no_table(
                 || !current_container && scan_html_type_7(bytes).is_some())
         || (bytes.starts_with(b"[^") && {
             let label = std::str::from_utf8(&bytes[2..]).unwrap();
-            scan_link_label_rest(label, &|_| None, tree.is_in_table()).map_or(false, |(len, _)| {
+            scan_link_label_rest(label, &|_| None, tree.is_in_table()).is_some_and(|(len, _)| {
                 bytes.get(2 + len) == Some(&b':')
                     && !crate::parse::footnote_label_has_whitespace(&label[..len - 1])
             })
