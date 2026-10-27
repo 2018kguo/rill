@@ -218,6 +218,17 @@ impl<'s> Pass<'_, '_, 's> {
         self.animate.shown > 0 && start < self.animate.shown
     }
 
+    /// Whether the unit at `start` is already shown, and its delay: 0 if so, else the
+    /// next new unit's place on the timeline.
+    fn delay(&mut self, start: u32) -> (bool, f64) {
+        if self.shown(start) {
+            return (true, 0.0);
+        }
+        let delay = self.base + f64::from(self.fresh) * self.step;
+        self.fresh += 1;
+        (false, delay)
+    }
+
     /// The units that will animate (`countNewWords`).
     fn count_new(&mut self, ix: NodeId, new: &mut u32) {
         let children = self.tree.child_list(ix);
@@ -311,16 +322,8 @@ impl<'s> Pass<'_, '_, 's> {
                 continue;
             }
             if void_animated(tag) {
-                let at = self.count;
+                let (shown, delay) = self.delay(self.count);
                 self.count += 1;
-                let shown = self.shown(at);
-                let delay = if shown {
-                    0.0
-                } else {
-                    let delay = self.base + f64::from(self.fresh) * self.step;
-                    self.fresh += 1;
-                    delay
-                };
                 let style = self.style(delay, shown, false);
                 self.stamp(child, "data-sd-animate", style);
             }
@@ -355,14 +358,7 @@ impl<'s> Pass<'_, '_, 's> {
                 out.push(self.tree.add(NodeKind::Text(part)));
                 continue;
             }
-            let shown = self.shown(at);
-            let delay = if shown {
-                0.0
-            } else {
-                let delay = self.base + f64::from(self.fresh) * self.step;
-                self.fresh += 1;
-                delay
-            };
+            let (shown, delay) = self.delay(at);
             if let Some(item) = marker.take() {
                 let style = self.style(delay, shown, true);
                 self.stamp(item, "data-sd-animate-marker", style);
