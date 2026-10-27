@@ -109,6 +109,15 @@ if the definitions changed, the list. In a CPU profile at 4× throttling, stream
 the 56 KB chapter from the benchmark with one footnote near the top used to cost 16.5
 seconds, against 10.3 for the chapter as it is; it now costs 10.6.
 
+Two checks around the pieces also read the whole answer on every update. Streamdown's
+own component asks of the last block whether it ends inside a code fence and whether
+any line is a table's delimiter row, and answers by splitting the block into lines. When the last block is the whole answer, that is the
+whole answer, every update. rill hands it the block as a string whose lines are only
+the ones either check reads, kept up to date as the text grows, so both answers come
+from the new lines alone. And the loop over the pieces now starts at the first piece
+whose text or definitions changed, instead of at the first piece. Together they cut the
+JS execution time of streaming the chapter by about 17%.
+
 ### Code highlighting off the main thread
 
 Coloring code takes a tokenizer that runs a grammar's regular expressions over every

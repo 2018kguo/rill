@@ -44,6 +44,23 @@ How to read it:
 
 Streaming the chapter, Streamdown dropped 81% of frames and rill 3%.
 
+### Since this table was recorded
+
+Answers with link definitions or footnotes now stream with less work than the table
+shows: two checks that read the whole answer on every update are gone (see
+[how it works](how-it-works.md#answers-with-footnotes-stream-in-pieces)). Against the
+build the table measured, in runs that alternate between the two at 10×:
+
+| Scenario | Less JS execution time |
+|---|---:|
+| Stream the Rust Book's ownership chapter (56 KB) | 1.21× [1.15–1.27] |
+| The same chapter below the 18 answers | 1.35× [0.90–1.67] |
+| The same, at 2,400 characters a second | 1.06× [1.02–1.12] |
+| Stream the periodic table; open the 18-answer chat | no change |
+
+Both builds ran on a busy machine, so only their ratio is reported. Raw results:
+[`bench/results/0.4.1/ab-previous.json`](../bench/results/0.4.1/ab-previous.json).
+
 ```sh
 npm run bench                         # all six, as above (add -- --runs 15 for tighter intervals)
 cd bench/browser && npm run domcheck -- hist-distinct   # the final HTML, byte for byte
