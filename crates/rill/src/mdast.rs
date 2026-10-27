@@ -1851,7 +1851,7 @@ pub fn parse_json(source: &str, syntax: Syntax) -> Result<String, Error> {
     Ok(parse_arena(&source, syntax)?.to_json())
 }
 
-fn write_point(out: &mut String, point: Point) {
+pub(crate) fn write_point(out: &mut String, point: Point) {
     out.push_str("{\"line\":");
     json_u32(out, point.line);
     out.push_str(",\"column\":");
