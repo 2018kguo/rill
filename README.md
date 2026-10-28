@@ -1,17 +1,24 @@
-# rill
+<h1 align="center">rill</h1>
+<p align="center">Faster streaming Markdown for React, with Streamdown's component API and DOM.</p>
+<p align="center">
+  <a href="#use-it">Get started</a> ·
+  <a href="docs/reference.md">Reference</a> ·
+  <a href="docs/benchmarks.md">Benchmarks</a> ·
+  <a href="docs/customizing.md">Custom plugins</a>
+</p>
 
-**A drop-in replacement for Streamdown that's much faster. Same DOM, byte for byte.**
+Long AI answers should stream smoothly, and opening a long chat should not
+freeze the page. rill replaces the work behind
+[Streamdown](https://github.com/vercel/streamdown) while keeping its component,
+styles and interactive controls. Change the imports below to try it.
 
-rill is a drop-in for [Streamdown](https://github.com/vercel/streamdown) 2.7.1, the
-Markdown component behind a lot of AI chat UIs. Change one import and you get the same
-component and the same page, down to every class, attribute and text node, built with a
-fraction of the work. On a CPU slowed to phone speed, long chats open 4 to 8 times sooner and long
-answers stream without stutter.
+In the recorded browser workloads, long chats opened **4–8× sooner** and
+used less JavaScript heap. The comparison checks matching final HTML;
+[compatibility and fallbacks](#fallbacks) define where the fast path applies.
 
 ![Streamdown on the left and rill on the right, recorded at 10× CPU throttle: streaming a table, streaming a long answer, typing while a long chat opens, then the benchmark results](docs/rill-film.gif)
 
-*Real recordings, Streamdown on the left and rill on the right, on a CPU slowed 10× to
-match a budget phone. The counters at the top of each pane are measured in the page.*
+*Real recordings, Streamdown on the left and rill on the right, with Chromium CPU throttling set to 10×. The counters at the top of each pane are measured in the page.*
 
 ## Use it
 
@@ -38,10 +45,10 @@ stops shipping Shiki (rill's highlighter gives the same colors):
 and behavior: copy and download buttons, table menus, the link safety modal, the caret,
 server rendering and hydration, `components` overrides and `plugins`.
 
-**Next.js** (Turbopack or webpack), **Vite 8** and **React Router** need no config.
-**Vite 7 and older** need one plugin (`rill()` from `@2018kguo/rill/vite`), and **bun
-build** needs the highlighter's WebAssembly URL. See
-[Setup per bundler](docs/reference.md#setup-per-bundler).
+Bundler setup varies: some configurations need a Vite plugin or an explicit
+WebAssembly URL. [Setup per bundler](docs/reference.md#setup-per-bundler)
+lists tested configurations; the [reference](docs/reference.md#the-drop-in-component)
+records the supported Streamdown API.
 
 If your `<Streamdown>` has `remarkPlugins` or `rehypePlugins` of its own, or Markdown
 syntax of its own (mentions, citations, custom links), see
@@ -50,8 +57,8 @@ how to ship your own as a custom build.
 
 ## How much faster
 
-Measured in Chromium on a phone-sized screen, with the CPU slowed 10× to roughly match a
-budget Android phone. Both engines produce the same final HTML. Each number is the median
+Measured in Chromium on a phone-sized screen, with Chromium CPU throttling set to 10×. This approximates a slower CPU; it is
+not a measurement on an Android device. Both engines produce the same final HTML. Each number is the median
 of runs that alternate between the two engines.
 
 | Scenario | Done sooner | Less JS execution time | Stutter, Streamdown / rill | Memory, Streamdown / rill |
@@ -80,9 +87,9 @@ weight and the raw results. `npm run bench` reruns them.
 
 rill keeps Streamdown's component and changes how the work gets done:
 
-- **Streaming cost stays flat.** Streamdown re-reads the whole answer on every update, so
+- **Reuse completed blocks.** Streamdown re-reads the whole answer on every update, so
   long answers get slower as they grow. rill remembers its work between updates, so
-  each one costs about the same however long the answer is.
+  most updates avoid reparsing the completed blocks.
 - **Tables stream a row at a time.** A table being written re-renders only its new row,
   not the whole table.
 - **Finished text is plain HTML.** React only builds the interactive parts (buttons,
@@ -93,10 +100,9 @@ rill keeps Streamdown's component and changes how the work gets done:
   in one pass instead of a chain of JavaScript plugins, 20 to 30 times faster on its own.
 - **Code highlighting off the main thread,** with the same colors as Shiki.
 
-[how-it-works.md](docs/how-it-works.md) explains each, in plain language, and what we
-learned along the way.
+[how-it-works.md](docs/how-it-works.md) explains the parsing, rendering and worker design.
 
-## The same output
+## Compatibility
 
 Switching renderers usually means subtly different lists, links or emphasis. rill is
 checked against Streamdown itself: the same documents rendered by both and compared
@@ -134,7 +140,7 @@ answers nobody can see yet. Let it skip them: give each settled message's row
 The DOM stays the same (find-in-page and selection work); rows off screen are laid out
 when they scroll near.
 
-## Docs
+## Documentation
 
 - [how-it-works.md](docs/how-it-works.md): where the time goes and what rill does about it
 - [benchmarks.md](docs/benchmarks.md): every number, how it's measured, how to rerun it
