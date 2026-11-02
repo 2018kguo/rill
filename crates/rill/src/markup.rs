@@ -18,11 +18,10 @@
 //! renders with Streamdown's own `Block`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 
 use crate::animate::{self, Animate, Animated};
 use crate::hast::{self, Encoder, Kind, NodeKind, Options, Props, Tree, Value, table_section};
-use crate::mdast::{Error, NodeId};
+use crate::mdast::{Error, NIL, NodeId};
 use crate::text::js_blank;
 
 /// The `<Streamdown>` props the markup depends on.
@@ -321,7 +320,21 @@ struct Markup<'e, 't, 's, 'o> {
     /// Math elements are left for KaTeX (a [`Kind::Math`] tree).
     math: bool,
     /// Footnote lists without the items that hold only a backreference.
-    footnote_items: HashMap<NodeId, Vec<NodeId>>,
+    /// A short list: a text has a footnotes section or none.
+    footnote_items: Vec<(NodeId, Vec<NodeId>)>,
+    /// One buffer every static element writes into in turn, so it grows once.
+    html: Html,
+}
+
+/// A cursor over the nodes an element renders as its children (see
+/// [`Markup::children`]), so walking them allocates nothing.
+#[derive(Clone, Copy)]
+enum Kids {
+    Siblings(NodeId),
+    /// A table section's children without whitespace text.
+    Rows(NodeId),
+    /// `footnote_items[entry].1[at..]`.
+    Footnotes { entry: usize, at: usize },
 }
 
 /// What the static HTML writer accumulates for one static element.
@@ -408,8 +421,14 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         if self.need(ix) == Need::Jsx {
             return true;
         }
-        let children: Vec<NodeId> = self.tree.children(ix).collect();
-        children.into_iter().any(|child| self.holds_jsx(child))
+        let mut child = self.tree.nodes[ix as usize].first;
+        while child != NIL {
+            if self.holds_jsx(child) {
+                return true;
+            }
+            child = self.tree.nodes[child as usize].next;
+        }
+        false
     }
 
     fn need(&mut self, ix: NodeId) -> Need {
@@ -435,24 +454,22 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             Some(tag) => {
                 // The children as React renders them (a footnote list without its empty
                 // items, a list item's lone paragraph unwrapped).
-                let children = self.children(ix);
+                let mut kids = self.kids(ix);
                 // Adjacent text (harden's ` [blocked]` after a link's text, the line
                 // endings around a dropped footnote) is one text node in parsed HTML, but
                 // React makes one per string.
-                let adjacent_text = !self.options.ssr
-                    && children
-                        .windows(2)
-                        .any(|pair| self.text(pair[0]).is_some() && self.text(pair[1]).is_some());
-                let inner = children
-                    .into_iter()
-                    .map(|child| self.need(child).min(Need::React))
-                    .max()
-                    .unwrap_or(Need::Html)
-                    .max(if adjacent_text {
-                        Need::React
-                    } else {
-                        Need::Html
-                    });
+                let mut adjacent_text = false;
+                let mut text_before = false;
+                let mut inner = Need::Html;
+                while let Some(child) = self.step(&mut kids) {
+                    let text = self.text(child).is_some();
+                    adjacent_text |= text && text_before;
+                    text_before = text;
+                    inner = inner.max(self.need(child).min(Need::React));
+                }
+                if adjacent_text && !self.options.ssr {
+                    inner = inner.max(Need::React);
+                }
                 if tag == "table" {
                     inner.max(Need::React)
                 } else {
@@ -519,21 +536,24 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
 
     /// Streamdown's `cn` for a built-in class and the element's own.
     fn cn(&self, base: &str, own: Option<&Prop<'_>>) -> String {
-        let mut joined = base.to_owned();
-        if let Some(Prop::Str(own)) = own
-            && !own.is_empty()
-        {
+        let own = match own {
+            Some(Prop::Str(own)) => own.as_ref(),
+            _ => "",
+        };
+        let mut joined = String::with_capacity(base.len() + 1 + own.len());
+        joined.push_str(base);
+        if !own.is_empty() {
             joined.push(' ');
             joined.push_str(own);
         }
-        self.prefixed(&joined)
+        self.prefixed(joined)
     }
 
     /// Streamdown's `prefixClasses`.
-    fn prefixed(&self, classes: &str) -> String {
+    fn prefixed(&self, classes: String) -> String {
         let prefix = &self.options.prefix;
         if prefix.is_empty() {
-            return classes.to_owned();
+            return classes;
         }
         let mut out = String::with_capacity(classes.len() * 2);
         for class in classes.split_whitespace() {
@@ -653,30 +673,54 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
 
     /// The nodes an element renders as its children.
     fn children(&self, ix: NodeId) -> Vec<NodeId> {
-        if let Some(items) = self.footnote_items.get(&ix) {
-            return items.clone();
+        let mut kids = self.kids(ix);
+        std::iter::from_fn(|| self.step(&mut kids)).collect()
+    }
+
+    fn kids(&self, ix: NodeId) -> Kids {
+        if let Some(entry) = self.footnote_items.iter().position(|(list, _)| *list == ix) {
+            return Kids::Footnotes { entry, at: 0 };
         }
         let tag = self.tag(ix).unwrap_or_default();
-        let children: Vec<NodeId> = self.tree.children(ix).collect();
+        let first = self.tree.nodes[ix as usize].first;
         if table_section(tag) {
-            return children
-                .into_iter()
-                .filter(|&child| !self.text(child).is_some_and(html_whitespace))
-                .collect();
+            return Kids::Rows(first);
         }
         if tag == "li" {
             // MemoLi: a lone paragraph (ignoring "\n" and "") renders without its <p>.
-            let mut kept = children
-                .iter()
-                .copied()
+            let mut kept = self
+                .tree
+                .children(ix)
                 .filter(|&child| !matches!(self.text(child), Some("\n" | "")));
             if let (Some(only), None) = (kept.next(), kept.next())
                 && self.tag(only) == Some("p")
             {
-                return self.tree.children(only).collect();
+                return Kids::Siblings(self.tree.nodes[only as usize].first);
             }
         }
-        children
+        Kids::Siblings(first)
+    }
+
+    fn step(&self, kids: &mut Kids) -> Option<NodeId> {
+        match kids {
+            Kids::Footnotes { entry, at } => {
+                let child = *self.footnote_items[*entry].1.get(*at)?;
+                *at += 1;
+                Some(child)
+            }
+            Kids::Siblings(cursor) => {
+                let child = *cursor;
+                *cursor = self.tree.nodes.get(child as usize)?.next;
+                Some(child)
+            }
+            Kids::Rows(cursor) => loop {
+                let child = *cursor;
+                *cursor = self.tree.nodes.get(child as usize)?.next;
+                if !self.text(child).is_some_and(html_whitespace) {
+                    return Some(child);
+                }
+            },
+        }
     }
 
     /// MemoParagraph renders a paragraph holding only an image as just the image.
@@ -737,7 +781,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                 if items.is_empty() {
                     continue;
                 }
-                self.footnote_items.insert(child, items);
+                self.footnote_items.push((child, items));
             }
             out.push(child);
         }
@@ -747,11 +791,12 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
     fn prepare(&mut self, ix: NodeId) {
         if self.tag(ix) == Some("section") && hast::get(self.props(ix), "dataFootnotes").is_some() {
             let children = self.footnotes(ix);
-            self.footnote_items.insert(ix, children);
+            self.footnote_items.push((ix, children));
         }
-        let children: Vec<NodeId> = self.tree.children(ix).collect();
-        for child in children {
+        let mut child = self.tree.nodes[ix as usize].first;
+        while child != NIL {
             self.prepare(child);
+            child = self.tree.nodes[child as usize].next;
         }
     }
 
@@ -765,7 +810,12 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             let name = if name == "className" { "class" } else { name };
             let text: Cow<'_, str> = match value {
                 Prop::Str(value) => Cow::Borrowed(value.as_ref()),
-                Prop::Num(value) => Cow::Owned(value.to_string()),
+                Prop::Num(value) => {
+                    // Digits and `-`: nothing to escape.
+                    use std::fmt::Write;
+                    let _ = write!(out, " {name}=\"{value}\"");
+                    return;
+                }
                 Prop::Bool(value) if matches!(name, "checked" | "disabled") => {
                     if !value {
                         return;
@@ -776,8 +826,15 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
                     Cow::Borrowed(if *value { "true" } else { "false" })
                 }
                 Prop::Bool(_) => return,
-                Prop::Align(value) if ssr => Cow::Owned(format!("text-align:{value}")),
-                Prop::Align(value) => Cow::Owned(format!("text-align: {value};")),
+                Prop::Align(value) => {
+                    // The text around the value has nothing to escape either.
+                    out.push(' ');
+                    out.push_str(name);
+                    out.push_str(if ssr { "=\"text-align:" } else { "=\"text-align: " });
+                    escape(out, value, ssr);
+                    out.push_str(if ssr { "\"" } else { ";\"" });
+                    return;
+                }
                 Prop::Style(style) => Cow::Owned(css_text(style, ssr)),
             };
             out.push(' ');
@@ -847,12 +904,8 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             return Ok(());
         }
         html.out.push('>');
-        let source = self.tag(ix).unwrap_or_default();
-        if table_section(source) || source == "li" || self.footnote_items.contains_key(&ix) {
-            self.html_children(html, self.children(ix))?;
-        } else {
-            self.html_children(html, self.tree.children(ix))?;
-        }
+        let mut kids = self.kids(ix);
+        self.html_children(html, std::iter::from_fn(|| self.step(&mut kids)))?;
         html.out.push_str("</");
         html.out.push_str(tag);
         html.out.push('>');
@@ -1014,7 +1067,10 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
             self.segments(&children, spine)?;
             return Ok(1);
         }
-        let mut html = Html::default();
+        let mut html = std::mem::take(&mut self.html);
+        html.out.clear();
+        html.parts.clear();
+        html.links.clear();
         if let Some(href) = self.link_button(ix) {
             html.links.push(href);
         }
@@ -1024,7 +1080,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         self.encoder.name(element);
         self.write_props(&props);
         self.encoder.push(html.parts.len() as u32 * 2 + 1);
-        for (before, math) in html.parts {
+        for (before, math) in html.parts.drain(..) {
             self.encoder.push(seg::HTML);
             self.encoder.string(&before);
             self.encoder.push(seg::KATEX);
@@ -1036,6 +1092,7 @@ impl<'t, 's> Markup<'_, 't, 's, '_> {
         for href in &html.links {
             self.encoder.string(href);
         }
+        self.html = html;
         Ok(1)
     }
 
@@ -1168,7 +1225,8 @@ fn encode<'t, 's>(
         encoder,
         needs: vec![None; tree.nodes.len()],
         math,
-        footnote_items: HashMap::new(),
+        footnote_items: Vec::new(),
+        html: Html::default(),
     };
     markup.prepare(root);
     if options.incomplete
