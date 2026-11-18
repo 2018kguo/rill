@@ -193,4 +193,11 @@ mod wasm {
         let mut out = String::with_capacity(source.len() * 2);
         super::render(source, &mut out).ok().map(|()| out)
     }
+
+    /// Bench probe: the HTML's length, without returning it.
+    #[wasm_bindgen(js_name = renderStreamLength)]
+    pub fn render_stream_length(source: &str) -> usize {
+        let mut out = String::with_capacity(source.len() * 2);
+        super::render(source, &mut out).map_or(0, |()| out.len())
+    }
 }
