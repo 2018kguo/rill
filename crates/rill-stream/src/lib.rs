@@ -475,17 +475,32 @@ mod wasm {
 
     /// A streaming answer (see [`crate::Session`]).
     #[wasm_bindgen]
-    pub struct Stream(crate::Session);
+    pub struct Stream(crate::Session, Vec<u16>);
 
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self(crate::Session::default())
+            Self(crate::Session::default(), Vec::new())
         }
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
             self.0.update(appended, reset) as u32
+        }
+        /// An input buffer of at least `length` UTF-16 units in [`memory`], as a `u16`
+        /// index; it stays put until a larger one is asked for.
+        #[wasm_bindgen(js_name = inputAt)]
+        pub fn input_at(&mut self, length: usize) -> usize {
+            if self.1.len() < length {
+                self.1 = vec![0; length];
+            }
+            self.1.as_ptr() as usize / 2
+        }
+        /// [`Stream::update`] with the text written to the input buffer's first `length`
+        /// units: no string crosses into the module, nor is converted.
+        #[wasm_bindgen(js_name = updateInput)]
+        pub fn update_input(&mut self, length: usize, reset: bool) -> u32 {
+            self.0.update_units(&self.1[..length], reset) as u32
         }
         /// After a reset: the whole HTML.
         #[wasm_bindgen(getter)]

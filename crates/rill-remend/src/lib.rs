@@ -133,6 +133,24 @@ impl Stream {
             *self = Stream::default();
         }
         self.input.extend(appended.encode_utf16());
+        self.heal_input(reset, take)
+    }
+
+    /// [`Stream::heal_with`] for text already in UTF-16 units.
+    pub fn heal_units_with<M>(
+        &mut self,
+        appended: &[u16],
+        reset: bool,
+        take: impl FnOnce(&[u16], &[u16]) -> M,
+    ) -> (usize, M) {
+        if reset {
+            *self = Stream::default();
+        }
+        self.input.extend_from_slice(appended);
+        self.heal_input(reset, take)
+    }
+
+    fn heal_input<M>(&mut self, reset: bool, take: impl FnOnce(&[u16], &[u16]) -> M) -> (usize, M) {
         let known = self.prefix.len;
         let previous_whole = self.whole.take();
         let previous_tail = self.work.split_off(known);

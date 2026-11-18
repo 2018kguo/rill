@@ -50,10 +50,20 @@ pub enum Outcome {
 impl Session {
     /// Renders the text so far plus `appended` (with `reset`, `appended` is the whole text).
     pub fn update(&mut self, appended: &str, reset: bool) -> Outcome {
+        let (keep, ()) = self.remend.heal_with(appended, reset, |_, _| ());
+        self.after_heal(keep, reset)
+    }
+
+    /// [`Session::update`] for text in UTF-16 units (as JavaScript holds it).
+    pub fn update_units(&mut self, appended: &[u16], reset: bool) -> Outcome {
+        let (keep, ()) = self.remend.heal_units_with(appended, reset, |_, _| ());
+        self.after_heal(keep, reset)
+    }
+
+    fn after_heal(&mut self, keep: usize, reset: bool) -> Outcome {
         // After a fallback, remend's state still holds: only the rendering starts over.
         let fresh = reset || self.failed;
         self.failed = false;
-        let (keep, ()) = self.remend.heal_with(appended, reset, |_, _| ());
         let mut outcome = if fresh { Outcome::Reset } else { Outcome::Patch };
         let from = if fresh || keep < self.stable {
             // A new text, or a repair reaching back into final blocks: render it all.

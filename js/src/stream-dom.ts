@@ -9,8 +9,11 @@
 
 /** rill-stream's WebAssembly session (`Stream` from its wasm-bindgen glue). */
 export type StreamSession = {
-  /** 0: patch, 1: reset, 2: fall back. */
-  update(appended: string, reset: boolean): number;
+  /** An input buffer of at least `length` UTF-16 units, as a `u16` index into memory. */
+  inputAt(length: number): number;
+  /** Renders the text so far plus the buffer's first `length` units (with `reset`, they
+   * are the whole text). 0: patch, 1: reset, 2: fall back. */
+  updateInput(length: number, reset: boolean): number;
   /** After a reset: the whole HTML. */
   readonly html: string;
   /** After a patch: the edit's strings, then its opcodes (crates/rill-stream/src/diff.rs)
@@ -40,11 +43,25 @@ export function createStreamRenderer(root: Element, session: StreamSession, memo
   let text = "";
   /** Root children before the open tail. */
   let finals = 0;
+  let input = new Uint16Array(0);
+  /** Writes `next[from..]` into the module's input buffer: its length. */
+  const write = (next: string, from: number) => {
+    const length = next.length - from;
+    // Memory growth detaches the view; the buffer itself stays where it is.
+    if (input.length < length || input.buffer !== memory.buffer) {
+      const capacity = Math.max(length, input.length, 4096);
+      input = new Uint16Array(memory.buffer, session.inputAt(capacity) * 2, capacity);
+    }
+    for (let at = 0; at < length; at += 1) input[at] = next.charCodeAt(from + at);
+    return length;
+  };
   return {
     update(next) {
       // V8 compares a slice with memcmp; startsWith reads each character.
       const grows = next.length >= text.length && next.slice(0, text.length) === text;
-      const outcome = grows ? session.update(next.slice(text.length), false) : session.update(next, true);
+      const outcome = grows
+        ? session.updateInput(write(next, text.length), false)
+        : session.updateInput(write(next, 0), true);
       text = next;
       if (outcome === FALLBACK) return false;
       if (outcome === PATCH) {
