@@ -11,9 +11,9 @@ const names = ["append", "remove", "insertHtml", "insertText"];
 for (let end = 256; ; end += 256) {
   const cut = Math.min(end, source.length);
   const outcome = s.update(source.slice(prev, cut), prev === 0);
+  const header = new Uint32Array(memory().buffer, s.headerAt() * 4, 6);
   prev = cut;
-  s.text;
-  const ops = new Uint32Array(memory().buffer, s.opsAt * 4, s.opsLength);
+  const ops = new Uint32Array(memory().buffer, header[1]! * 4, header[2]);
   let at = 0;
   const kinds: string[] = [];
   while (at < ops.length) {

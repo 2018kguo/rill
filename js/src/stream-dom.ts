@@ -14,15 +14,12 @@ export type StreamSession = {
   /** Renders the text so far plus the buffer's first `length` units (with `reset`, they
    * are the whole text). 0: patch, 1: reset, 2: fall back. */
   updateInput(length: number, reset: boolean): number;
+  /** Where the update's header is, as a `u32` index into memory: the outcome, the
+   * opcodes' (crates/rill-stream/src/diff.rs) `u32` index and count, the strings' byte
+   * index and length (UTF-8), the root nodes that became final. */
+  headerAt(): number;
   /** After a reset: the whole HTML. */
   readonly html: string;
-  /** After a patch: the edit's strings, then its opcodes (crates/rill-stream/src/diff.rs)
-   * as a `u32` index and count into the module's memory. */
-  readonly text: string;
-  readonly opsAt: number;
-  readonly opsLength: number;
-  /** Root nodes that became final this update. */
-  readonly finalNodes: number;
   free(): void;
 };
 
@@ -44,6 +41,8 @@ export function createStreamRenderer(root: Element, session: StreamSession, memo
   /** Root children before the open tail. */
   let finals = 0;
   let input = new Uint16Array(0);
+  let header = new Uint32Array(0);
+  const utf8 = new TextDecoder();
   /** Writes `next[from..]` into the module's input buffer: its length. */
   const write = (next: string, from: number) => {
     const length = next.length - from;
@@ -64,15 +63,16 @@ export function createStreamRenderer(root: Element, session: StreamSession, memo
         : session.updateInput(write(next, 0), true);
       text = next;
       if (outcome === FALLBACK) return false;
+      if (header.buffer !== memory.buffer) header = new Uint32Array(memory.buffer, session.headerAt() * 4, 6);
       if (outcome === PATCH) {
-        // The text getter allocates in the module: read it before viewing the opcodes.
-        const strings = session.text;
-        apply(root, finals, new Uint32Array(memory.buffer, session.opsAt * 4, session.opsLength), strings);
+        const buffer = memory.buffer;
+        const strings = utf8.decode(new Uint8Array(buffer, header[3], header[4]));
+        apply(root, finals, new Uint32Array(buffer, header[1]! * 4, header[2]), strings);
       } else {
         root.innerHTML = session.html;
         finals = 0;
       }
-      finals += session.finalNodes;
+      finals += header[5]!;
       return true;
     },
     dispose() {

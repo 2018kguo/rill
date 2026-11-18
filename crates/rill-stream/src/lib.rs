@@ -475,58 +475,66 @@ mod wasm {
 
     /// A streaming answer (see [`crate::Session`]).
     #[wasm_bindgen]
-    pub struct Stream(crate::Session, Vec<u16>);
+    pub struct Stream {
+        session: crate::Session,
+        input: Vec<u16>,
+        /// After each update: the outcome, the opcodes' `u32` index and count, the
+        /// strings' byte index and length (UTF-8), the root nodes that became final.
+        header: [u32; 6],
+    }
 
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self(crate::Session::default(), Vec::new())
+            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 6] }
         }
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
-            self.0.update(appended, reset) as u32
+            let outcome = self.session.update(appended, reset);
+            self.fill(outcome)
         }
         /// An input buffer of at least `length` UTF-16 units in [`memory`], as a `u16`
         /// index; it stays put until a larger one is asked for.
         #[wasm_bindgen(js_name = inputAt)]
         pub fn input_at(&mut self, length: usize) -> usize {
-            if self.1.len() < length {
-                self.1 = vec![0; length];
+            if self.input.len() < length {
+                self.input = vec![0; length];
             }
-            self.1.as_ptr() as usize / 2
+            self.input.as_ptr() as usize / 2
         }
         /// [`Stream::update`] with the text written to the input buffer's first `length`
         /// units: no string crosses into the module, nor is converted.
         #[wasm_bindgen(js_name = updateInput)]
         pub fn update_input(&mut self, length: usize, reset: bool) -> u32 {
-            self.0.update_units(&self.1[..length], reset) as u32
+            let outcome = self.session.update_units(&self.input[..length], reset);
+            self.fill(outcome)
+        }
+        /// Where the header is in [`memory`], as a `u32` index (it stays put).
+        #[wasm_bindgen(js_name = headerAt)]
+        pub fn header_at(&self) -> usize {
+            self.header.as_ptr() as usize / 4
         }
         /// After a reset: the whole HTML.
         #[wasm_bindgen(getter)]
         pub fn html(&self) -> String {
-            let (addition, pending) = self.0.html();
+            let (addition, pending) = self.session.html();
             [addition, pending].concat()
         }
-        /// After a patch: where the edit's opcodes (see `diff::op`) are in [`memory`], as
-        /// a `u32` index and count. Read them before the next call into the module.
-        #[wasm_bindgen(getter, js_name = opsAt)]
-        pub fn ops_at(&self) -> usize {
-            self.0.program.ops.as_ptr() as usize / 4
-        }
-        #[wasm_bindgen(getter, js_name = opsLength)]
-        pub fn ops_length(&self) -> usize {
-            self.0.program.ops.len()
-        }
-        /// After a patch: the edit's strings.
-        #[wasm_bindgen(getter)]
-        pub fn text(&self) -> String {
-            self.0.program.text.clone()
-        }
-        /// Root nodes that became final this update.
-        #[wasm_bindgen(getter, js_name = finalNodes)]
-        pub fn final_nodes(&self) -> u32 {
-            self.0.final_nodes
+    }
+
+    impl Stream {
+        fn fill(&mut self, outcome: crate::Outcome) -> u32 {
+            let program = &self.session.program;
+            self.header = [
+                outcome as u32,
+                program.ops.as_ptr() as u32 / 4,
+                program.ops.len() as u32,
+                program.text.as_ptr() as u32,
+                program.text.len() as u32,
+                self.session.final_nodes,
+            ];
+            outcome as u32
         }
     }
 
