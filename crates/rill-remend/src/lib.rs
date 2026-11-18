@@ -212,36 +212,67 @@ impl Stream {
 
     /// Moves the settled prefix up to the last line start that qualifies.
     fn settle(&mut self) {
-        let input = &self.input;
-        let end = stripped_end(input);
-        let Some(cut) = settle_point(input, self.settled, end) else {
+        let end = stripped_end(&self.input);
+        let Some((line, word)) = settle_points(&self.input, self.settled, end) else {
             return;
         };
+        if let Some(word) = word
+            && line.is_none_or(|line| word > line)
+            && self.settle_at(word, true)
+        {
+            return;
+        }
+        if let Some(line) = line {
+            self.settle_at(line, false);
+        }
+    }
+
+    /// Settles `input[..cut]`; `inside` a line, only with no span, tag, link or bracket
+    /// open at the cut (their state is kept per line).
+    fn settle_at(&mut self, cut: usize, inside: bool) -> bool {
+        let input = &self.input;
+        // Link URLs and tags are found by replaying their line from the tail: a line
+        // with either before the cut stays whole.
+        let line = &input[line_start(input, cut)..cut];
+        if inside
+            && (self.fence1.is_some()
+                || self.fence2.is_some()
+                || line.contains(&LESS)
+                || index_of(line, &[CLOSE_BRACKET, OPEN_PAREN], 0).is_some())
+        {
+            return false;
+        }
         let delta = &input[self.settled..cut];
         let scan1 = TailScan::new(delta, self.fence1);
         if scan1.open_span.is_some() {
-            return;
+            return false;
         }
         let escaped = single_tilde(delta, 0, self.fence1);
         let scan2 = TailScan::new(&escaped, self.fence2);
         if scan2.open_span.is_some() {
-            return;
+            return false;
         }
         let (compared, open) = comparison_operators(&escaped, 0, self.fence2);
         if open {
-            return;
+            return false;
         }
         let from = self.work.len();
         self.work.extend_from_slice(&compared);
         let Some((prefix, regions)) = self.prefix.extended(&self.work, from, &self.regions) else {
             self.work.truncate(from);
-            return;
+            return false;
         };
+        let fenced = scan1.open_fence.is_some() || scan2.open_fence.is_some();
+        if inside && (fenced || prefix.tag_start.is_some() || !prefix.open_brackets.is_empty()) {
+            self.work.truncate(from);
+            return false;
+        }
         self.earlier = Some(std::mem::replace(&mut self.prefix, prefix));
         self.regions.extend_from_slice(&regions);
         self.settled = cut;
         self.fence1 = scan1.open_fence;
         self.fence2 = scan2.open_fence;
+        true
     }
 }
 
@@ -257,10 +288,29 @@ fn stripped_end(text: &[u16]) -> usize {
 
 /// The start of the last line in `text[from..end]` with text that is not whitespace
 /// from it on (so an edit at the end seldom reaches back over it).
-fn settle_point(text: &[u16], from: usize, end: usize) -> Option<usize> {
+/// Where `text[from..end]` may settle: the start of its last line with text that is not
+/// whitespace from it on (so an edit at the end seldom reaches back over it), and inside
+/// that line, the start of its last word after a space (a space then an ASCII letter
+/// starts no syntax), so a long line (a paragraph) settles as it streams.
+fn settle_points(text: &[u16], from: usize, end: usize) -> Option<(Option<usize>, Option<usize>)> {
     let last_content = text[from..end].iter().rposition(|&unit| !js_space(unit))? + from;
-    let newline = rfind_unit(&text[from..last_content], NEWLINE)? + from;
-    (newline + 1 > from).then_some(newline + 1)
+    let line = rfind_unit(&text[from..last_content], NEWLINE)
+        .map(|newline| newline + from + 1)
+        .filter(|&cut| cut > from);
+    // Not on a line that may open a fence or math block: their state is per line.
+    let start = line.unwrap_or_else(|| line_start(text, from));
+    let content = skip_container_prefix(text, start, last_content).content_start;
+    let plain = !matches!(text.get(content).map(|&unit| unit as u8), Some(b'`' | b'~' | b'$'));
+    // And with a letter or digit before the cut, so what the line is (a thematic break,
+    // a list item, an underline) cannot change as it grows.
+    let word = (from.max(content) + 1..last_content).rev().find(|&at| {
+        plain
+            && text[at - 1] == SPACE
+            && text[at] < 0x80
+            && (text[at] as u8).is_ascii_alphabetic()
+            && text[content..at].iter().any(|&unit| unit >= 0x80 || (unit as u8).is_ascii_alphanumeric())
+    });
+    Some((line, word.filter(|&cut| cut > from)))
 }
 
 fn common_prefix(left: &[u16], right: &[u16]) -> usize {
@@ -1650,8 +1700,8 @@ impl<'p> Ctx<'p> {
 
     /// Whether `text[from..]` holds a line ending.
     fn newline_from(&self, from: usize) -> bool {
-        // The settled prefix ends with one.
-        from < self.split() || self.text[from..].contains(&NEWLINE)
+        // From the end back: the current line is short next to the text.
+        rfind_unit(&self.text[from..], NEWLINE).is_some()
     }
 
     fn pairs(&self, index: usize, unit: u16) -> usize {
@@ -2334,6 +2384,51 @@ mod stream_cost {
                 times[3] <= times[0].mul_f64(4.0) + Duration::from_micros(200),
                 "{report}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod incremental {
+    /// The streaming heal equals remend on the whole text after every chunk, over random
+    /// texts dense in the markers the handlers count and the escapes rewrite.
+    #[test]
+    fn streaming_heal_is_whole_text_remend() {
+        const PIECES: [&str; 40] = [
+            "a", "b", "word", " ", " ", "  ", "\n", "\n\n", "*", "**", "_", "__", "~", "~~", "`", "```",
+            "[", "]", "(", ")", "$", "$$", "<", ">", "#", "- ", "1. ", "\\", "é", "3",
+            "](", "[a](", " http://x.y/a_b ", "<a href=\"x\">", "</a>", "a~b", " > ", "!", "|", "\t",
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let rounds = std::env::var("REMEND_ROUNDS").map_or(4000, |n| n.parse().unwrap());
+        for _ in 0..rounds {
+            let mut text = String::new();
+            for _ in 0..next(80) {
+                text.push_str(PIECES[next(PIECES.len())]);
+            }
+            let mut stream = super::Stream::default();
+            let mut start = 0;
+            while start < text.len() {
+                let mut end = (start + 1 + next(12)).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                stream.heal(&text[start..end], start == 0);
+                let whole = super::remend_units(&text[..end].encode_utf16().collect::<Vec<_>>());
+                assert_eq!(
+                    String::from_utf16_lossy(stream.healed()),
+                    String::from_utf16_lossy(&whole),
+                    "{:?}",
+                    &text[..end]
+                );
+                start = end;
+            }
         }
     }
 }
