@@ -1,0 +1,15 @@
+[package]
+name = "rill-stream"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Streamdown's DOM as HTML in one pass, for streaming Markdown"
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+wasm-bindgen = { version = "=0.2.129", optional = true }
+
+[features]
+wasm = ["dep:wasm-bindgen"]

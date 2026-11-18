@@ -10,3 +10,4 @@ conformance/real.jsonl
 conformance/dom/dist/
 demo/perf/dist/
 examples/custom-build/pkg/
+js/stream-wasm/
