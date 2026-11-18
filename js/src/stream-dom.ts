@@ -4,7 +4,9 @@
 //
 // The module renders a token stream (crates/rill-stream/src/tokens.rs): a `u32` per
 // element open, close or text run, the text in UTF-16. Elements are clones of one
-// parsed element per tag; the edit (src/diff.rs) points into the tokens in place.
+// parsed element per tag; the edit (src/diff.rs) points into the tokens in place. Text
+// that is a stretch of the text as given is sliced from the string itself; only the
+// rest is read out of the module's memory.
 //
 // Growing text gets a new text node after the old one rather than appendData, which
 // copies the whole string and costs about 20 times more in Chromium. The HTML is the same;
@@ -21,7 +23,8 @@ export type StreamSession = {
   /** Where the update's header is, as a `u32` index into memory: the outcome; the edit's
    * opcodes, as a `u32` index and count; the rendering's tokens, the same; its text, as a
    * `u16` index and count; the first text unit the edit refers to; the root nodes that
-   * became final. */
+   * became final; the tokens' origins, as a `u32` index (one a token); how far the
+   * rendered text equals the text as given. */
   headerAt(): number;
   free(): void;
 };
@@ -44,6 +47,10 @@ const VOID = 2;
 /** Tag ids from here on: an ordered list starting at `id - OL_START`. */
 const OL_START = 16;
 const OL = 11;
+/** An APPEND range in the text as given. */
+const SOURCE = 0x80000000;
+/** A text token that is not one stretch of the text as given. */
+const NOWHERE = 0xffffffff;
 
 export type StreamRenderer = {
   /** Shows `text`; `false` when it needs the exact path (the root is left as it was). */
@@ -60,7 +67,27 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
     return template.content.firstChild as Element;
   });
   const utf16 = new TextDecoder("utf-16le");
-  const state: Root = { element: root, tags, finals: 0, count: 0, u32: new Uint32Array(0), strings: "", from: 0 };
+  const state: Root = {
+    element: root,
+    tags,
+    finals: 0,
+    count: 0,
+    u32: new Uint32Array(0),
+    input: "",
+    origins: 0,
+    agree: 0,
+    literal: (start, end) => {
+      // Decoded once an update, on first use.
+      if (state.strings === undefined) {
+        const units = state.u32[header + 6]! - state.from;
+        const at = state.u32[header + 5]! + state.from;
+        state.strings = utf16.decode(u16.subarray(at, at + units));
+      }
+      return state.strings.slice(start - state.from, end - state.from);
+    },
+    strings: undefined,
+    from: 0,
+  };
   let text = "";
   /** Views of all of memory, made again only when it grows (which detaches them). */
   let u16 = new Uint16Array(0);
@@ -98,15 +125,17 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
       const u32 = state.u32;
       const words = u32[header + 3]!;
       // Only the text the edit refers to: from its first unit on.
-      const from = u32[header + 7]!;
-      const start = u32[header + 5]! + from;
-      state.strings = utf16.decode(u16.subarray(start, start + u32[header + 6]! - from));
-      state.from = from;
+      state.from = u32[header + 7]!;
+      state.strings = undefined;
+      state.input = next;
+      state.origins = u32[header + 9]! - words;
+      state.agree = u32[header + 10]!;
       if (outcome === PATCH) {
         apply(state, u32[header + 1]!, u32[header + 2]!, words);
       } else {
         root.textContent = "";
         state.finals = 0;
+        state.from = 0;
         state.count = build(state, root, words, words + u32[header + 4]!, 0);
       }
       state.finals += u32[header + 8]!;
@@ -128,8 +157,15 @@ type Root = {
   count: number;
   /** All of memory. */
   u32: Uint32Array;
-  /** The rendering's text from unit `from` on. */
-  strings: string;
+  /** The text as given, and how far the rendered text equals it. */
+  input: string;
+  agree: number;
+  /** From a token's index to its origin's. */
+  origins: number;
+  /** The rendering's text `[start, end)`. */
+  literal(start: number, end: number): string;
+  /** The rendering's text from unit `from` on, once decoded. */
+  strings: string | undefined;
   from: number;
 };
 
@@ -187,11 +223,12 @@ function apply(root: Root, ops: number, length: number, words: number) {
     } else if (opcode === APPEND) {
       let last = node as Node;
       while (last.nextSibling?.nodeType === 3) last = last.nextSibling;
-      const value = root.strings.slice(u32[at]! - root.from, u32[at + 1]! - root.from);
+      const start = u32[at]!;
+      const value = start >= SOURCE ? root.input.slice(start - SOURCE, u32[at + 1]!) : root.literal(start, u32[at + 1]!);
       last.parentNode!.insertBefore(document.createTextNode(value), last.nextSibling);
       at += 2;
     } else {
-      const added = build(root, node as Element, words + u32[at]!, words + u32[at + 1]!, u32[at + 2]! - root.from);
+      const added = build(root, node as Element, words + u32[at]!, words + u32[at + 1]!, u32[at + 2]!);
       if (depth === 0) root.count += added;
       at += 3;
     }
@@ -199,11 +236,11 @@ function apply(root: Root, ops: number, length: number, words: number) {
 }
 
 /**
- * Builds the tokens `u32[start..end]` (their text from `strings[text]`) at the end of
- * `parent`: how many nodes it added to `parent` itself.
+ * Builds the tokens `u32[start..end]` (their text from unit `text` of the rendering's)
+ * at the end of `parent`: how many nodes it added to `parent` itself.
  */
 function build(root: Root, parent: Element, start: number, end: number, text: number) {
-  const { u32, strings, tags } = root;
+  const { u32, tags, origins, agree, input } = root;
   let node: Node = parent;
   let added = 0;
   for (let at = start; at < end; at += 1) {
@@ -215,7 +252,10 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
     else if (kind === CLOSE) node = node.parentNode!;
     else if (kind === VOID) node.appendChild(clone(tags, id));
     else {
-      (node as Element).append(strings.slice(text, text + id));
+      const origin = u32[origins + at]!;
+      (node as Element).append(
+        origin !== NOWHERE && origin + id <= agree ? input.slice(origin, origin + id) : root.literal(text, text + id),
+      );
       text += id;
     }
   }

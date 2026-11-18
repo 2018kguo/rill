@@ -13,20 +13,26 @@ use crate::{Fallback, Result};
 /// Bytes that end a run of plain text.
 const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<[]~");
 
-/// The first byte at or after `at` that is in `SPECIAL`, or the end.
+/// The first unit at or after `at` that is in `SPECIAL`, or the end.
 #[inline(always)]
-fn next_special(bytes: &[u8], mut at: usize) -> usize {
-    while let Some(chunk) = bytes.get(at..at + 16) {
-        let mask = SPECIAL.mask16(chunk.try_into().expect("16 bytes"));
+fn next_special(units: &[u16], mut at: usize) -> usize {
+    while let Some(chunk) = units.get(at..at + 16) {
+        let mask = SPECIAL.mask16_units(chunk.try_into().expect("16 units"));
         if mask != 0 {
             return at + mask.trailing_zeros() as usize;
         }
         at += 16;
     }
-    while at < bytes.len() && !SPECIAL.contains(bytes[at]) {
+    while at < units.len() && !(units[at] < 0x80 && SPECIAL.contains(units[at] as u8)) {
         at += 1;
     }
     at
+}
+
+/// A unit as an ASCII byte, or 0x80 when it is not ASCII.
+#[inline(always)]
+fn ascii(unit: u16) -> u8 {
+    if unit < 0x80 { unit as u8 } else { 0x80 }
 }
 
 #[derive(Default)]
@@ -116,17 +122,20 @@ enum Class {
     Other,
 }
 
-/// micromark's `classifyCharacter`.
-fn class(c: Option<char>) -> Class {
-    match c {
-        None => Class::Space,
-        Some(c) if c.is_ascii() => match c {
-            ' ' | '\n' | '\t' | '\r' | '\x0b' | '\x0c' => Class::Space,
-            c if c.is_ascii_punctuation() => Class::Punct,
+/// micromark's `classifyCharacter`, which classifies UTF-16 units: a surrogate is "other".
+fn class(unit: Option<u16>) -> Class {
+    let Some(unit) = unit else {
+        return Class::Space;
+    };
+    if unit < 0x80 {
+        return match unit as u8 {
+            b' ' | b'\n' | b'\t' | b'\r' | 0x0b | 0x0c => Class::Space,
+            byte if byte.is_ascii_punctuation() => Class::Punct,
             _ => Class::Other,
-        },
-        // micromark classifies UTF-16 units: outside the BMP it sees a surrogate, "other".
-        Some(c) if u32::from(c) > 0xFFFF => Class::Other,
+        };
+    }
+    match char::from_u32(u32::from(unit)) {
+        None => Class::Other,
         Some(c) if in_table(WHITESPACE, c) => Class::Space,
         Some(c) if in_table(PUNCTUATION_OR_SYMBOL, c) => Class::Punct,
         Some(_) => Class::Other,
@@ -143,7 +152,7 @@ fn escaped(byte: u8) -> &'static str {
 impl Inline {
     /// Renders `text` into `out`: a paragraph's lines from its first content character
     /// to its last, continuation lines with their indents.
-    pub fn render(&mut self, text: &str, out: &mut Out) -> Result {
+    pub fn render(&mut self, text: &[u16], out: &mut Out) -> Result {
         self.runs.clear();
         self.delims.clear();
         self.events.clear();
@@ -153,12 +162,12 @@ impl Inline {
         for event in &self.events {
             out.text(&text[cursor..event.at as usize]);
             match event.kind {
-                Kind::Line { hard: false } => out.text("\n"),
+                Kind::Line { hard: false } => out.ascii("\n"),
                 Kind::Line { hard: true } | Kind::Break => {
                     out.void(tag::BR);
-                    out.text("\n");
+                    out.ascii("\n");
                 }
-                Kind::Literal(literal) => out.text(literal),
+                Kind::Literal(literal) => out.ascii(literal),
                 Kind::Code { start, end, trim } => {
                     out.open(tag::CODE);
                     code_content(out, &text[start as usize..end as usize], trim);
@@ -181,17 +190,20 @@ impl Inline {
         self.events.push(Event { at: at as u32, resume: resume as u32, kind });
     }
 
-    fn scan(&mut self, text: &str) -> Result {
-        let bytes = text.as_bytes();
+    fn scan(&mut self, text: &[u16]) -> Result {
+        let bytes = text;
         if u32::try_from(bytes.len()).is_err() {
             return Err(Fallback);
         }
         // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
-        if memchr::memchr(b'@', bytes).is_some() || memchr::memmem::find(bytes, b"://").is_some() {
-            return Err(Fallback);
-        }
-        for dot in memchr::memchr_iter(b'.', bytes) {
-            if dot >= 3 && bytes[dot - 3..dot].eq_ignore_ascii_case(b"www") {
+        for (at, &unit) in text.iter().enumerate() {
+            let suspect = match ascii(unit) {
+                b'@' => true,
+                b':' => text.get(at + 1..at + 3) == Some(&[0x2F, 0x2F]),
+                b'.' => at >= 3 && text[at - 3..at].iter().all(|&u| ascii(u) | 0x20 == b'w'),
+                _ => false,
+            };
+            if suspect {
                 return Err(Fallback);
             }
         }
@@ -203,13 +215,14 @@ impl Inline {
         let mut broke_at = usize::MAX;
         loop {
             at = next_special(bytes, at);
-            let Some(&byte) = bytes.get(at) else {
+            let Some(&unit) = bytes.get(at) else {
                 return Ok(());
             };
+            let byte = unit as u8; // in SPECIAL: ASCII
             match byte {
                 b'\n' => {
                     let mut spaces = at;
-                    while spaces > plain && bytes[spaces - 1] == b' ' {
+                    while spaces > plain && bytes[spaces - 1] == 0x20 {
                         spaces -= 1;
                     }
                     let hard = at - spaces >= 2;
@@ -220,14 +233,14 @@ impl Inline {
                     }
                     at = resume;
                 }
-                b'\\' => match bytes.get(at + 1) {
+                b'\\' => match bytes.get(at + 1).map(|&unit| ascii(unit)) {
                     Some(b'\n') => {
                         let resume = skip_spaces(bytes, at + 2);
                         self.event(at, resume, Kind::Break);
                         broke_at = resume;
                         at = resume;
                     }
-                    Some(&next) if next.is_ascii_punctuation() => {
+                    Some(next) if next.is_ascii_punctuation() => {
                         self.event(at, at + 2, Kind::Literal(escaped(next)));
                         at += 2;
                     }
@@ -237,7 +250,7 @@ impl Inline {
                     }
                 },
                 b'`' => {
-                    let run = count(bytes, at, b'`');
+                    let run = count(bytes, at, unit);
                     match closing_backticks(bytes, at + run, run) {
                         Some(end) => {
                             let trim = broke_at == at;
@@ -252,19 +265,20 @@ impl Inline {
                 }
                 // A `&` that cannot start a character reference, a `<` that cannot start
                 // HTML or an autolink: text.
-                b'&' if !bytes.get(at + 1).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'#') => {
+                b'&' if !bytes.get(at + 1).map(|&unit| ascii(unit)).is_some_and(|b| b.is_ascii_alphanumeric() || b == b'#') => {
                     at += 1;
                 }
                 b'<' if !bytes
                     .get(at + 1)
+                    .map(|&unit| ascii(unit))
                     .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?')) =>
                 {
                     at += 1;
                 }
                 b'*' | b'_' => {
-                    let length = count(bytes, at, byte);
-                    let before = class(text[..at].chars().next_back());
-                    let after = class(text[at + length..].chars().next());
+                    let length = count(bytes, at, unit);
+                    let before = class(at.checked_sub(1).map(|at| text[at]));
+                    let after = class(text.get(at + length).copied());
                     let left = after != Class::Space && (after != Class::Punct || before != Class::Other);
                     let right = before != Class::Space && (before != Class::Punct || after != Class::Other);
                     let (can_open, can_close) = if byte == b'*' {
@@ -348,12 +362,12 @@ impl Inline {
     }
 }
 
-fn count(bytes: &[u8], at: usize, byte: u8) -> usize {
-    bytes[at..].iter().take_while(|&&b| b == byte).count()
+fn count(units: &[u16], at: usize, unit: u16) -> usize {
+    units[at..].iter().take_while(|&&u| u == unit).count()
 }
 
-fn skip_spaces(bytes: &[u8], mut at: usize) -> usize {
-    while bytes.get(at) == Some(&b' ') {
+fn skip_spaces(units: &[u16], mut at: usize) -> usize {
+    while units.get(at) == Some(&0x20) {
         at += 1;
     }
     at
@@ -361,11 +375,12 @@ fn skip_spaces(bytes: &[u8], mut at: usize) -> usize {
 
 /// The start of the backtick run of exactly `run` ticks closing a code span opened at
 /// `from`, or `None`.
-fn closing_backticks(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
+fn closing_backticks(units: &[u16], from: usize, run: usize) -> Option<usize> {
+    const TICK: u16 = b'`' as u16;
     let mut at = from;
-    while let Some(offset) = bytes[at..].iter().position(|&b| b == b'`') {
+    while let Some(offset) = units[at..].iter().position(|&u| u == TICK) {
         at += offset;
-        let length = count(bytes, at, b'`');
+        let length = count(units, at, TICK);
         if length == run {
             return Some(at);
         }
@@ -376,20 +391,17 @@ fn closing_backticks(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
 
 /// A code span's content: line endings as spaces, one space stripped from each side when
 /// both have one and it is not all spaces; after a hard break, no leading spaces.
-fn code_content(out: &mut Out, raw: &str, after_break: bool) {
-    let space = |b: u8| b == b' ' || b == b'\n';
-    let bytes = raw.as_bytes();
-    let strip = bytes.len() >= 2
-        && space(bytes[0])
-        && space(bytes[bytes.len() - 1])
-        && bytes.iter().any(|&b| !space(b));
+fn code_content(out: &mut Out, raw: &[u16], after_break: bool) {
+    let space = |u: u16| u == 0x20 || u == 0x0A;
+    let strip = raw.len() >= 2 && space(raw[0]) && space(raw[raw.len() - 1]) && raw.iter().any(|&u| !space(u));
     let mut raw = if strip { &raw[1..raw.len() - 1] } else { raw };
     if after_break {
-        raw = raw.trim_start_matches([' ', '\n']);
+        let lead = raw.iter().take_while(|&&u| space(u)).count();
+        raw = &raw[lead..];
     }
-    for (index, line) in raw.split('\n').enumerate() {
+    for (index, line) in raw.split(|&u| u == 0x0A).enumerate() {
         if index > 0 {
-            out.text(" ");
+            out.ascii(" ");
         }
         out.text(line);
     }

@@ -11,17 +11,16 @@ use rill_remend::Stream as Remend;
 use crate::diff::{Mark, Program, Tokens, diff};
 use crate::inline::Inline;
 use crate::tokens::Out;
-use crate::{Fallback, Split, render_split};
+use crate::{Fallback, Split, render_split_at};
 
 #[derive(Default)]
 pub struct Session {
     remend: Remend,
     /// The repaired text (remend's, in UTF-16 units) is final and in the DOM up to
-    /// `stable`; `tail` is the rest, as UTF-8.
+    /// `stable`; the rest is rendered on every update.
     stable: usize,
-    tail: String,
-    /// The repaired text's length after the last update.
-    healed: usize,
+    /// The repaired text equals the text as given up to here.
+    pub agree: usize,
     /// This update's rendering: the blocks that became final (before `split`), then the
     /// open ones.
     next: Out,
@@ -70,35 +69,24 @@ impl Session {
         let fresh = reset || self.failed;
         self.failed = false;
         let mut outcome = if fresh { Outcome::Reset } else { Outcome::Patch };
-        let from = if fresh || keep < self.stable {
+        if fresh || keep < self.stable {
             // A new text, or a repair reaching back into final blocks: render it all.
             self.stable = 0;
-            self.tail.clear();
             outcome = Outcome::Reset;
-            0
-        } else {
-            // Drop what the repair took back (units `keep..` of the last text) from
-            // the end of the tail: a few characters.
-            let mut units = self.healed - keep;
-            let mut cut = self.tail.len();
-            for c in self.tail.chars().rev() {
-                if units == 0 {
-                    break;
-                }
-                units -= c.len_utf16();
-                cut -= c.len_utf8();
-            }
-            self.tail.truncate(cut);
-            keep
-        };
-        let healed = self.remend.healed();
-        self.healed = healed.len();
-        for c in char::decode_utf16(healed[from..].iter().copied()) {
-            let Ok(c) = c else {
-                self.failed = true;
-                return Outcome::Fallback;
-            };
-            self.tail.push(c);
+        }
+        // A lone surrogate takes the exact path.
+        let (healed, input) = (self.remend.healed(), self.remend.input());
+        // The repair keeps `..keep` of the last repaired text, and the text only grows.
+        let limit = healed.len().min(input.len());
+        let mut agree = if outcome == Outcome::Reset { 0 } else { self.agree.min(keep) };
+        while agree < limit && healed[agree] == input[agree] {
+            agree += 1;
+        }
+        self.agree = agree;
+        let checked = healed[if outcome == Outcome::Reset { 0 } else { keep }..].iter().copied();
+        if char::decode_utf16(checked).any(|c| c.is_err()) {
+            self.failed = true;
+            return Outcome::Fallback;
         }
         match self.render_tail() {
             Ok(()) => {
@@ -107,9 +95,10 @@ impl Session {
                     let old = Tokens {
                         words: &self.shown.words[self.shown_from.words..],
                         text: &self.shown.text[self.shown_from.text..],
+                        origins: &self.shown.origins[self.shown_from.words..],
                     };
-                    let new = Tokens { words: &self.next.words, text: &self.next.text };
-                    diff(old, new, &mut self.program, &mut self.mark);
+                    let new = Tokens { words: &self.next.words, text: &self.next.text, origins: &self.next.origins };
+                    diff(old, new, self.agree, &mut self.program, &mut self.mark);
                 }
                 // The mark is in `next`; the next diff starts from `next` after `split`.
                 if outcome != Outcome::Patch || self.split.words != 0 {
@@ -141,11 +130,10 @@ impl Session {
     fn render_tail(&mut self) -> crate::Result {
         self.next.clear();
         // What comes before the last block is final.
-        let split = render_split(&self.tail, &mut self.next, &mut self.inline)?;
+        let split = render_split_at(&self.remend.healed()[self.stable..], self.stable, &mut self.next, &mut self.inline)?;
         self.final_nodes = split.nodes;
         self.split = split;
-        self.stable += self.tail[..split.source].encode_utf16().count();
-        self.tail.drain(..split.source);
+        self.stable += split.source;
         Ok(())
     }
 }

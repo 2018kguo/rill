@@ -52,47 +52,75 @@ pub const TAGS: [&str; 15] = [
     "<br>",
 ];
 
+/// An origin for text that is not one stretch of the source.
+pub const NOWHERE: u32 = u32::MAX;
+
 /// The token stream and its text.
 #[derive(Default)]
 pub struct Out {
     pub words: Vec<u32>,
     pub text: Vec<u16>,
+    /// Per word: for a text token that is one stretch of the source, where it starts
+    /// there (in the whole text), else [`NOWHERE`].
+    pub origins: Vec<u32>,
+    /// The source being rendered (its address and length) and where it starts in the
+    /// whole text.
+    source: (usize, usize),
+    source_at: u32,
 }
 
 impl Out {
     pub fn clear(&mut self) {
         self.words.clear();
         self.text.clear();
+        self.origins.clear();
+    }
+
+    /// The source text slices handed to [`Out::text`] come from, starting at `at` in the
+    /// whole text.
+    pub fn set_source(&mut self, source: &[u16], at: usize) {
+        self.source = (source.as_ptr() as usize, source.len());
+        self.source_at = at as u32;
+    }
+
+    #[inline]
+    fn word(&mut self, word: u32) {
+        self.words.push(word);
+        self.origins.push(NOWHERE);
     }
 
     #[inline]
     pub fn open(&mut self, tag: u32) {
-        self.words.push(kind::OPEN | tag << 2);
+        self.word(kind::OPEN | tag << 2);
     }
 
     #[inline]
     pub fn close(&mut self) {
-        self.words.push(kind::CLOSE);
+        self.word(kind::CLOSE);
     }
 
     #[inline]
     pub fn void(&mut self, tag: u32) {
-        self.words.push(kind::VOID | tag << 2);
+        self.word(kind::VOID | tag << 2);
     }
 
     /// Appends text, to the text token before when there is one.
     #[inline]
-    pub fn text(&mut self, text: &str) {
+    pub fn text(&mut self, text: &[u16]) {
         if text.is_empty() {
             return;
         }
-        let before = self.text.len();
-        if text.is_ascii() {
-            self.text.extend(text.bytes().map(u16::from));
-        } else {
-            self.text.extend(text.encode_utf16());
-        }
-        self.grow((self.text.len() - before) as u32);
+        // Where `text` is in the source, when it is a slice of it.
+        let offset = (text.as_ptr() as usize).wrapping_sub(self.source.0) / 2;
+        let origin = if offset < self.source.1 { self.source_at + offset as u32 } else { NOWHERE };
+        self.text.extend_from_slice(text);
+        self.grow(text.len() as u32, origin);
+    }
+
+    /// Appends ASCII text.
+    pub fn ascii(&mut self, text: &str) {
+        self.text.extend(text.bytes().map(u16::from));
+        self.grow(text.len() as u32, NOWHERE);
     }
 
     /// Appends `byte` (ASCII) `count` times.
@@ -101,13 +129,23 @@ impl Out {
             return;
         }
         self.text.extend(std::iter::repeat_n(u16::from(byte), count as usize));
-        self.grow(count);
+        self.grow(count, NOWHERE);
     }
 
-    fn grow(&mut self, units: u32) {
+    fn grow(&mut self, units: u32, origin: u32) {
         match self.words.last_mut() {
-            Some(last) if *last & 3 == kind::TEXT => *last += units << 2,
-            _ => self.words.push(kind::TEXT | units << 2),
+            Some(last) if *last & 3 == kind::TEXT => {
+                // Still one stretch only when this text follows the token's own.
+                let before = self.origins.last_mut().expect("parallel");
+                if *before != NOWHERE && (origin == NOWHERE || *before + (*last >> 2) != origin) {
+                    *before = NOWHERE;
+                }
+                *last += units << 2;
+            }
+            _ => {
+                self.words.push(kind::TEXT | units << 2);
+                self.origins.push(origin);
+            }
         }
     }
 }

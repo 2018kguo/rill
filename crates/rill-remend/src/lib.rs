@@ -198,6 +198,11 @@ impl Stream {
         (keep, middle)
     }
 
+    /// The text so far, as UTF-16 units.
+    pub fn input(&self) -> &[u16] {
+        &self.input
+    }
+
     /// The text the last heal returned, as UTF-16 units.
     pub fn healed(&self) -> &[u16] {
         self.whole.as_deref().unwrap_or(&self.work)

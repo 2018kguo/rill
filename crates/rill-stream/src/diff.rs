@@ -9,13 +9,15 @@
 //! tokens from there on, one `BUILD` per level, deepest first. Both refer to the new
 //! tokens and text in place: nothing is copied.
 
-use crate::tokens::kind;
+use crate::tokens::{NOWHERE, kind};
 
 /// Opcodes.
 pub mod op {
     /// `depth, path..., start, end`: append the new text's units `[start, end)` after the
-    /// text node at the path.
+    /// text node at the path (with [`SOURCE`] set in `start`: the text as given's).
     pub const APPEND: u32 = 0;
+    /// A range in the text as given, not in the rendering's text.
+    pub const SOURCE: u32 = 1 << 31;
     /// `depth, path...`: remove the node at the path, the siblings after it, and the
     /// siblings after each of its ancestors (up to the tail).
     pub const REMOVE: u32 = 1;
@@ -72,6 +74,8 @@ impl Mark {
 pub struct Tokens<'a> {
     pub words: &'a [u32],
     pub text: &'a [u16],
+    /// Per word, the text token's origin (see `tokens::Out`).
+    pub origins: &'a [u32],
 }
 
 fn step(path: &mut Vec<u32>, word: u32) {
@@ -88,7 +92,8 @@ fn step(path: &mut Vec<u32>, word: u32) {
 /// The program that turns the DOM of `old` into that of `new` (positions in `program`
 /// are in `new`). `mark` is a boundary in `old` (from the diff that produced it, or
 /// cleared), and is left at the last boundary before the first difference in `new`.
-pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut Mark) {
+/// The rendered text equals the text as given up to `agree`.
+pub fn diff(old: Tokens<'_>, new: Tokens<'_>, agree: usize, program: &mut Program, mark: &mut Mark) {
     let mut path = std::mem::take(&mut mark.spare);
     path.clear();
     let (mut word, mut text) = (mark.word, mark.text);
@@ -141,9 +146,15 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
                 first = false;
                 let (old_units, units) = ((x >> 2) as usize, (y >> 2) as usize);
                 program.path(op::APPEND, &path);
-                program.ops.push((text + old_units) as u32);
-                program.ops.push((text + units) as u32);
-                program.text(text + old_units);
+                let origin = new.origins[word];
+                if origin != NOWHERE && origin as usize + units <= agree {
+                    program.ops.push((origin + old_units as u32) | op::SOURCE);
+                    program.ops.push(origin + units as u32);
+                } else {
+                    program.ops.push((text + old_units) as u32);
+                    program.ops.push((text + units) as u32);
+                    program.text(text + old_units);
+                }
                 old_text += old_units;
                 text += units;
                 step(&mut path, y);
@@ -207,9 +218,9 @@ mod tests {
         let mut program = Program::default();
         program.clear();
         fn view(out: &Out) -> Tokens<'_> {
-            Tokens { words: &out.words, text: &out.text }
+            Tokens { words: &out.words, text: &out.text, origins: &out.origins }
         }
-        diff(view(old), view(new), &mut program, &mut Mark::default());
+        diff(view(old), view(new), 0, &mut program, &mut Mark::default());
         program.ops
     }
 
@@ -219,10 +230,10 @@ mod tests {
         for &(text, em) in parts {
             if em {
                 out.open(tag::EM);
-                out.text(text);
+                out.ascii(text);
                 out.close();
             } else {
-                out.text(text);
+                out.ascii(text);
             }
         }
         out.close();
@@ -252,7 +263,7 @@ mod tests {
     fn new_blocks_are_built_at_the_root() {
         let mut new = para(&[("a", false)]);
         new.open(tag::P);
-        new.text("b");
+        new.ascii("b");
         new.close();
         let ops = run(&para(&[("a", false)]), &new);
         assert_eq!(ops, [op::BUILD, 0, 3, 6, 1]);

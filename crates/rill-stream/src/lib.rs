@@ -26,7 +26,8 @@ pub type Result<T = ()> = core::result::Result<T, Fallback>;
 /// `out`.
 pub fn render(source: &str, out: &mut String) -> Result {
     let mut tokens = Out::default();
-    render_split(source, &mut tokens, &mut Inline::default())?;
+    let units: Vec<u16> = source.encode_utf16().collect();
+    render_split(&units, &mut tokens, &mut Inline::default())?;
     tokens::to_html(&tokens.words, &tokens.text, out);
     Ok(())
 }
@@ -42,11 +43,17 @@ pub(crate) struct Split {
     pub nodes: u32,
 }
 
-/// Streamdown's DOM for `source` as tokens appended to `out` (see [`tokens`]), and where
-/// its last open block starts.
-pub(crate) fn render_split(source: &str, out: &mut Out, inline: &mut Inline) -> Result<Split> {
-    let bytes = source.as_bytes();
-    if memchr::memchr3(b'\r', b'\t', b'|', bytes).is_some() || memchr::memchr(0, bytes).is_some() {
+/// Streamdown's DOM for `source` (UTF-16) as tokens appended to `out` (see [`tokens`]),
+/// and where its last open block starts.
+pub(crate) fn render_split(source: &[u16], out: &mut Out, inline: &mut Inline) -> Result<Split> {
+    render_split_at(source, 0, out, inline)
+}
+
+/// [`render_split`] for a `source` that starts at `at` in the whole text (the text
+/// tokens' origins count from there).
+pub(crate) fn render_split_at(source: &[u16], at: usize, out: &mut Out, inline: &mut Inline) -> Result<Split> {
+    out.set_source(source, at);
+    if source.iter().fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0x7C | 0)) {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
         return Err(Fallback);
     }
@@ -54,7 +61,7 @@ pub(crate) fn render_split(source: &str, out: &mut Out, inline: &mut Inline) -> 
     let mut blocks = Blocks { source, out, inline, para: None, list: None, last: base, before: base, opened: 0 };
     let mut start = 0;
     while start <= source.len() {
-        let end = memchr_newline(bytes, start);
+        let end = newline(source, start);
         blocks.line(start, &source[start..end])?;
         start = end + 1;
     }
@@ -62,7 +69,7 @@ pub(crate) fn render_split(source: &str, out: &mut Out, inline: &mut Inline) -> 
     blocks.close_list()?;
     // A block opened on the unfinished last line may still turn into a continuation of
     // the block before it (`****` growing into `****#`): that one stays open too.
-    let split = if !source.ends_with('\n') && !source[blocks.last.source..].contains('\n') {
+    let split = if source.last() != Some(&NL) && !source[blocks.last.source..].contains(&NL) {
         blocks.before
     } else {
         blocks.last
@@ -71,7 +78,7 @@ pub(crate) fn render_split(source: &str, out: &mut Out, inline: &mut Inline) -> 
 }
 
 struct Blocks<'a, 'o> {
-    source: &'a str,
+    source: &'a [u16],
     out: &'o mut Out,
     inline: &'o mut Inline,
     /// The open paragraph: from its first content byte to the end of its last line.
@@ -112,23 +119,23 @@ struct Marker {
     width: usize,
 }
 
-fn list_marker(rest: &str) -> Result<Option<Marker>> {
-    let bytes = rest.as_bytes();
-    let (ordered, marker, start, after) = match bytes[0] {
-        b'-' | b'*' | b'+' => (false, bytes[0], 0, 1),
+fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
+    let (ordered, marker, start, after) = match ascii(rest[0]) {
+        first @ (b'-' | b'*' | b'+') => (false, first, 0, 1),
         b'0'..=b'9' => {
-            let digits = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-            match bytes.get(digits) {
-                Some(&delimiter @ (b'.' | b')')) if digits <= 9 => {
-                    (true, delimiter, rest[..digits].parse().expect("digits"), digits + 1)
+            let digits = rest.iter().take_while(|&&unit| ascii(unit).is_ascii_digit()).count();
+            match rest.get(digits).map(|&unit| ascii(unit)) {
+                Some(delimiter @ (b'.' | b')')) if digits <= 9 => {
+                    let start = rest[..digits].iter().fold(0, |value, &unit| value * 10 + u32::from(unit - 0x30));
+                    (true, delimiter, start, digits + 1)
                 }
                 _ => return Ok(None),
             }
         }
         _ => return Ok(None),
     };
-    let spaces = bytes[after..].iter().take_while(|&&b| b == b' ').count();
-    if after + spaces == bytes.len() {
+    let spaces = rest[after..].iter().take_while(|&&unit| unit == SP).count();
+    if after + spaces == rest.len() {
         return Ok(Some(Marker { ordered, marker, start, content: None, width: after + 1 }));
     }
     if spaces == 0 {
@@ -141,28 +148,47 @@ fn list_marker(rest: &str) -> Result<Option<Marker>> {
 }
 
 /// Whether `rest` (a line without its indent) starts a block other than a paragraph.
-fn starts_block(rest: &str) -> Result<bool> {
-    let first = rest.as_bytes()[0];
+fn starts_block(rest: &[u16]) -> Result<bool> {
+    let first = ascii(rest[0]);
     Ok(match first {
         b'#' => atx(rest).is_some(),
         b'>' | b'<' => true,
-        b'`' | b'~' => rest.bytes().take_while(|&b| b == first).count() >= 3,
+        b'`' | b'~' => run(rest, rest[0]) >= 3,
         b'*' | b'-' | b'_' if thematic(rest) => true,
         _ => list_marker(rest)?.is_some(),
     })
 }
 
-fn memchr_newline(bytes: &[u8], from: usize) -> usize {
-    memchr::memchr(b'\n', &bytes[from..]).map_or(bytes.len(), |at| from + at)
+const NL: u16 = b'\n' as u16;
+const SP: u16 = b' ' as u16;
+
+/// A unit as an ASCII byte, or 0x80 (no markup) when it is not ASCII.
+#[inline(always)]
+fn ascii(unit: u16) -> u8 {
+    if unit < 0x80 { unit as u8 } else { 0x80 }
+}
+
+/// How many units `text` starts with that equal `unit`.
+fn run(text: &[u16], unit: u16) -> usize {
+    text.iter().take_while(|&&u| u == unit).count()
+}
+
+fn newline(text: &[u16], from: usize) -> usize {
+    text[from..].iter().position(|&unit| unit == NL).map_or(text.len(), |at| from + at)
 }
 
 /// Leading spaces (tabs were ruled out).
-fn indent(line: &str) -> usize {
-    line.bytes().take_while(|&b| b == b' ').count()
+fn indent(line: &[u16]) -> usize {
+    run(line, SP)
+}
+
+fn trim_end_spaces(text: &[u16]) -> &[u16] {
+    let end = text.iter().rposition(|&unit| unit != SP).map_or(0, |at| at + 1);
+    &text[..end]
 }
 
 impl<'a> Blocks<'a, '_> {
-    fn line(&mut self, offset: usize, line: &'a str) -> Result {
+    fn line(&mut self, offset: usize, line: &'a [u16]) -> Result {
         let spaces = indent(line);
         let rest = &line[spaces..];
         if rest.is_empty() {
@@ -184,7 +210,7 @@ impl<'a> Blocks<'a, '_> {
             para.1 = offset + line.len();
             return Ok(());
         }
-        let first = rest.as_bytes()[0];
+        let first = ascii(rest[0]);
         match first {
             b'#' => {
                 if let Some((level, content)) = atx(rest) {
@@ -203,7 +229,7 @@ impl<'a> Blocks<'a, '_> {
             }
             // Blocks not handled yet: quotes, lists, fences, HTML, definitions, setext.
             b'>' | b'<' | b'[' => return Err(Fallback),
-            b'`' | b'~' if rest.bytes().take_while(|&b| b == first).count() >= 3 => {
+            b'`' | b'~' if run(rest, rest[0]) >= 3 => {
                 return Err(Fallback);
             }
             _ => {
@@ -237,9 +263,9 @@ impl<'a> Blocks<'a, '_> {
     }
 
     /// A line while a list is open: `true` when the list took it.
-    fn list_line(&mut self, offset: usize, spaces: usize, rest: &'a str) -> Result<bool> {
+    fn list_line(&mut self, offset: usize, spaces: usize, rest: &'a [u16]) -> Result<bool> {
         let list = self.list.as_mut().expect("open list");
-        if spaces < list.column && matches!(rest.as_bytes()[0], b'*' | b'-' | b'_') && thematic(rest) {
+        if spaces < list.column && matches!(ascii(rest[0]), b'*' | b'-' | b'_') && thematic(rest) {
             // A thematic break wins over an item.
             self.close_list()?;
             return Ok(false);
@@ -304,7 +330,7 @@ impl<'a> Blocks<'a, '_> {
         Ok(false)
     }
 
-    fn open_item(&mut self, offset: usize, spaces: usize, rest: &str, marker: Marker) -> Result {
+    fn open_item(&mut self, offset: usize, spaces: usize, rest: &[u16], marker: Marker) -> Result {
         let content = marker.content.map(|at| {
             let start = offset + spaces + at;
             (start, offset + spaces + rest.len())
@@ -346,20 +372,20 @@ impl<'a> Blocks<'a, '_> {
             (true, 1) => tag::OL,
             (true, start) => tag::OL_START + start,
         });
-        self.out.text("\n");
+        self.out.ascii("\n");
         for item in list.items {
             self.out.open(tag::LI);
             if let Some((start, end)) = item {
-                self.inline.render(self.source[start..end].trim_end_matches(' '), self.out)?;
+                self.inline.render(trim_end_spaces(&self.source[start..end]), self.out)?;
             }
             self.out.close();
-            self.out.text("\n");
+            self.out.ascii("\n");
         }
         self.out.close();
         Ok(())
     }
 
-    fn heading(&mut self, level: u8, content: &str) -> Result {
+    fn heading(&mut self, level: u8, content: &[u16]) -> Result {
         self.out.open(tag::H1 + u32::from(level) - 1);
         self.inline.render(content, self.out)?;
         self.out.close();
@@ -375,7 +401,7 @@ impl<'a> Blocks<'a, '_> {
         let Some((start, end)) = self.para.take() else {
             return Ok(());
         };
-        let content = self.source[start..end].trim_end_matches(' ');
+        let content = trim_end_spaces(&self.source[start..end]);
         match level {
             Some(level) => self.heading(level, content),
             None => {
@@ -391,46 +417,44 @@ impl<'a> Blocks<'a, '_> {
 
 
 /// An ATX heading's level and content (`rest` starts at the first `#`).
-fn atx(rest: &str) -> Option<(u8, &str)> {
-    let level = rest.bytes().take_while(|&b| b == b'#').count();
+fn atx(rest: &[u16]) -> Option<(u8, &[u16])> {
+    let level = run(rest, u16::from(b'#'));
     if level > 6 {
         return None;
     }
     let after = &rest[level..];
-    if !(after.is_empty() || after.starts_with(' ')) {
+    if !(after.is_empty() || after[0] == SP) {
         return None;
     }
-    let mut content = after.trim_matches(' ');
+    let mut content = trim_end_spaces(&after[run(after, SP)..]);
     // A closing sequence: `#`s alone, or after a space.
-    let hashes = content.bytes().rev().take_while(|&b| b == b'#').count();
+    let hashes = content.iter().rev().take_while(|&&unit| unit == u16::from(b'#')).count();
     if hashes == content.len() {
-        content = "";
-    } else if hashes > 0 && content.as_bytes()[content.len() - hashes - 1] == b' ' {
-        content = content[..content.len() - hashes].trim_end_matches(' ');
+        content = &[];
+    } else if hashes > 0 && content[content.len() - hashes - 1] == SP {
+        content = trim_end_spaces(&content[..content.len() - hashes]);
     }
     Some((level as u8, content))
 }
 
 /// A setext underline's heading level: `=`s (1) or `-`s (2), then only spaces.
-fn setext(rest: &str) -> Option<u8> {
-    let marker = *rest.as_bytes().first()?;
-    let level = match marker {
+fn setext(rest: &[u16]) -> Option<u8> {
+    let level = match ascii(*rest.first()?) {
         b'=' => 1,
         b'-' => 2,
         _ => return None,
     };
-    let trimmed = rest.trim_end_matches(' ');
-    trimmed.bytes().all(|b| b == marker).then_some(level)
+    trim_end_spaces(rest).iter().all(|&unit| unit == rest[0]).then_some(level)
 }
 
 /// Three or more of one of `*-_`, with only spaces between.
-fn thematic(rest: &str) -> bool {
-    let marker = rest.as_bytes()[0];
+fn thematic(rest: &[u16]) -> bool {
+    let marker = rest[0];
     let mut count = 0;
-    for b in rest.bytes() {
-        if b == marker {
+    for &unit in rest {
+        if unit == marker {
             count += 1;
-        } else if b != b' ' {
+        } else if unit != SP {
             return false;
         }
     }
@@ -467,15 +491,17 @@ mod wasm {
         input: Vec<u16>,
         /// After each update: the outcome; the edit's opcodes, as a `u32` index and count;
         /// the rendering's tokens, the same; its text, as a `u16` index and count; the
-        /// first text unit the edit refers to; the root nodes that became final.
-        header: [u32; 9],
+        /// first text unit the edit refers to; the root nodes that became final; the
+        /// tokens' origins, as a `u32` index (one a token); how far the rendered text
+        /// equals the text as given.
+        header: [u32; 11],
     }
 
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 9] }
+            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 11] }
         }
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
@@ -529,6 +555,8 @@ mod wasm {
                 rendering.text.len() as u32,
                 text_from,
                 self.session.final_nodes,
+                rendering.origins.as_ptr() as u32 / 4,
+                self.session.agree as u32,
             ];
             outcome as u32
         }
