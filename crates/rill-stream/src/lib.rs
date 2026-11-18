@@ -25,9 +25,10 @@ pub fn render(source: &str, out: &mut String) -> Result {
     render_split(source, out).map(|_| ())
 }
 
-/// [`render`], and where the last block starts: its offset in `source` and in the HTML
-/// appended. Text appended to `source` can change only that block and what follows.
-pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize)> {
+/// [`render`], and where the last open block starts: its offset in `source`, its offset
+/// in the HTML appended, and how many blocks (root nodes) come before it. Text appended
+/// to `source` can change only that block and what follows.
+pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize, u32)> {
     let bytes = source.as_bytes();
     if memchr::memchr3(b'\r', b'\t', b'|', bytes).is_some() || memchr::memchr(0, bytes).is_some() {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
@@ -36,7 +37,7 @@ pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize)> {
     // Markup is about a third again the text: one allocation up front.
     out.reserve(source.len() + source.len() / 2);
     let base = out.len();
-    let mut blocks = Blocks { source, out, inline: Inline::default(), para: None, list: None, last: (0, base), before: (0, base) };
+    let mut blocks = Blocks { source, out, inline: Inline::default(), para: None, list: None, last: (0, base, 0), before: (0, base, 0), opened: 0 };
     let mut start = 0;
     while start <= source.len() {
         let end = memchr_newline(bytes, start);
@@ -52,7 +53,7 @@ pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize)> {
     } else {
         blocks.last
     };
-    Ok((split.0, split.1 - base))
+    Ok((split.0, split.1 - base, split.2))
 }
 
 struct Blocks<'a, 'o> {
@@ -63,11 +64,13 @@ struct Blocks<'a, 'o> {
     para: Option<(usize, usize)>,
     /// The open list.
     list: Option<List>,
-    /// Where the last block opened: its source offset and the output length then (all
-    /// HTML before it belongs to blocks that are closed).
-    last: (usize, usize),
+    /// Where the last block opened: its source offset, the output length then (all HTML
+    /// before it belongs to blocks that are closed), and the blocks before it.
+    last: (usize, usize, u32),
     /// Where the block before it opened.
-    before: (usize, usize),
+    before: (usize, usize, u32),
+    /// Blocks opened so far.
+    opened: u32,
 }
 
 /// A tight list of one-paragraph items.
@@ -216,7 +219,8 @@ impl<'a> Blocks<'a, '_> {
 
     fn open_block(&mut self, offset: usize) {
         self.before = self.last;
-        self.last = (offset, self.out.len());
+        self.last = (offset, self.out.len(), self.opened);
+        self.opened += 1;
     }
 
     /// A line while a list is open: `true` when the list took it.

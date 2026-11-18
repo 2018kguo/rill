@@ -78,8 +78,9 @@ struct Tokens<'a> {
 }
 
 fn void(tag: &str) -> bool {
-    let name = tag[1..].split([' ', '>']).next().unwrap_or("");
-    matches!(name, "br" | "hr" | "img" | "input")
+    let name = tag.as_bytes();
+    let is = |n: &[u8]| name.len() > n.len() + 1 && &name[1..=n.len()] == n && matches!(name[n.len() + 1], b' ' | b'>');
+    is(b"br") || is(b"hr") || is(b"img") || is(b"input")
 }
 
 impl<'a> Iterator for Tokens<'a> {
@@ -91,19 +92,10 @@ impl<'a> Iterator for Tokens<'a> {
             return None;
         }
         if bytes[start] == b'<' {
-            // Attribute values are quoted, and may hold `>`.
-            let mut at = start + 1;
-            let mut quoted = false;
-            while let Some(offset) = memchr::memchr2(b'"', b'>', &bytes[at..]) {
-                at += offset;
-                if bytes[at] == b'>' && !quoted {
-                    break;
-                }
-                quoted ^= bytes[at] == b'"';
-                at += 1;
-            }
-            self.at = (at + 1).min(bytes.len());
-            let tag = &self.html[start..self.at];
+            // This crate escapes `>` in attribute values: the tag ends at the first one.
+            let end = memchr::memchr(b'>', &bytes[start..]).map_or(bytes.len(), |at| start + at + 1);
+            self.at = end;
+            let tag = &self.html[start..end];
             let token = if bytes[start + 1] == b'/' {
                 Token::Close
             } else if void(tag) {
@@ -143,23 +135,6 @@ fn decode(text: &str) -> std::borrow::Cow<'_, str> {
     } else {
         text.into()
     }
-}
-
-/// How many nodes `html` puts at its top level.
-pub fn top_level_nodes(html: &str) -> u32 {
-    let mut depth = 0u32;
-    let mut count = 0;
-    for (_, token) in (Tokens { html, at: 0 }) {
-        match token {
-            Token::Open(_) => {
-                count += u32::from(depth == 0);
-                depth += 1;
-            }
-            Token::Close => depth -= 1,
-            Token::Void(_) | Token::Text(_) => count += u32::from(depth == 0),
-        }
-    }
-    count
 }
 
 /// A token boundary in the last `new`, with the path there: the next diff, when its

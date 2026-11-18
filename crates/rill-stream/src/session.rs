@@ -8,7 +8,7 @@
 
 use rill_remend::Stream as Remend;
 
-use crate::diff::{Mark, Program, diff, top_level_nodes};
+use crate::diff::{Mark, Program, diff};
 use crate::{Fallback, render_split};
 
 #[derive(Default)]
@@ -99,7 +99,6 @@ impl Session {
                 if outcome != Outcome::Patch || !self.addition.is_empty() {
                     self.mark.clear();
                 }
-                self.final_nodes = top_level_nodes(&self.addition);
                 self.shown.clear();
                 self.shown.push_str(&self.pending);
                 outcome
@@ -115,7 +114,8 @@ impl Session {
         self.addition.clear();
         self.pending.clear();
         // What comes before the last block is final.
-        let (source, html) = render_split(&self.tail, &mut self.pending)?;
+        let (source, html, nodes) = render_split(&self.tail, &mut self.pending)?;
+        self.final_nodes = nodes;
         self.addition.push_str(&self.pending[..html]);
         self.pending.drain(..html);
         self.stable += self.tail[..source].encode_utf16().count();
