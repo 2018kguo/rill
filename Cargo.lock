@@ -195,6 +195,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "rill-cmark",
+ "rill-remend",
  "url",
  "wasm-bindgen",
 ]
@@ -204,6 +205,7 @@ name = "rill-cmark"
 version = "0.1.0"
 dependencies = [
  "memchr",
+ "rill-unicode",
 ]
 
 [[package]]
@@ -214,12 +216,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rill-remend"
+version = "0.1.0"
+dependencies = [
+ "memchr",
+ "rill-unicode",
+]
+
+[[package]]
 name = "rill-stream"
 version = "0.1.0"
 dependencies = [
  "memchr",
+ "rill-remend",
+ "rill-unicode",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "rill-unicode"
+version = "0.1.0"
 
 [[package]]
 name = "rustversion"

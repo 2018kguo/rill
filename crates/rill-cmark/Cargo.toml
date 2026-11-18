@@ -8,4 +8,5 @@ repository = "https://github.com/2018kguo/rill"
 publish = false
 
 [dependencies]
+rill-unicode = { path = "../rill-unicode" }
 memchr = "2.8"

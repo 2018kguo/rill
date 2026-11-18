@@ -4,7 +4,7 @@
 //! micromark's text tokenizer saw before the candidate; `None` is the start of the
 //! text or a line ending (both pass every `previous*` check identically).
 
-use crate::unicode_tables::{in_table, PUNCTUATION_OR_SYMBOL, WHITESPACE};
+use rill_unicode::{in_table, PUNCTUATION_OR_SYMBOL, WHITESPACE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LiteralKind {

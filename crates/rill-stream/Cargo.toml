@@ -9,7 +9,9 @@ description = "Streamdown's DOM as HTML in one pass, for streaming Markdown"
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+rill-unicode = { path = "../rill-unicode" }
 memchr = { version = "2.8", default-features = false }
+rill-remend = { path = "../rill-remend" }
 wasm-bindgen = { version = "=0.2.129", optional = true }
 
 [features]

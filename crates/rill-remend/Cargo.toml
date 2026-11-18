@@ -1,0 +1,10 @@
+[package]
+name = "rill-remend"
+version = "0.1.0"
+edition = "2024"
+license = "MIT AND Apache-2.0"
+description = "remend 1.4.0 (Streamdown's streaming repair) on UTF-16 units, incrementally"
+
+[dependencies]
+rill-unicode = { path = "../rill-unicode" }
+memchr = "2.8"

@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rill-cmark = { path = "../rill-cmark" }
+rill-remend = { path = "../rill-remend" }
 memchr = "2.8"
 
 wasm-bindgen = { version = "=0.2.129", optional = true }

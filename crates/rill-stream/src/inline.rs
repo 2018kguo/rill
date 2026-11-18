@@ -6,7 +6,7 @@
 //! as their characters and remembered by position. Only a paragraph where emphasis
 //! matched is rewritten, once, to put the tags in.
 
-use crate::unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
+use rill_unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
 use crate::simd::ByteSet;
 use crate::{Fallback, Result};
 

@@ -9,7 +9,7 @@
 //! 2.3's only beside other attention markers.
 
 use crate::autolink_literal::{unicode_punctuation, unicode_whitespace};
-use crate::unicode_tables::{in_table, CJK, IVS, PUNCTUATION_OR_SYMBOL, WHITESPACE};
+use rill_unicode::{in_table, CJK, IVS, PUNCTUATION_OR_SYMBOL, WHITESPACE};
 
 const SPACE: u32 = 1;
 const PUNCTUATION: u32 = 2;

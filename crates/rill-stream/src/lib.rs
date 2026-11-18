@@ -7,8 +7,6 @@
 
 mod inline;
 mod simd;
-#[allow(clippy::all)]
-mod unicode;
 
 use inline::Inline;
 

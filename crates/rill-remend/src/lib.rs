@@ -6,7 +6,23 @@
 
 use std::cell::OnceCell;
 
-use crate::text::js_space;
+/// JavaScript's `\s` (what `trim()` removes), for a UTF-16 unit or a character.
+fn js_space(c: impl Into<u32>) -> bool {
+    matches!(
+        c.into(),
+        0x09..=0x0d
+            | 0x20
+            | 0xa0
+            | 0x1680
+            | 0x2000..=0x200a
+            | 0x2028
+            | 0x2029
+            | 0x202f
+            | 0x205f
+            | 0x3000
+            | 0xfeff
+    )
+}
 
 type Units = Vec<u16>;
 
@@ -467,7 +483,7 @@ fn trim_end(text: &[u16]) -> &[u16] {
 }
 
 fn letter_or_number(code_point: u32) -> bool {
-    char::from_u32(code_point).is_some_and(rill_cmark::letter_or_number)
+    char::from_u32(code_point).is_some_and(|c| rill_unicode::in_table(rill_unicode::LETTER_OR_NUMBER, c))
 }
 
 /// `isWordChar(text[index])`: one code unit (a lone half of a pair is neither).

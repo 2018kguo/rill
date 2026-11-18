@@ -1,0 +1,8 @@
+[package]
+name = "rill-unicode"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "The Unicode classes micromark and remend test, as range tables"
+
+[dependencies]

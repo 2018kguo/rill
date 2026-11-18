@@ -12,7 +12,7 @@ pub mod extras;
 pub mod hast;
 pub mod markup;
 pub mod mdast;
-pub mod remend;
+pub use rill_remend as remend;
 
 mod autolink;
 mod json;
