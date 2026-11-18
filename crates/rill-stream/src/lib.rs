@@ -6,6 +6,7 @@
 //! exactly returns [`Fallback`], and the caller renders the text the exact way.
 
 mod inline;
+mod simd;
 #[allow(clippy::all)]
 mod unicode;
 

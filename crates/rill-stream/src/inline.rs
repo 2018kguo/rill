@@ -7,6 +7,7 @@
 //! matched is rewritten, once, to put the tags in.
 
 use crate::unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
+use crate::simd::ByteSet;
 use crate::{Fallback, Result};
 
 const STRONG_OPEN: &str = r#"<span class="font-semibold" data-streamdown="strong">"#;
@@ -15,30 +16,60 @@ const CODE_OPEN: &str =
     r#"<code class="rounded bg-muted px-1.5 py-0.5 font-mono text-sm" data-streamdown="inline-code">"#;
 
 /// Bytes that end a run of plain text.
-static SPECIAL: [bool; 256] = {
-    let mut table = [false; 256];
-    let mut index = 0;
-    let specials = b"*_`\\\n&<>[]~";
-    while index < specials.len() {
-        table[specials[index] as usize] = true;
-        index += 1;
+const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<>[]~");
+
+/// The first byte at or after `at` that is in `SPECIAL`, or the end.
+#[inline(always)]
+fn next_special(bytes: &[u8], mut at: usize) -> usize {
+    while let Some(chunk) = bytes.get(at..at + 16) {
+        let mask = SPECIAL.mask16(chunk.try_into().expect("16 bytes"));
+        if mask != 0 {
+            return at + mask.trailing_zeros() as usize;
+        }
+        at += 16;
     }
-    table
-};
+    while at < bytes.len() && !SPECIAL.contains(bytes[at]) {
+        at += 1;
+    }
+    at
+}
 
 #[derive(Default)]
 pub struct Inline {
     runs: Vec<Run>,
     /// Indices into `runs` still able to match.
     delims: Vec<usize>,
+    /// What the scan found, in source order; the text between them is copied as it is.
+    events: Vec<Event>,
+}
+
+/// Something at a source position other than plain text.
+#[derive(Clone, Copy)]
+struct Event {
+    /// Where the plain text before it ends.
+    at: u32,
+    /// Where plain text resumes after it.
+    resume: u32,
+    kind: Kind,
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    /// A line ending (with the spaces before it and the indent after it).
+    Line { hard: bool },
+    /// A backslash before a line ending.
+    Break,
+    /// A fixed replacement (an escaped character, `&gt;`, ...).
+    Literal(&'static str),
+    /// A code span's content `[start, end)`; `trim` after a hard break.
+    Code { start: u32, end: u32, trim: bool },
+    /// A delimiter run, `runs[index]`.
+    Run { index: u32 },
 }
 
 /// A run of `*` or `_`.
 struct Run {
-    /// Where its characters start in the paragraph's HTML.
-    at: usize,
     marker: u8,
-    original: u32,
     count: u32,
     can_open: bool,
     can_close: bool,
@@ -72,15 +103,15 @@ impl Tags {
         Ok(())
     }
     /// The tags in order (bit 0 first: the outermost opener, the innermost closer).
-    fn write(self, out: &mut String, open: bool) {
+    fn write(self, out: &mut Vec<u8>, open: bool) {
         for bit in 0..self.len {
             let strong = self.bits >> bit & 1 == 1;
-            out.push_str(match (strong, open) {
+            out.extend_from_slice(match (strong, open) {
                 (true, true) => STRONG_OPEN,
                 (true, false) => STRONG_CLOSE,
                 (false, true) => "<em>",
                 (false, false) => "</em>",
-            });
+            }.as_bytes());
         }
     }
 }
@@ -107,21 +138,18 @@ fn class(c: Option<char>) -> Class {
     }
 }
 
-fn escape_into(out: &mut String, text: &str) {
-    let bytes = text.as_bytes();
-    let mut start = 0;
-    for (index, &byte) in bytes.iter().enumerate() {
-        let entity = match byte {
-            b'&' => "&amp;",
-            b'<' => "&lt;",
-            b'>' => "&gt;",
-            _ => continue,
-        };
-        out.push_str(&text[start..index]);
-        out.push_str(entity);
-        start = index + 1;
+/// ASCII punctuation that a backslash escapes, as its HTML.
+fn escaped(byte: u8) -> &'static str {
+    const PUNCT: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    match byte {
+        b'&' => "&amp;",
+        b'<' => "&lt;",
+        b'>' => "&gt;",
+        _ => {
+            let at = PUNCT.find(char::from(byte)).expect("ASCII punctuation");
+            &PUNCT[at..=at]
+        }
     }
-    out.push_str(&text[start..]);
 }
 
 impl Inline {
@@ -130,55 +158,48 @@ impl Inline {
     pub fn render(&mut self, text: &str, out: &mut String) -> Result {
         self.runs.clear();
         self.delims.clear();
-        let start = out.len();
-        self.scan(text, out, start)?;
-        if self.emphasis()? {
-            // Grow the paragraph's HTML in place, moving each piece right once, from the end.
-            let tag_len = |tags: Tags, open: bool| -> usize {
-                (0..tags.len)
-                    .map(|bit| match (tags.bits >> bit & 1 == 1, open) {
-                        (true, true) => STRONG_OPEN.len(),
-                        (true, false) => STRONG_CLOSE.len(),
-                        (false, true) => 4,
-                        (false, false) => 5,
-                    })
-                    .sum()
-            };
-            let growth: usize = self
-                .runs
-                .iter()
-                .map(|run| tag_len(run.closes, false) + tag_len(run.opens, true) + run.count as usize)
-                .sum::<usize>()
-                - self.runs.iter().map(|run| run.original as usize).sum::<usize>();
-            let old_len = out.len();
-            // SAFETY: every byte written below is ASCII markup or moved whole UTF-8 text.
-            let buffer = unsafe { out.as_mut_vec() };
-            buffer.resize(old_len + growth, 0);
-            let mut end = old_len; // end of the not-yet-moved source
-            let mut write = old_len + growth;
-            let mut scratch = String::new();
-            for run in self.runs.iter().rev() {
-                let source_end = start + run.at + run.original as usize;
-                let piece = end - source_end;
-                buffer.copy_within(source_end..end, write - piece);
-                write -= piece;
-                scratch.clear();
-                run.closes.write(&mut scratch, false);
-                for _ in 0..run.count {
-                    scratch.push(char::from(run.marker));
+        self.events.clear();
+        self.scan(text)?;
+        self.emphasis()?;
+        // SAFETY: only whole UTF-8 text between ASCII positions and ASCII markup go in.
+        let buffer = unsafe { out.as_mut_vec() };
+        let bytes = text.as_bytes();
+        let mut cursor = 0;
+        for event in &self.events {
+            buffer.extend_from_slice(&bytes[cursor..event.at as usize]);
+            match event.kind {
+                Kind::Line { hard } => buffer.extend_from_slice(if hard { b"<br>\n" } else { b"\n" }),
+                Kind::Break => buffer.extend_from_slice(b"<br>\n"),
+                Kind::Literal(html) => buffer.extend_from_slice(html.as_bytes()),
+                Kind::Code { start, end, trim } => {
+                    buffer.extend_from_slice(CODE_OPEN.as_bytes());
+                    code_content(buffer, &bytes[start as usize..end as usize], trim);
+                    buffer.extend_from_slice(b"</code>");
                 }
-                run.opens.write(&mut scratch, true);
-                write -= scratch.len();
-                buffer[write..write + scratch.len()].copy_from_slice(scratch.as_bytes());
-                end = start + run.at;
+                Kind::Run { index } => {
+                    let run = &self.runs[index as usize];
+                    run.closes.write(buffer, false);
+                    for _ in 0..run.count {
+                        buffer.push(run.marker);
+                    }
+                    run.opens.write(buffer, true);
+                }
             }
-            debug_assert_eq!(write, end);
+            cursor = event.resume as usize;
         }
+        buffer.extend_from_slice(&bytes[cursor..]);
         Ok(())
     }
 
-    fn scan(&mut self, text: &str, out: &mut String, start: usize) -> Result {
+    fn event(&mut self, at: usize, resume: usize, kind: Kind) {
+        self.events.push(Event { at: at as u32, resume: resume as u32, kind });
+    }
+
+    fn scan(&mut self, text: &str) -> Result {
         let bytes = text.as_bytes();
+        if u32::try_from(bytes.len()).is_err() {
+            return Err(Fallback);
+        }
         // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
         if memchr::memchr(b'@', bytes).is_some() || memchr::memmem::find(bytes, b"://").is_some() {
             return Err(Fallback);
@@ -189,77 +210,75 @@ impl Inline {
             }
         }
         let mut at = 0;
+        // Where plain text began: the spaces before a line ending are trimmed back to it.
         let mut plain = 0;
-        // mdast-util-to-hast trims the start of whatever follows a hard break.
-        let mut after_break = false;
+        // mdast-util-to-hast trims the start of whatever follows a hard break: the source
+        // position right after the last break.
+        let mut broke_at = usize::MAX;
         loop {
-            while at < bytes.len() && !SPECIAL[usize::from(bytes[at])] {
-                at += 1;
-            }
-            if at > plain {
-                out.push_str(&text[plain..at]);
-                after_break = false;
-            }
+            at = next_special(bytes, at);
             let Some(&byte) = bytes.get(at) else {
                 return Ok(());
             };
-            let broke = after_break;
-            after_break = false;
             match byte {
                 b'\n' => {
-                    // Spaces before a line ending: two or more make a hard break.
-                    let trimmed = out[start..].trim_end_matches(' ').len() + start;
-                    let spaces = out.len() - trimmed;
-                    out.truncate(trimmed);
-                    out.push_str(if spaces >= 2 { "<br>\n" } else { "\n" });
-                    after_break = spaces >= 2;
-                    at = skip_spaces(bytes, at + 1);
+                    let mut spaces = at;
+                    while spaces > plain && bytes[spaces - 1] == b' ' {
+                        spaces -= 1;
+                    }
+                    let hard = at - spaces >= 2;
+                    let resume = skip_spaces(bytes, at + 1);
+                    self.event(spaces, resume, Kind::Line { hard });
+                    if hard {
+                        broke_at = resume;
+                    }
+                    at = resume;
                 }
                 b'\\' => match bytes.get(at + 1) {
                     Some(b'\n') => {
-                        out.push_str("<br>\n");
-                        after_break = true;
-                        at = skip_spaces(bytes, at + 2);
+                        let resume = skip_spaces(bytes, at + 2);
+                        self.event(at, resume, Kind::Break);
+                        broke_at = resume;
+                        at = resume;
                     }
                     Some(&next) if next.is_ascii_punctuation() => {
-                        escape_into(out, &text[at + 1..at + 2]);
+                        self.event(at, at + 2, Kind::Literal(escaped(next)));
                         at += 2;
                     }
                     _ => {
-                        out.push('\\');
                         at += 1;
+                        continue; // a literal backslash is text
                     }
                 },
                 b'`' => {
                     let run = count(bytes, at, b'`');
                     match closing_backticks(bytes, at + run, run) {
                         Some(end) => {
-                            out.push_str(CODE_OPEN);
-                            code_content(out, &text[at + run..end], broke);
-                            out.push_str("</code>");
+                            let trim = broke_at == at;
+                            self.event(at, end + run, Kind::Code { start: (at + run) as u32, end: end as u32, trim });
                             at = end + run;
                         }
                         None => {
-                            out.push_str(&text[at..at + run]);
                             at += run;
+                            continue; // literal backticks are text
                         }
                     }
                 }
                 b'>' => {
-                    out.push_str("&gt;");
+                    self.event(at, at + 1, Kind::Literal("&gt;"));
                     at += 1;
                 }
                 // A `&` that cannot start a character reference, a `<` that cannot start
                 // HTML or an autolink.
                 b'&' if !bytes.get(at + 1).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'#') => {
-                    out.push_str("&amp;");
+                    self.event(at, at + 1, Kind::Literal("&amp;"));
                     at += 1;
                 }
                 b'<' if !bytes
                     .get(at + 1)
                     .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?')) =>
                 {
-                    out.push_str("&lt;");
+                    self.event(at, at + 1, Kind::Literal("&lt;"));
                     at += 1;
                 }
                 b'*' | b'_' => {
@@ -273,22 +292,25 @@ impl Inline {
                     } else {
                         (left && (!right || before == Class::Punct), right && (!left || after == Class::Punct))
                     };
-                    let length32 = u32::try_from(length).map_err(|_| Fallback)?;
                     if can_open || can_close {
+                        let length32 = length as u32;
                         self.delims.push(self.runs.len());
+                        let index = self.runs.len() as u32;
+                        self.runs.push(Run {
+                            marker: byte,
+                            count: length32,
+                            can_open,
+                            can_close,
+                            opens: Tags::default(),
+                            closes: Tags::default(),
+                        });
+                        self.event(at, at + length, Kind::Run { index });
                     }
-                    self.runs.push(Run {
-                        at: out.len() - start,
-                        marker: byte,
-                        original: length32,
-                        count: length32,
-                        can_open,
-                        can_close,
-                        opens: Tags::default(),
-                        closes: Tags::default(),
-                    });
-                    out.push_str(&text[at..at + length]);
                     at += length;
+                    // A run that can neither open nor close is text.
+                    if !(can_open || can_close) {
+                        continue;
+                    }
                 }
                 // Links, images, raw HTML, references, strikethrough, autolinks: the
                 // exact path.
@@ -299,9 +321,8 @@ impl Inline {
     }
 
     /// CommonMark's "process emphasis" over every delimiter run; whether any matched.
-    fn emphasis(&mut self) -> Result<bool> {
+    fn emphasis(&mut self) -> Result {
         // ponytail: quadratic opener search; add openers_bottom if adversarial input shows up.
-        let mut matched = false;
         let mut closer_at = 0;
         while closer_at < self.delims.len() {
             let closer = self.delims[closer_at];
@@ -325,7 +346,6 @@ impl Inline {
                 closer_at += 1;
                 continue;
             };
-            matched = true;
             let opener = self.delims[opener_at];
             let open_count = self.runs[opener].count;
             let used = if open_count >= 2 && close_count >= 2 { 2 } else { 1 };
@@ -344,7 +364,7 @@ impl Inline {
                 self.delims.remove(closer_at);
             }
         }
-        Ok(matched)
+        Ok(())
     }
 }
 
@@ -375,25 +395,25 @@ fn closing_backticks(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
 }
 
 /// A code span's content, escaped: line endings as spaces, one space stripped from each
-/// side when both have one and it is not all spaces.
-fn code_content(out: &mut String, raw: &str, after_break: bool) {
-    let bytes = raw.as_bytes();
+/// side when both have one and it is not all spaces; after a hard break, no leading spaces.
+fn code_content(out: &mut Vec<u8>, raw: &[u8], after_break: bool) {
     let space = |b: u8| b == b' ' || b == b'\n';
-    let strip = bytes.len() >= 2
-        && space(bytes[0])
-        && space(bytes[bytes.len() - 1])
-        && bytes.iter().any(|&b| !space(b));
-    let raw = if strip { &raw[1..raw.len() - 1] } else { raw };
-    let start = out.len();
-    escape_into(out, raw);
-    if raw.contains('\n') {
-        let replaced = out[start..].replace('\n', " ");
-        out.truncate(start);
-        out.push_str(&replaced);
-    }
+    let strip = raw.len() >= 2 && space(raw[0]) && space(raw[raw.len() - 1]) && raw.iter().any(|&b| !space(b));
+    let mut raw = if strip { &raw[1..raw.len() - 1] } else { raw };
     if after_break {
-        let kept = out[start..].trim_start_matches(' ').to_owned();
-        out.truncate(start);
-        out.push_str(&kept);
+        while let [first, rest @ ..] = raw
+            && space(*first)
+        {
+            raw = rest;
+        }
+    }
+    for &byte in raw {
+        match byte {
+            b'&' => out.extend_from_slice(b"&amp;"),
+            b'<' => out.extend_from_slice(b"&lt;"),
+            b'>' => out.extend_from_slice(b"&gt;"),
+            b'\n' => out.push(b' '),
+            _ => out.push(byte),
+        }
     }
 }
