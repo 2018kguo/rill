@@ -11,7 +11,7 @@ use crate::tokens::{Out, tag};
 use crate::{Fallback, Result};
 
 /// Bytes that end a run of plain text.
-const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<[]~");
+const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<[]~@:.");
 
 /// The first unit at or after `at` that is in `SPECIAL`, or the end.
 #[inline(always)]
@@ -195,18 +195,7 @@ impl Inline {
         if u32::try_from(bytes.len()).is_err() {
             return Err(Fallback);
         }
-        // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
-        for (at, &unit) in text.iter().enumerate() {
-            let suspect = match ascii(unit) {
-                b'@' => true,
-                b':' => text.get(at + 1..at + 3) == Some(&[0x2F, 0x2F]),
-                b'.' => at >= 3 && text[at - 3..at].iter().all(|&u| ascii(u) | 0x20 == b'w'),
-                _ => false,
-            };
-            if suspect {
-                return Err(Fallback);
-            }
-        }
+
         let mut at = 0;
         // Where plain text began: the spaces before a line ending are trimmed back to it.
         let mut plain = 0;
@@ -240,6 +229,10 @@ impl Inline {
                         broke_at = resume;
                         at = resume;
                     }
+                    // As before the escape, for the autolink literals below.
+                    Some(b'@') => return Err(Fallback),
+                    Some(b':') if bytes.get(at + 2..at + 4) == Some(&[0x2F, 0x2F]) => return Err(Fallback),
+                    Some(b'.') if www_before(bytes, at) => return Err(Fallback),
                     Some(next) if next.is_ascii_punctuation() => {
                         self.event(at, at + 2, Kind::Literal(escaped(next)));
                         at += 2;
@@ -274,6 +267,20 @@ impl Inline {
                     .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?')) =>
                 {
                     at += 1;
+                }
+                // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
+                b'@' => return Err(Fallback),
+                b':' | b'.' => {
+                    let suspect = if byte == b':' {
+                        bytes.get(at + 1..at + 3) == Some(&[0x2F, 0x2F])
+                    } else {
+                        www_before(bytes, at)
+                    };
+                    if suspect {
+                        return Err(Fallback);
+                    }
+                    at += 1;
+                    continue; // text
                 }
                 b'*' | b'_' => {
                     let length = count(bytes, at, unit);
@@ -360,6 +367,11 @@ impl Inline {
         }
         Ok(())
     }
+}
+
+/// Whether `www` (any case) ends at `at`.
+fn www_before(units: &[u16], at: usize) -> bool {
+    at >= 3 && units[at - 3..at].iter().all(|&u| ascii(u) | 0x20 == b'w')
 }
 
 fn count(units: &[u16], at: usize, unit: u16) -> usize {
