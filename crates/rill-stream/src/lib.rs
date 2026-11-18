@@ -41,6 +41,8 @@ pub(crate) struct Split {
     pub words: usize,
     pub text: usize,
     pub nodes: u32,
+    /// The block opened here is a list.
+    pub list: bool,
 }
 
 /// Streamdown's DOM for `source` (UTF-16) as tokens appended to `out` (see [`tokens`]),
@@ -57,7 +59,7 @@ pub(crate) fn render_split_at(source: &[u16], at: usize, out: &mut Out, inline: 
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
         return Err(Fallback);
     }
-    let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0 };
+    let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0, list: false };
     let mut blocks = Blocks { source, out, inline, para: None, list: None, last: base, before: base, opened: 0 };
     let mut start = 0;
     while start <= source.len() {
@@ -68,8 +70,19 @@ pub(crate) fn render_split_at(source: &[u16], at: usize, out: &mut Out, inline: 
     blocks.close_paragraph()?;
     blocks.close_list()?;
     // A block opened on the unfinished last line may still turn into a continuation of
-    // the block before it (`****` growing into `****#`): that one stays open too.
-    let split = if source.last() != Some(&NL) && !source[blocks.last.source..].contains(&NL) {
+    // the block before it (`***` growing into `***a`, a lazy line): that one stays open
+    // too, unless a blank line parts them and it is not a list (which takes items after
+    // blank lines).
+    let last = blocks.last.source;
+    let parted = last >= 2 && source[last - 1] == NL && {
+        let line = &source[..last - 1];
+        let start = line.iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+        line[start..].iter().all(|&unit| unit == SP)
+    };
+    let split = if source.last() != Some(&NL)
+        && !source[last..].contains(&NL)
+        && !(parted && !blocks.before.list)
+    {
         blocks.before
     } else {
         blocks.last
@@ -258,7 +271,7 @@ impl<'a> Blocks<'a, '_> {
 
     fn open_block(&mut self, offset: usize) {
         self.before = self.last;
-        self.last = Split { source: offset, words: self.out.words.len(), text: self.out.text.len(), nodes: self.opened };
+        self.last = Split { source: offset, words: self.out.words.len(), text: self.out.text.len(), nodes: self.opened, list: false };
         self.opened += 1;
     }
 
@@ -347,6 +360,7 @@ impl<'a> Blocks<'a, '_> {
         if !same {
             self.close_list()?;
             self.open_block(offset);
+            self.last.list = true;
             self.list = Some(List {
                 ordered: marker.ordered,
                 marker: marker.marker,
