@@ -1,7 +1,7 @@
 // Which edit ops a 256-unit stream of a file produces (dev probe).
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-const { Stream } = createRequire(import.meta.url)("../stream-wasm/rill_stream.js");
+const { Stream, streamMemory: memory } = createRequire(import.meta.url)("../stream-wasm/rill_stream.js");
 const source = readFileSync(process.argv[2]!, "utf8");
 const s = new Stream();
 const counts: Record<string, number> = {};
@@ -12,7 +12,8 @@ for (let end = 256; ; end += 256) {
   const cut = Math.min(end, source.length);
   const outcome = s.update(source.slice(prev, cut), prev === 0);
   prev = cut;
-  const ops = s.ops as Uint32Array;
+  s.text;
+  const ops = new Uint32Array(memory().buffer, s.opsAt * 4, s.opsLength);
   let at = 0;
   const kinds: string[] = [];
   while (at < ops.length) {

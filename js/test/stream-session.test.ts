@@ -11,7 +11,7 @@ import { mount } from "./dom.ts";
 
 const { Streamdown } = await import("streamdown");
 const { createStreamRenderer } = await import("../src/stream-dom.ts");
-const { Stream } = createRequire(import.meta.url)("../stream-wasm/rill_stream.js");
+const { Stream, streamMemory: memory } = createRequire(import.meta.url)("../stream-wasm/rill_stream.js");
 
 const ROOT_CLASS = "space-y-4 whitespace-normal [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
 
@@ -40,7 +40,7 @@ for (const [name, pieces, depth] of ALPHABETS) {
     const root = document.createElement("div");
     root.className = ROOT_CLASS;
     host.append(root);
-    const renderer = createStreamRenderer(root, new Stream());
+    const renderer = createStreamRenderer(root, new Stream(), memory());
     let shown = 0;
     let updates = 0;
     const walk = async (prefix: string, left: number) => {

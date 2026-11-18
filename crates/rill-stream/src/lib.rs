@@ -463,6 +463,12 @@ mod wasm {
         super::render(source, &mut out).ok().map(|()| out)
     }
 
+    /// The module's memory.
+    #[wasm_bindgen(js_name = streamMemory)]
+    pub fn memory() -> JsValue {
+        wasm_bindgen::memory()
+    }
+
     /// A streaming answer (see [`crate::Session`]).
     #[wasm_bindgen]
     pub struct Stream(crate::Session);
@@ -484,10 +490,15 @@ mod wasm {
             html.push_str(&self.0.pending);
             html
         }
-        /// After a patch: the edit's opcodes (see `diff::op`).
-        #[wasm_bindgen(getter)]
-        pub fn ops(&self) -> Vec<u32> {
-            self.0.program.ops.clone()
+        /// After a patch: where the edit's opcodes (see `diff::op`) are in [`memory`], as
+        /// a `u32` index and count. Read them before the next call into the module.
+        #[wasm_bindgen(getter, js_name = opsAt)]
+        pub fn ops_at(&self) -> usize {
+            self.0.program.ops.as_ptr() as usize / 4
+        }
+        #[wasm_bindgen(getter, js_name = opsLength)]
+        pub fn ops_length(&self) -> usize {
+            self.0.program.ops.len()
         }
         /// After a patch: the edit's strings.
         #[wasm_bindgen(getter)]

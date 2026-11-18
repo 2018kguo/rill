@@ -13,9 +13,11 @@ export type StreamSession = {
   update(appended: string, reset: boolean): number;
   /** After a reset: the whole HTML. */
   readonly html: string;
-  /** After a patch: the edit (crates/rill-stream/src/diff.rs). */
-  readonly ops: Uint32Array;
+  /** After a patch: the edit's strings, then its opcodes (crates/rill-stream/src/diff.rs)
+   * as a `u32` index and count into the module's memory. */
   readonly text: string;
+  readonly opsAt: number;
+  readonly opsLength: number;
   /** Root nodes that became final this update. */
   readonly finalNodes: number;
   free(): void;
@@ -33,7 +35,8 @@ export type StreamRenderer = {
   dispose(): void;
 };
 
-export function createStreamRenderer(root: Element, session: StreamSession): StreamRenderer {
+/** `memory`: the module's (its `streamMemory()` export). */
+export function createStreamRenderer(root: Element, session: StreamSession, memory: WebAssembly.Memory): StreamRenderer {
   let text = "";
   /** Root children before the open tail. */
   let finals = 0;
@@ -45,7 +48,9 @@ export function createStreamRenderer(root: Element, session: StreamSession): Str
       text = next;
       if (outcome === FALLBACK) return false;
       if (outcome === PATCH) {
-        apply(root, finals, session.ops, session.text);
+        // The text getter allocates in the module: read it before viewing the opcodes.
+        const strings = session.text;
+        apply(root, finals, new Uint32Array(memory.buffer, session.opsAt * 4, session.opsLength), strings);
       } else {
         root.innerHTML = session.html;
         finals = 0;
