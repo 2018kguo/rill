@@ -304,6 +304,7 @@ impl Stream {
         }
         self.earlier = Some(std::mem::replace(&mut self.prefix, prefix));
         self.regions.extend_from_slice(&regions);
+        drop(TailScan { regions, open_fence: None, open_span: None });
         self.settled = cut;
         self.fence1 = scan1.open_fence;
         self.fence2 = fence2;
@@ -959,9 +960,31 @@ struct TailScan {
     open_span: Option<OpenSpan>,
 }
 
+thread_local! {
+    /// Region buffers of dropped scans, for the next ones: a stream makes a few scans
+    /// per update, and allocating each was most of its allocations.
+    static REGIONS: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+impl Drop for TailScan {
+    fn drop(&mut self) {
+        let regions = std::mem::take(&mut self.regions);
+        if regions.capacity() > 0 {
+            REGIONS.with(|pool| {
+                let mut pool = pool.borrow_mut();
+                if pool.len() < 8 {
+                    pool.push(regions);
+                }
+            });
+        }
+    }
+}
+
 impl TailScan {
     fn new(text: &[u16], fence: Option<OpenFence>) -> TailScan {
-        let mut regions = vec![PROSE; text.len()];
+        let mut regions = REGIONS.with(|pool| pool.borrow_mut().pop()).unwrap_or_default();
+        regions.clear();
+        regions.resize(text.len(), PROSE);
         let open_fence = paint_fences(text, &mut regions, fence);
         let open_span = paint_spans(text, &mut regions);
         TailScan {
@@ -1135,6 +1158,11 @@ impl<'a> View<'a> {
 /// The math mask of `text` from `context`, and the context at its end.
 fn math_mask(text: &[u16], regions: &[u8], mut context: MathContext) -> (Vec<u8>, MathContext) {
     let n = text.len();
+    // Only `\` and `$` change the context: without them it stays none, and an empty
+    // mask reads as all zeros.
+    if context == MathContext::None && find_unit2(text, BACKSLASH, DOLLAR).is_none() {
+        return (Vec::new(), context);
+    }
     let mut mask = vec![0; n];
     let mut i = 0;
     while i < n {
@@ -1657,7 +1685,8 @@ impl Settled {
             Some(greater) => first_tag_start(&view, greater + 1),
             None => self.tag_start.or_else(|| first_tag_start(&view, from)),
         };
-        Some((next, scan.regions))
+        let mut scan = scan;
+        Some((next, std::mem::take(&mut scan.regions)))
     }
 }
 
