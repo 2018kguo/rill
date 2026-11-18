@@ -4,8 +4,8 @@
 //
 // Growing text gets a new text node after the old one rather than appendData, which
 // copies the whole string and costs about 20 times more in Chromium. The HTML is the same;
-// while a block streams, a run of adjacent text nodes stands for the one text node its
-// HTML parses to, and the block is normalize()d into exactly that once it is final.
+// a run of adjacent text nodes stands for the one text node it parses to (call
+// normalize() on the root for exactly Streamdown's nodes).
 
 /** rill-stream's WebAssembly session (`Stream` from its wasm-bindgen glue). */
 export type StreamSession = {
@@ -50,10 +50,7 @@ export function createStreamRenderer(root: Element, session: StreamSession): Str
         root.innerHTML = session.html;
         finals = 0;
       }
-      for (let added = session.finalNodes; added > 0; added -= 1) {
-        root.childNodes[finals]!.normalize();
-        finals += 1;
-      }
+      finals += session.finalNodes;
       return true;
     },
     dispose() {

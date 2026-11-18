@@ -132,6 +132,8 @@ fn class(c: Option<char>) -> Class {
             c if c.is_ascii_punctuation() => Class::Punct,
             _ => Class::Other,
         },
+        // micromark classifies UTF-16 units: outside the BMP it sees a surrogate, "other".
+        Some(c) if u32::from(c) > 0xFFFF => Class::Other,
         Some(c) if in_table(WHITESPACE, c) => Class::Space,
         Some(c) if in_table(PUNCTUATION_OR_SYMBOL, c) => Class::Punct,
         Some(_) => Class::Other,

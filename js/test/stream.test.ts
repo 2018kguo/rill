@@ -42,6 +42,7 @@ const ALPHABETS: [name: string, pieces: string[], depth: number][] = [
   ["lists", ["- ", "* ", "1. ", "2) ", "a", " ", "\n", "  ", "*"], 5],
   ["list blocks", ["- ", "-", "# ", "---", "a", "\n", "\n\n", "  "], 5],
   ["unicode", ["*", "_", "é", "—", "“", " ", "a", "\n"], 5],
+  ["astral", ["*", "_", "😀", "𝐀", " ", "a"], 6],
 ];
 
 for (const [name, pieces, depth] of ALPHABETS) {

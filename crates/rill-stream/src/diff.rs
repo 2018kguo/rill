@@ -137,8 +137,12 @@ fn common_prefix(a: &[u8], b: &[u8]) -> usize {
     at
 }
 
-fn decode(text: &str) -> String {
-    text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+fn decode(text: &str) -> std::borrow::Cow<'_, str> {
+    if text.contains('&') {
+        text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").into()
+    } else {
+        text.into()
+    }
 }
 
 /// How many nodes `html` puts at its top level.
@@ -158,15 +162,33 @@ pub fn top_level_nodes(html: &str) -> u32 {
     count
 }
 
-/// The program that turns the DOM of `old` into that of `new`.
-pub fn diff(old: &str, new: &str, program: &mut Program) {
-    // The index of the next child at each level.
-    let mut path: Vec<u32> = vec![0];
+/// A token boundary in the last `new`, with the path there: the next diff, when its
+/// `old` is that `new`, starts walking from it.
+#[derive(Default)]
+pub struct Mark {
+    at: usize,
+    path: Vec<u32>,
+}
+
+impl Mark {
+    pub fn clear(&mut self) {
+        self.at = 0;
+        self.path.clear();
+    }
+}
+
+/// The program that turns the DOM of `old` into that of `new`. `mark` is a boundary in
+/// `old` (from the diff that produced it, or cleared), and is left at one in `new`.
+pub fn diff(old: &str, new: &str, program: &mut Program, mark: &mut Mark) {
     // Tokens wholly inside the common prefix are the same in both: walk them once, for
-    // the path.
+    // the path (the index of the next child at each level).
     let common = common_prefix(old.as_bytes(), new.as_bytes());
-    let mut olds = Tokens { html: old, at: 0 };
-    let mut resume = 0;
+    let (mut resume, mut path) = if mark.at > 0 && mark.at <= common {
+        (mark.at, std::mem::take(&mut mark.path))
+    } else {
+        (0, vec![0])
+    };
+    let mut olds = Tokens { html: old, at: resume };
     while let Some((_, token)) = olds.next() {
         let whole = match token {
             Token::Text(_) => olds.at < common,
@@ -185,6 +207,9 @@ pub fn diff(old: &str, new: &str, program: &mut Program) {
             Token::Void(_) | Token::Text(_) => *path.last_mut().expect("balanced") += 1,
         }
     }
+    mark.at = resume;
+    mark.path.clear();
+    mark.path.extend_from_slice(&path);
     let mut olds = Tokens { html: old, at: resume };
     let mut news = Tokens { html: new, at: resume };
     loop {
@@ -246,7 +271,7 @@ mod tests {
 
     fn run(old: &str, new: &str) -> (Vec<u32>, String) {
         let mut program = Program::default();
-        diff(old, new, &mut program);
+        diff(old, new, &mut program, &mut Mark::default());
         (program.ops, program.text)
     }
 

@@ -171,6 +171,11 @@ impl Stream {
         (keep, middle)
     }
 
+    /// The text the last heal returned, as UTF-16 units.
+    pub fn healed(&self) -> &[u16] {
+        self.whole.as_deref().unwrap_or(&self.work)
+    }
+
     /// The text after the settled prefix after the line-local escapes.
     fn escaped_tail(&self) -> Units {
         let input = &self.input;
