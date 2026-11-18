@@ -4,6 +4,7 @@
 //! index, slice and comparison is the same; `conformance/remend.mjs` checks the output
 //! against the package.
 
+use std::borrow::Cow;
 use std::cell::OnceCell;
 
 /// JavaScript's `\s` (what `trim()` removes), for a UTF-16 unit or a character.
@@ -199,7 +200,7 @@ impl Stream {
         let input = &self.input;
         let end = stripped_end(input);
         let tail1 = single_tilde(&input[..end], self.settled, self.fence1);
-        comparison_operators(&tail1, 0, self.fence2).0
+        comparison_operators(&tail1, 0, self.fence2).0.into_owned()
     }
 
     /// Heals `input` after the settled prefix into `work` (after the prefix's text);
@@ -266,8 +267,14 @@ impl Stream {
             return false;
         }
         let escaped = single_tilde(delta, 0, self.fence1);
-        let scan2 = TailScan::new(&escaped, self.fence2);
-        if scan2.open_span.is_some() {
+        // The escape usually changes nothing: then the same text gets the same scan.
+        let (span2, fence2) = if matches!(escaped, Cow::Borrowed(_)) && self.fence1 == self.fence2 {
+            (scan1.open_span.is_some(), scan1.open_fence)
+        } else {
+            let scan2 = TailScan::new(&escaped, self.fence2);
+            (scan2.open_span.is_some(), scan2.open_fence)
+        };
+        if span2 {
             return false;
         }
         let (compared, open) = comparison_operators(&escaped, 0, self.fence2);
@@ -280,7 +287,7 @@ impl Stream {
             self.work.truncate(from);
             return false;
         };
-        let fenced = scan1.open_fence.is_some() || scan2.open_fence.is_some();
+        let fenced = scan1.open_fence.is_some() || fence2.is_some();
         if inside && (fenced || prefix.tag_start.is_some() || !prefix.open_brackets.is_empty()) {
             self.work.truncate(from);
             return false;
@@ -289,7 +296,7 @@ impl Stream {
         self.regions.extend_from_slice(&regions);
         self.settled = cut;
         self.fence1 = scan1.open_fence;
-        self.fence2 = scan2.open_fence;
+        self.fence2 = fence2;
         true
     }
 }
@@ -617,7 +624,7 @@ const FENCE_BODY: u8 = 3;
 const CODE_SPAN: u8 = 4;
 const CODE_SPAN_OPEN: u8 = 5;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct OpenFence {
     marker: u16,
     length: usize,
@@ -1830,7 +1837,7 @@ fn skip_completion(ctx: &Ctx<'_>, content: usize, marker_index: usize, rule: u16
 /// single-tilde-handler.ts (`20~25` → `20\~25`) on `text[from..]`, which starts at a
 /// line start with `fence` open and no inline code span: its output for that range.
 /// The escape needs only the units around the tilde and whether it is in code.
-fn single_tilde(text: &[u16], from: usize, fence: Option<OpenFence>) -> Units {
+fn single_tilde(text: &[u16], from: usize, fence: Option<OpenFence>) -> Cow<'_, [u16]> {
     let text = &text[from..];
     // `/([\p{L}\p{N}_])~(?!~)(?=[\p{L}\p{N}_])/gu`: a match is a word code point, a
     // `~`, and a word code point after it (so not a `~`), and its `~` is escaped in
@@ -1842,7 +1849,7 @@ fn single_tilde(text: &[u16], from: usize, fence: Option<OpenFence>) -> Units {
     let mut out: Option<Units> = None;
     let mut copied = 0;
     let mut at = 0;
-    while let Some(offset) = text[at..].iter().position(|&unit| unit == TILDE) {
+    while let Some(offset) = find_unit(&text[at..], TILDE) {
         let tilde = at + offset;
         at = tilde + 1;
         if tilde == 0 || tilde + 1 >= text.len() || text[tilde + 1] == TILDE {
@@ -1867,9 +1874,9 @@ fn single_tilde(text: &[u16], from: usize, fence: Option<OpenFence>) -> Units {
     match out {
         Some(mut out) => {
             out.extend_from_slice(&text[copied..]);
-            out
+            Cow::Owned(out)
         }
-        None => text.to_vec(),
+        None => Cow::Borrowed(text),
     }
 }
 
@@ -1887,11 +1894,11 @@ fn code_point_before(text: &[u16], index: usize) -> u32 {
 /// comparison-operator-handler.ts (`- > 25` → `- \> 25`) on `text[from..]`, which
 /// starts at a line start with `fence` open: its output for that range, and whether
 /// a match was still possible at the range's end (more text could complete one).
-fn comparison_operators(text: &[u16], from: usize, fence: Option<OpenFence>) -> (Units, bool) {
+fn comparison_operators(text: &[u16], from: usize, fence: Option<OpenFence>) -> (Cow<'_, [u16]>, bool) {
     let text = &text[from..];
     let n = text.len();
-    if !text.contains(&GREATER) {
-        return (text.to_vec(), false);
+    if find_unit(text, GREATER).is_none() {
+        return (Cow::Borrowed(text), false);
     }
     let mut open = false;
     // `/^(\s*(?:[-*+]|\d+[.)]) +)>(=?\s*[$]?\d)/gm`: the position of `>` and the end.
@@ -1977,6 +1984,9 @@ fn comparison_operators(text: &[u16], from: usize, fence: Option<OpenFence>) -> 
             None => break,
         }
     }
+    if escapes.is_empty() {
+        return (Cow::Borrowed(text), open);
+    }
     let mut out = Vec::with_capacity(n + escapes.len());
     let mut copied = 0;
     for greater in escapes {
@@ -1985,7 +1995,7 @@ fn comparison_operators(text: &[u16], from: usize, fence: Option<OpenFence>) -> 
         copied = greater;
     }
     out.extend_from_slice(&text[copied..]);
-    (out, open)
+    (Cow::Owned(out), open)
 }
 
 /// html-tag-handler.ts: drops an incomplete trailing tag (`text <custom`).
