@@ -296,13 +296,19 @@ impl Stream {
         if open {
             return false;
         }
+        // Neither escape changed the text and the fences agree: the prefix's own scan of
+        // it would be this one.
+        let unchanged = matches!(escaped, Cow::Borrowed(_))
+            && matches!(compared, Cow::Borrowed(_))
+            && self.fence1 == self.prefix.fence;
+        let open_fence = scan1.open_fence;
         let from = self.work.len();
         self.work.extend_from_slice(&compared);
-        let Some((prefix, regions)) = self.prefix.extended(&self.work, from, &self.regions) else {
+        let Some((prefix, regions)) = self.prefix.extended(&self.work, from, &self.regions, unchanged.then_some(scan1)) else {
             self.work.truncate(from);
             return false;
         };
-        let fenced = scan1.open_fence.is_some() || fence2.is_some();
+        let fenced = open_fence.is_some() || fence2.is_some();
         if inside && (fenced || prefix.tag_start.is_some() || !prefix.open_brackets.is_empty()) {
             self.work.truncate(from);
             return false;
@@ -311,7 +317,7 @@ impl Stream {
         self.regions.extend_from_slice(&regions);
         drop(TailScan { regions, open_fence: None, open_span: None });
         self.settled = cut;
-        self.fence1 = scan1.open_fence;
+        self.fence1 = open_fence;
         self.fence2 = fence2;
         true
     }
@@ -1641,8 +1647,8 @@ impl Settled {
     /// This prefix grown to `text` (whose first `from` units are this prefix), with
     /// the regions of `text[from..]` for [`Settled::commit`]; `None` when `text` does
     /// not end where a prefix can (an inline code span or math still open).
-    fn extended(&self, text: &[u16], from: usize, head: &[u8]) -> Option<(Settled, Vec<u8>)> {
-        let scan = TailScan::new(&text[from..], self.fence);
+    fn extended(&self, text: &[u16], from: usize, head: &[u8], scan: Option<TailScan>) -> Option<(Settled, Vec<u8>)> {
+        let scan = scan.unwrap_or_else(|| TailScan::new(&text[from..], self.fence));
         if scan.open_span.is_some() {
             return None;
         }
