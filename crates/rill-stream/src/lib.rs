@@ -490,9 +490,8 @@ mod wasm {
         /// After a reset: the whole HTML.
         #[wasm_bindgen(getter)]
         pub fn html(&self) -> String {
-            let mut html = self.0.addition.clone();
-            html.push_str(&self.0.pending);
-            html
+            let (addition, pending) = self.0.html();
+            [addition, pending].concat()
         }
         /// After a patch: where the edit's opcodes (see `diff::op`) are in [`memory`], as
         /// a `u32` index and count. Read them before the next call into the module.

@@ -20,12 +20,13 @@ pub struct Session {
     tail: String,
     /// The repaired text's length after the last update.
     healed: usize,
-    pub addition: String,
-    pub pending: String,
-    /// The open tail's HTML as the DOM shows it.
+    /// This update's HTML: the blocks that became final (`..split`), then the open ones.
+    html: String,
+    split: usize,
+    /// The last update's HTML: `shown[shown_from..]` is the open tail as the DOM shows it.
     shown: String,
-    scratch: String,
-    /// The DOM edit for a `Patch`, from `shown` to `addition` then `pending`.
+    shown_from: usize,
+    /// The DOM edit for a `Patch`, from the shown tail to `html`.
     pub program: Program,
     /// Where the next diff may start walking `shown`.
     mark: Mark,
@@ -88,19 +89,14 @@ impl Session {
             Ok(()) => {
                 self.program.clear();
                 if outcome == Outcome::Patch {
-                    let mut next = std::mem::take(&mut self.scratch);
-                    next.clear();
-                    next.push_str(&self.addition);
-                    next.push_str(&self.pending);
-                    diff(&self.shown, &next, &mut self.program, &mut self.mark);
-                    self.scratch = next;
+                    diff(&self.shown[self.shown_from..], &self.html, &mut self.program, &mut self.mark);
                 }
-                // The mark is in `addition + pending`; `shown` becomes `pending`.
-                if outcome != Outcome::Patch || !self.addition.is_empty() {
+                // The mark is in `html`; the next diff starts from `html[split..]`.
+                if outcome != Outcome::Patch || self.split != 0 {
                     self.mark.clear();
                 }
-                self.shown.clear();
-                self.shown.push_str(&self.pending);
+                std::mem::swap(&mut self.shown, &mut self.html);
+                self.shown_from = self.split;
                 outcome
             }
             Err(Fallback) => {
@@ -110,14 +106,17 @@ impl Session {
         }
     }
 
+    /// The HTML of the last update: the blocks that became final, then the open ones.
+    pub fn html(&self) -> (&str, &str) {
+        self.shown.split_at(self.shown_from)
+    }
+
     fn render_tail(&mut self) -> crate::Result {
-        self.addition.clear();
-        self.pending.clear();
+        self.html.clear();
         // What comes before the last block is final.
-        let (source, html, nodes) = render_split(&self.tail, &mut self.pending)?;
+        let (source, html, nodes) = render_split(&self.tail, &mut self.html)?;
         self.final_nodes = nodes;
-        self.addition.push_str(&self.pending[..html]);
-        self.pending.drain(..html);
+        self.split = html;
         self.stable += self.tail[..source].encode_utf16().count();
         self.tail.drain(..source);
         Ok(())
