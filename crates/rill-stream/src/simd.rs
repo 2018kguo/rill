@@ -5,6 +5,24 @@
 //! `i8x16.swizzle`, NEON's `tbl`). Every high nibble gets its own bit, so the test is
 //! exact, and bytes from 0x80 up (UTF-8) never match.
 
+/// The first `unit` (ASCII) in `text`: memchr over the bytes, keeping a match that is
+/// a unit's low byte with a zero high byte.
+pub fn find_unit(text: &[u16], unit: u16) -> Option<usize> {
+    debug_assert!(unit < 0x80);
+    // SAFETY: any u16 slice is readable as twice as many bytes.
+    let bytes = unsafe { core::slice::from_raw_parts(text.as_ptr().cast::<u8>(), text.len() * 2) };
+    let mut at = 0;
+    while let Some(offset) = memchr::memchr(unit as u8, &bytes[at..]) {
+        let index = at + offset;
+        let (low, high) = if cfg!(target_endian = "little") { (0, 1) } else { (1, 0) };
+        if index % 2 == low && bytes[index - low + high] == 0 {
+            return Some(index / 2);
+        }
+        at = index + 1;
+    }
+    None
+}
+
 /// Nibble tables for a set of ASCII bytes.
 #[derive(Clone, Copy)]
 pub struct ByteSet {

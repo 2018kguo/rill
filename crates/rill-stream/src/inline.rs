@@ -390,7 +390,7 @@ fn skip_spaces(units: &[u16], mut at: usize) -> usize {
 fn closing_backticks(units: &[u16], from: usize, run: usize) -> Option<usize> {
     const TICK: u16 = b'`' as u16;
     let mut at = from;
-    while let Some(offset) = units[at..].iter().position(|&u| u == TICK) {
+    while let Some(offset) = crate::simd::find_unit(&units[at..], TICK) {
         at += offset;
         let length = count(units, at, TICK);
         if length == run {

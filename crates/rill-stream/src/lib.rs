@@ -174,7 +174,7 @@ fn run(text: &[u16], unit: u16) -> usize {
 }
 
 fn newline(text: &[u16], from: usize) -> usize {
-    text[from..].iter().position(|&unit| unit == NL).map_or(text.len(), |at| from + at)
+    simd::find_unit(&text[from..], NL).map_or(text.len(), |at| from + at)
 }
 
 /// Leading spaces (tabs were ruled out).
