@@ -1607,6 +1607,27 @@ const RUNS: [&[u16]; 4] = [
     &[STAR, STAR, STAR],
 ];
 
+/// A bit per marker [`Settled::extended`] counts (0 for other units).
+fn marker_bit(unit: u16) -> u16 {
+    match unit {
+        STAR => 1,
+        UNDERSCORE => 2,
+        TILDE => 4,
+        DOLLAR => 8,
+        CLOSE_PAREN => 16,
+        GREATER => 32,
+        LESS => 64,
+        OPEN_BRACKET => 128,
+        CLOSE_BRACKET => 256,
+        _ => 0,
+    }
+}
+
+/// The markers in `text`, as [`marker_bit`]s.
+fn seen_markers(text: &[u16]) -> u16 {
+    text.iter().fold(0, |seen, &unit| seen | marker_bit(unit))
+}
+
 fn later(old: Option<usize>, new: Option<usize>) -> Option<usize> {
     new.or(old)
 }
@@ -1628,35 +1649,51 @@ impl Settled {
         // The mask from a context of none is what `View` builds (only text with math
         // delimiters can set it).
         view.math.set(mask).expect("a new view");
+        // Which markers the new text holds at all: each count below only moves on its
+        // own marker, so one pass decides which of them to run.
+        let seen = seen_markers(&text[from..]);
+        let has = |units: &[u16]| units.iter().any(|&unit| seen & marker_bit(unit) != 0);
+        let (star, under, tilde) = (has(&[STAR]), has(&[UNDERSCORE]), has(&[TILDE]));
         let mut next = Settled {
             len: text.len(),
             fence: scan.open_fence,
             math,
-            pairs: [0; 3],
-            single_asterisks: count_single_asterisks(&view, from, self.single_asterisks),
-            single_underscores: self.single_underscores + count_single_underscores(&view, from),
-            triple_asterisks: self.triple_asterisks + count_triple_asterisks(&view, from),
+            pairs: self.pairs,
+            single_asterisks: if star {
+                count_single_asterisks(&view, from, self.single_asterisks)
+            } else {
+                self.single_asterisks
+            },
+            single_underscores: self.single_underscores
+                + if under { count_single_underscores(&view, from) } else { 0 },
+            triple_asterisks: self.triple_asterisks
+                + if star { count_triple_asterisks(&view, from) } else { 0 },
             double_underscore_odd: self.double_underscore_odd
-                ^ unmatched_double_underscore(&view, from),
+                ^ (under && unmatched_double_underscore(&view, from)),
             first_single_asterisk: self
                 .first_single_asterisk
-                .or_else(|| first_single_asterisk(&view, from)),
+                .or_else(|| if star { first_single_asterisk(&view, from) } else { None }),
             first_single_underscore: self
                 .first_single_underscore
-                .or_else(|| first_single_underscore(&view, from)),
+                .or_else(|| if under { first_single_underscore(&view, from) } else { None }),
             first_double_star: self
                 .first_double_star
-                .or_else(|| index_of(text, &[STAR, STAR], from)),
-            first_double_dollar: self
-                .first_double_dollar
-                .or_else(|| index_of(text, &[DOLLAR, DOLLAR], from)),
-            last_unit: [None; 3],
-            last_run: [None; 4],
-            last_close_paren: later(
-                self.last_close_paren,
-                last_index_from(text, &[CLOSE_PAREN], from),
-            ),
-            last_greater: later(self.last_greater, last_index_from(text, &[GREATER], from)),
+                .or_else(|| if star { index_of(text, &[STAR, STAR], from) } else { None }),
+            first_double_dollar: self.first_double_dollar.or_else(|| {
+                if has(&[DOLLAR]) { index_of(text, &[DOLLAR, DOLLAR], from) } else { None }
+            }),
+            last_unit: self.last_unit,
+            last_run: self.last_run,
+            last_close_paren: if has(&[CLOSE_PAREN]) {
+                later(self.last_close_paren, last_index_from(text, &[CLOSE_PAREN], from))
+            } else {
+                self.last_close_paren
+            },
+            last_greater: if has(&[GREATER]) {
+                later(self.last_greater, last_index_from(text, &[GREATER], from))
+            } else {
+                self.last_greater
+            },
             last_content: later(
                 self.last_content,
                 text[from..]
@@ -1666,25 +1703,36 @@ impl Settled {
             ),
             open_brackets: Vec::new(),
             last_link: self.last_link,
-            tag_start: None,
+            tag_start: self.tag_start,
         };
         for (index, unit) in [STAR, TILDE, DOLLAR].into_iter().enumerate() {
-            next.pairs[index] = self.pairs[index] + count_double_pairs(&view, unit, from);
+            if has(&[unit]) {
+                next.pairs[index] = self.pairs[index] + count_double_pairs(&view, unit, from);
+            }
         }
-        for (index, unit) in MARKERS.into_iter().enumerate() {
-            next.last_unit[index] =
-                later(self.last_unit[index], last_index_from(text, &[unit], from));
+        for (index, (unit, present)) in [(STAR, star), (UNDERSCORE, under), (TILDE, tilde)].into_iter().enumerate() {
+            if present {
+                next.last_unit[index] = later(self.last_unit[index], last_index_from(text, &[unit], from));
+            }
         }
         for (index, run) in RUNS.into_iter().enumerate() {
-            next.last_run[index] = later(self.last_run[index], last_index_from(text, run, from));
+            if has(&run[..1]) {
+                next.last_run[index] = later(self.last_run[index], last_index_from(text, run, from));
+            }
         }
-        let mut open = Brackets::new(&self.open_brackets);
-        pair_brackets(text, from, &mut open, &mut next.last_link);
-        next.open_brackets = open.into_open();
-        next.tag_start = match last_index_from(text, &[GREATER], from) {
-            Some(greater) => first_tag_start(&view, greater + 1),
-            None => self.tag_start.or_else(|| first_tag_start(&view, from)),
-        };
+        if has(&[OPEN_BRACKET, CLOSE_BRACKET]) {
+            let mut open = Brackets::new(&self.open_brackets);
+            pair_brackets(text, from, &mut open, &mut next.last_link);
+            next.open_brackets = open.into_open();
+        } else {
+            next.open_brackets.extend_from_slice(&self.open_brackets);
+        }
+        if has(&[GREATER]) {
+            let greater = last_index_from(text, &[GREATER], from).expect("a `>`");
+            next.tag_start = first_tag_start(&view, greater + 1);
+        } else if has(&[LESS]) {
+            next.tag_start = self.tag_start.or_else(|| first_tag_start(&view, from));
+        }
         let mut scan = scan;
         Some((next, std::mem::take(&mut scan.regions)))
     }

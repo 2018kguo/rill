@@ -60,20 +60,28 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
     return template.content.firstChild as Element;
   });
   const utf16 = new TextDecoder("utf-16le");
+  const state: Root = { element: root, tags, finals: 0, count: 0, u32: new Uint32Array(0), strings: "", from: 0 };
   let text = "";
-  /** Root children before the open tail. */
-  let finals = 0;
-  let input = new Uint16Array(0);
-  let header = new Uint32Array(0);
+  /** Views of all of memory, made again only when it grows (which detaches them). */
+  let u16 = new Uint16Array(0);
+  let input = 0;
+  let inputLength = 0;
+  let header = 0;
+  const views = () => {
+    if (state.u32.buffer !== memory.buffer) {
+      state.u32 = new Uint32Array(memory.buffer);
+      u16 = new Uint16Array(memory.buffer);
+    }
+  };
   /** Writes `next[from..]` into the module's input buffer: its length. */
   const write = (next: string, from: number) => {
     const length = next.length - from;
-    // Memory growth detaches the view; the buffer itself stays where it is.
-    if (input.length < length || input.buffer !== memory.buffer) {
-      const capacity = Math.max(length, input.length, 4096);
-      input = new Uint16Array(memory.buffer, session.inputAt(capacity) * 2, capacity);
+    if (inputLength < length) {
+      inputLength = Math.max(length, 2 * inputLength, 4096);
+      input = session.inputAt(inputLength);
     }
-    for (let at = 0; at < length; at += 1) input[at] = next.charCodeAt(from + at);
+    views();
+    for (let at = 0; at < length; at += 1) u16[input + at] = next.charCodeAt(from + at);
     return length;
   };
   return {
@@ -85,20 +93,23 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
         : session.updateInput(write(next, 0), true);
       text = next;
       if (outcome === FALLBACK) return false;
-      const buffer = memory.buffer;
-      if (header.buffer !== buffer) header = new Uint32Array(buffer, session.headerAt() * 4, 9);
-      const words = new Uint32Array(buffer, header[3]! * 4, header[4]);
+      views();
+      header ||= session.headerAt();
+      const u32 = state.u32;
+      const words = u32[header + 3]!;
       // Only the text the edit refers to: from its first unit on.
-      const from = header[7]!;
-      const strings = utf16.decode(new Uint16Array(buffer, header[5]! * 2 + from * 2, header[6]! - from));
+      const from = u32[header + 7]!;
+      const start = u32[header + 5]! + from;
+      state.strings = utf16.decode(u16.subarray(start, start + u32[header + 6]! - from));
+      state.from = from;
       if (outcome === PATCH) {
-        apply(root, finals, new Uint32Array(buffer, header[1]! * 4, header[2]), words, strings, from, tags);
+        apply(state, u32[header + 1]!, u32[header + 2]!, words);
       } else {
         root.textContent = "";
-        finals = 0;
-        build(root, words, 0, words.length, strings, 0, tags);
+        state.finals = 0;
+        state.count = build(state, root, words, words + u32[header + 4]!, 0);
       }
-      finals += header[8]!;
+      state.finals += u32[header + 8]!;
       return true;
     },
     dispose() {
@@ -107,92 +118,108 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
   };
 }
 
+/** The DOM side's state. */
+type Root = {
+  element: Element;
+  /** An element of each tag id, to clone. */
+  tags: Element[];
+  /** Root children before the open tail, and in all. */
+  finals: number;
+  count: number;
+  /** All of memory. */
+  u32: Uint32Array;
+  /** The rendering's text from unit `from` on. */
+  strings: string;
+  from: number;
+};
+
 /** The node `index` places into `parent`, counting a run of adjacent text nodes as one. */
-function child(parent: Node, index: number): ChildNode | undefined {
+function child(parent: Node, index: number): ChildNode | null {
   let node = parent.firstChild;
   for (; node !== null && index > 0; index -= 1) {
     if (node.nodeType === 3) while (node.nextSibling?.nodeType === 3) node = node.nextSibling;
     node = node.nextSibling;
   }
-  return node ?? undefined;
+  return node;
 }
 
-/**
- * Runs an edit program against the tail of `root` (from child `finals` on). `strings` is
- * the rendering's text from unit `from` on.
- */
-function apply(
-  root: Element,
-  finals: number,
-  ops: Uint32Array,
-  words: Uint32Array,
-  strings: string,
-  from: number,
-  tags: Element[],
-) {
-  const document = root.ownerDocument;
-  let at = 0;
-  while (at < ops.length) {
-    const opcode = ops[at]!;
-    const depth = ops[at + 1]!;
+/** The tail's root child `index` (from the end: the tail is the last block or two). */
+function tailChild(root: Root, index: number): ChildNode | null {
+  let node = root.element.lastChild;
+  for (let steps = root.count - root.finals - 1 - index; steps > 0 && node !== null; steps -= 1) node = node.previousSibling;
+  return node;
+}
+
+/** Runs the edit program at `u32[ops..ops + length]` against the open tail. */
+function apply(root: Root, ops: number, length: number, words: number) {
+  const { u32, element } = root;
+  const document = element.ownerDocument;
+  const end = ops + length;
+  let at = ops;
+  while (at < end) {
+    const opcode = u32[at]!;
+    const depth = u32[at + 1]!;
     at += 2;
-    // The node at the path (depth 0: the root itself); a REMOVE's path may end one past
-    // its parent's last child. Blocks at the root are elements: index them directly.
-    let node: Node | undefined = root;
-    const chain: Node[] = [];
+    // The node at the path (depth 0: the root itself) and its parent; a REMOVE's path
+    // may end one past its parent's last child.
+    let parent: Node = element;
+    let node: Node | null = element;
     for (let level = 0; level < depth; level += 1) {
-      chain.push(node!);
-      node = level === 0 ? root.childNodes[finals + ops[at]!] : child(node!, ops[at + level]!);
+      parent = node!;
+      const index = u32[at + level]!;
+      node = level === 0 ? (index < root.count - root.finals ? tailChild(root, index) : null) : child(parent, index);
     }
     at += depth;
     if (opcode === REMOVE) {
       // The node, its later siblings, and the later siblings of each ancestor.
-      let level = depth;
-      let next = (node ?? null) as ChildNode | null;
-      while (level > 0) {
-        const parent = chain[level - 1]!;
+      let next = node as ChildNode | null;
+      for (;;) {
         while (next !== null) {
           const after: ChildNode | null = next.nextSibling;
           parent.removeChild(next);
+          if (parent === element) root.count -= 1;
           next = after;
         }
-        level -= 1;
-        next = level > 0 ? (chain[level]!.nextSibling as ChildNode | null) : null;
+        if (parent === element) break;
+        next = (parent as ChildNode).nextSibling;
+        parent = parent.parentNode!;
       }
     } else if (opcode === APPEND) {
       let last = node as Node;
       while (last.nextSibling?.nodeType === 3) last = last.nextSibling;
-      const value = strings.slice(ops[at]! - from, ops[at + 1]! - from);
+      const value = root.strings.slice(u32[at]! - root.from, u32[at + 1]! - root.from);
       last.parentNode!.insertBefore(document.createTextNode(value), last.nextSibling);
       at += 2;
     } else {
-      build(node as Element, words, ops[at]!, ops[at + 1]!, strings, ops[at + 2]! - from, tags);
+      const added = build(root, node as Element, words + u32[at]!, words + u32[at + 1]!, u32[at + 2]! - root.from);
+      if (depth === 0) root.count += added;
       at += 3;
     }
   }
 }
 
-/** Builds the tokens `[start, end)` (their text from `strings[text]`) at the end of `parent`. */
-function build(parent: Element, words: Uint32Array, start: number, end: number, strings: string, text: number, tags: Element[]) {
+/**
+ * Builds the tokens `u32[start..end]` (their text from `strings[text]`) at the end of
+ * `parent`: how many nodes it added to `parent` itself.
+ */
+function build(root: Root, parent: Element, start: number, end: number, text: number) {
+  const { u32, strings, tags } = root;
   let node: Node = parent;
+  let added = 0;
   for (let at = start; at < end; at += 1) {
-    const word = words[at]!;
+    const word = u32[at]!;
     const id = word >>> 2;
-    switch (word & 3) {
-      case OPEN:
-        node = node.appendChild(clone(tags, id));
-        break;
-      case CLOSE:
-        node = node.parentNode!;
-        break;
-      case VOID:
-        node.appendChild(clone(tags, id));
-        break;
-      default:
-        (node as Element).append(strings.slice(text, text + id));
-        text += id;
+    const kind = word & 3;
+    if (node === parent && kind !== CLOSE) added += 1;
+    if (kind === OPEN) node = node.appendChild(clone(tags, id));
+    else if (kind === CLOSE) node = node.parentNode!;
+    else if (kind === VOID) node.appendChild(clone(tags, id));
+    else {
+      (node as Element).append(strings.slice(text, text + id));
+      text += id;
     }
   }
+  return added;
 }
 
 function clone(tags: Element[], id: number): Node {

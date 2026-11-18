@@ -150,8 +150,10 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
                 old_word += 1;
                 word += 1;
             }
-            (a, _) => {
-                replace(a.is_some(), new, word, text, &mut path, program);
+            (_, _) => {
+                // Nothing to remove when the old rendering only closes elements from here.
+                let remove = old.words[old_word..].iter().any(|&word| word & 3 != kind::CLOSE);
+                replace(remove, new, word, text, &mut path, program);
                 break;
             }
         }
@@ -243,7 +245,7 @@ mod tests {
     #[test]
     fn growing_text_then_more_after_it() {
         let ops = run(&para(&[("a", true)]), &para(&[("ab", true), (" c", false)]));
-        assert_eq!(ops, [op::APPEND, 3, 0, 0, 0, 1, 2, op::REMOVE, 2, 0, 1, op::BUILD, 1, 0, 4, 5, 2]);
+        assert_eq!(ops, [op::APPEND, 3, 0, 0, 0, 1, 2, op::BUILD, 1, 0, 4, 5, 2]);
     }
 
     #[test]
