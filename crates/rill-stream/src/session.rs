@@ -2,15 +2,16 @@
 //! what can still change.
 //!
 //! The text is repaired as Streamdown repairs it (remend, kept incremental). Blocks
-//! before the last blank line are final: their HTML is handed over once, as the
-//! update's `addition`, and never rendered again. The rest is rendered on every update
-//! as `pending`, to replace the previous `pending`.
+//! before the last open one are final: they are rendered once and never again. The
+//! rest is rendered on every update (as tokens, see `tokens`) and diffed against what
+//! the DOM shows into a short edit program.
 
 use rill_remend::Stream as Remend;
 
-use crate::diff::{Mark, Program, diff};
+use crate::diff::{Mark, Program, Tokens, diff};
 use crate::inline::Inline;
-use crate::{Fallback, render_split_with};
+use crate::tokens::Out;
+use crate::{Fallback, Split, render_split};
 
 #[derive(Default)]
 pub struct Session {
@@ -21,12 +22,13 @@ pub struct Session {
     tail: String,
     /// The repaired text's length after the last update.
     healed: usize,
-    /// This update's HTML: the blocks that became final (`..split`), then the open ones.
-    html: String,
-    split: usize,
-    /// The last update's HTML: `shown[shown_from..]` is the open tail as the DOM shows it.
-    shown: String,
-    shown_from: usize,
+    /// This update's rendering: the blocks that became final (before `split`), then the
+    /// open ones.
+    next: Out,
+    split: Split,
+    /// The last update's rendering: from `shown_from` on, the open tail as the DOM shows it.
+    shown: Out,
+    shown_from: Split,
     /// The DOM edit for a `Patch`, from the shown tail to `html`.
     pub program: Program,
     /// Where the next diff may start walking `shown`.
@@ -102,13 +104,18 @@ impl Session {
             Ok(()) => {
                 self.program.clear();
                 if outcome == Outcome::Patch {
-                    diff(&self.shown[self.shown_from..], &self.html, &mut self.program, &mut self.mark);
+                    let old = Tokens {
+                        words: &self.shown.words[self.shown_from.words..],
+                        text: &self.shown.text[self.shown_from.text..],
+                    };
+                    let new = Tokens { words: &self.next.words, text: &self.next.text };
+                    diff(old, new, &mut self.program, &mut self.mark);
                 }
-                // The mark is in `html`; the next diff starts from `html[split..]`.
-                if outcome != Outcome::Patch || self.split != 0 {
+                // The mark is in `next`; the next diff starts from `next` after `split`.
+                if outcome != Outcome::Patch || self.split.words != 0 {
                     self.mark.clear();
                 }
-                std::mem::swap(&mut self.shown, &mut self.html);
+                std::mem::swap(&mut self.shown, &mut self.next);
                 self.shown_from = self.split;
                 outcome
             }
@@ -119,19 +126,26 @@ impl Session {
         }
     }
 
-    /// The HTML of the last update: the blocks that became final, then the open ones.
-    pub fn html(&self) -> (&str, &str) {
-        self.shown.split_at(self.shown_from)
+    /// The last update's rendering (the edit program's positions are in it).
+    pub fn rendering(&self) -> &Out {
+        &self.shown
+    }
+
+    /// The last update's HTML (the blocks that became final, then the open ones).
+    pub fn html(&self) -> String {
+        let mut html = String::new();
+        crate::tokens::to_html(&self.shown.words, &self.shown.text, &mut html);
+        html
     }
 
     fn render_tail(&mut self) -> crate::Result {
-        self.html.clear();
+        self.next.clear();
         // What comes before the last block is final.
-        let (source, html, nodes) = render_split_with(&self.tail, &mut self.html, &mut self.inline)?;
-        self.final_nodes = nodes;
-        self.split = html;
-        self.stable += self.tail[..source].encode_utf16().count();
-        self.tail.drain(..source);
+        let split = render_split(&self.tail, &mut self.next, &mut self.inline)?;
+        self.final_nodes = split.nodes;
+        self.split = split;
+        self.stable += self.tail[..split.source].encode_utf16().count();
+        self.tail.drain(..split.source);
         Ok(())
     }
 }

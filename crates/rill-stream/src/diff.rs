@@ -1,110 +1,40 @@
 //! The DOM edit from one rendering of the open tail to the next, as a small program
 //! for js/src/stream-dom.ts.
 //!
-//! Both renderings are this crate's own HTML, so the DOM holds exactly the old one's
-//! nodes. Walking the two token by token finds the first difference, with its node's
-//! path (child indices, the first relative to the tail's first node). The usual update
-//! only lengthens one text node: that is a single `append` of the new characters. Any
-//! other difference removes the old nodes from there on and inserts the new HTML from
-//! there on, one fragment per level, deepest first.
+//! Both renderings are token streams (see `tokens`), so the DOM holds exactly the old
+//! one's nodes. Walking the two token by token finds the first difference, with its
+//! node's path (child indices, the first relative to the tail's first node). The usual
+//! update lengthens one text node: an `APPEND` of the new characters, and the walk goes
+//! on. Any other difference removes the old nodes from there on and builds the new
+//! tokens from there on, one `BUILD` per level, deepest first. Both refer to the new
+//! tokens and text in place: nothing is copied.
+
+use crate::tokens::kind;
 
 /// Opcodes.
 pub mod op {
-    /// `depth, path..., text`: append `text` to the text node at the path.
+    /// `depth, path..., start, end`: append the new text's units `[start, end)` after the
+    /// text node at the path.
     pub const APPEND: u32 = 0;
     /// `depth, path...`: remove the node at the path, the siblings after it, and the
     /// siblings after each of its ancestors (up to the tail).
     pub const REMOVE: u32 = 1;
-    /// `depth, path..., count, items...`: build `count` items at the end of the element
-    /// at the path (depth 0: the root). An item is one word, `kind | id << 2`: `OPEN`
-    /// an element like tag `id` (see `Program::tags`) and go into it, `CLOSE` it, or a
-    /// `VOID` element; or `TEXT` then a string: a text node.
+    /// `depth, path..., start, end, text`: build the new tokens `[start, end)`, their text
+    /// from unit `text`, at the end of the element at the path (depth 0: the root).
     pub const BUILD: u32 = 2;
-    /// `depth, path..., text`: append a text node holding `text` to the element at the path.
-    pub const INSERT_TEXT: u32 = 3;
 }
 
-/// `BUILD` item kinds.
-pub mod item {
-    pub const OPEN: u32 = 0;
-    pub const CLOSE: u32 = 1;
-    pub const VOID: u32 = 2;
-    pub const TEXT: u32 = 3;
-}
-
-/// The program: opcodes with their operands, strings as `[start, end)` UTF-16 ranges in
-/// `text`.
+/// The program, and the lowest text unit it refers to.
 #[derive(Default)]
 pub struct Program {
     pub ops: Vec<u32>,
-    pub text: String,
-    utf16: u32,
-    /// Every distinct open tag built so far in the session; an item's `id` indexes it.
-    tags: Vec<Box<str>>,
-    /// The tags new this update, as string ranges (the DOM side makes one element of
-    /// each, to clone).
-    pub defs: Vec<u32>,
+    pub text_from: u32,
 }
 
 impl Program {
     pub fn clear(&mut self) {
         self.ops.clear();
-        self.text.clear();
-        self.utf16 = 0;
-        self.defs.clear();
-    }
-
-    fn tag(&mut self, tag: &str) -> u32 {
-        if let Some(id) = self.tags.iter().position(|known| **known == *tag) {
-            return id as u32;
-        }
-        self.tags.push(tag.into());
-        let units = tag.len() as u32; // ASCII markup
-        self.text.push_str(tag);
-        self.defs.push(self.utf16);
-        self.defs.push(self.utf16 + units);
-        self.utf16 += units;
-        (self.tags.len() - 1) as u32
-    }
-
-    fn string(&mut self, value: &str) {
-        let units = value.encode_utf16().count() as u32;
-        self.text.push_str(value);
-        self.ops.push(self.utf16);
-        self.ops.push(self.utf16 + units);
-        self.utf16 += units;
-    }
-
-    /// Inserts `html` at the end of the element at `path`: as a text node when it is text.
-    fn insert(&mut self, path: &[u32], html: &str) {
-        if !html.contains('<') {
-            self.path(op::INSERT_TEXT, path);
-            self.string(&decode(html));
-            return;
-        }
-        self.path(op::BUILD, path);
-        let count_at = self.ops.len();
-        self.ops.push(0);
-        let mut count = 0;
-        for (_, token) in (Tokens { html, at: 0 }) {
-            count += 1;
-            match token {
-                Token::Open(tag) => {
-                    let id = self.tag(tag);
-                    self.ops.push(item::OPEN | id << 2);
-                }
-                Token::Close => self.ops.push(item::CLOSE),
-                Token::Void(tag) => {
-                    let id = self.tag(tag);
-                    self.ops.push(item::VOID | id << 2);
-                }
-                Token::Text(text) => {
-                    self.ops.push(item::TEXT);
-                    self.string(&decode(text));
-                }
-            }
-        }
-        self.ops[count_at] = count;
+        self.text_from = u32::MAX;
     }
 
     fn path(&mut self, opcode: u32, path: &[u32]) {
@@ -112,86 +42,18 @@ impl Program {
         self.ops.push(path.len() as u32);
         self.ops.extend_from_slice(path);
     }
-}
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Token<'a> {
-    Open(&'a str),
-    Close,
-    Void(&'a str),
-    Text(&'a str),
-}
-
-struct Tokens<'a> {
-    html: &'a str,
-    at: usize,
-}
-
-fn void(tag: &str) -> bool {
-    let name = tag.as_bytes();
-    let is = |n: &[u8]| name.len() > n.len() + 1 && &name[1..=n.len()] == n && matches!(name[n.len() + 1], b' ' | b'>');
-    is(b"br") || is(b"hr") || is(b"img") || is(b"input")
-}
-
-impl<'a> Iterator for Tokens<'a> {
-    type Item = (usize, Token<'a>);
-    fn next(&mut self) -> Option<Self::Item> {
-        let bytes = self.html.as_bytes();
-        let start = self.at;
-        if start >= bytes.len() {
-            return None;
-        }
-        if bytes[start] == b'<' {
-            // This crate escapes `>` in attribute values: the tag ends at the first one.
-            let end = memchr::memchr(b'>', &bytes[start..]).map_or(bytes.len(), |at| start + at + 1);
-            self.at = end;
-            let tag = &self.html[start..end];
-            let token = if bytes[start + 1] == b'/' {
-                Token::Close
-            } else if void(tag) {
-                Token::Void(tag)
-            } else {
-                Token::Open(tag)
-            };
-            return Some((start, token));
-        }
-        let end = memchr::memchr(b'<', &bytes[start..]).map_or(bytes.len(), |at| start + at);
-        self.at = end;
-        Some((start, Token::Text(&self.html[start..end])))
+    fn text(&mut self, at: usize) {
+        self.text_from = self.text_from.min(at as u32);
     }
 }
 
-/// The length of the longest common prefix, 16 bytes at a time.
-fn common_prefix(a: &[u8], b: &[u8]) -> usize {
-    let length = a.len().min(b.len());
-    let mut at = 0;
-    while at + 16 <= length {
-        let x = u128::from_ne_bytes(a[at..at + 16].try_into().expect("16"));
-        let y = u128::from_ne_bytes(b[at..at + 16].try_into().expect("16"));
-        if x != y {
-            break;
-        }
-        at += 16;
-    }
-    while at < length && a[at] == b[at] {
-        at += 1;
-    }
-    at
-}
-
-fn decode(text: &str) -> std::borrow::Cow<'_, str> {
-    if text.contains('&') {
-        text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").into()
-    } else {
-        text.into()
-    }
-}
-
-/// A token boundary in the last `new`, with the path there: the next diff, when its
-/// `old` is that `new`, starts walking from it.
+/// A token boundary in the last new rendering (word and text unit), with the path there:
+/// the next diff, when its old rendering is that one, starts walking from it.
 #[derive(Default)]
 pub struct Mark {
-    at: usize,
+    word: usize,
+    text: usize,
     path: Vec<u32>,
     /// A buffer for the next diff's walk.
     spare: Vec<u32>,
@@ -199,145 +61,198 @@ pub struct Mark {
 
 impl Mark {
     pub fn clear(&mut self) {
-        self.at = 0;
+        self.word = 0;
+        self.text = 0;
         self.path.clear();
     }
 }
 
-/// The program that turns the DOM of `old` into that of `new`. `mark` is a boundary in
-/// `old` (from the diff that produced it, or cleared), and is left at one in `new`.
-pub fn diff(old: &str, new: &str, program: &mut Program, mark: &mut Mark) {
-    // Tokens wholly inside the common prefix are the same in both: walk them once, for
-    // the path (the index of the next child at each level).
-    let common = common_prefix(old.as_bytes(), new.as_bytes());
-    // Two buffers that live in the mark: the walk's path and the mark's own.
+/// A rendering: tokens and their text.
+#[derive(Clone, Copy)]
+pub struct Tokens<'a> {
+    pub words: &'a [u32],
+    pub text: &'a [u16],
+}
+
+fn step(path: &mut Vec<u32>, word: u32) {
+    match word & 3 {
+        kind::OPEN => path.push(0),
+        kind::CLOSE => {
+            path.pop();
+            *path.last_mut().expect("balanced") += 1;
+        }
+        _ => *path.last_mut().expect("balanced") += 1,
+    }
+}
+
+/// The program that turns the DOM of `old` into that of `new` (positions in `program`
+/// are in `new`). `mark` is a boundary in `old` (from the diff that produced it, or
+/// cleared), and is left at the last boundary before the first difference in `new`.
+pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut Mark) {
     let mut path = std::mem::take(&mut mark.spare);
     path.clear();
-    let mut resume = mark.at;
-    if resume == 0 || resume > common {
-        resume = 0;
-        path.push(0);
-    } else {
+    let (mut word, mut text) = (mark.word, mark.text);
+    // The mark holds when everything before it is the same in both.
+    let holds = word > 0
+        && word <= old.words.len().min(new.words.len())
+        && text <= old.text.len().min(new.text.len())
+        && old.words[..word] == new.words[..word]
+        && old.text[..text] == new.text[..text];
+    if holds {
         path.extend_from_slice(&mark.path);
+    } else {
+        (word, text) = (0, 0);
+        path.push(0);
     }
-    let mut olds = Tokens { html: old, at: resume };
-    while let Some((_, token)) = olds.next() {
-        let whole = match token {
-            Token::Text(_) => olds.at < common,
-            _ => olds.at <= common,
-        };
-        if !whole {
-            break;
+    let (mut old_word, mut old_text) = (word, text);
+    let mut first = true;
+    loop {
+        let (a, b) = (old.words.get(old_word).copied(), new.words.get(word).copied());
+        if first {
+            mark.word = word;
+            mark.text = text;
+            mark.path.clear();
+            mark.path.extend_from_slice(&path);
         }
-        resume = olds.at;
-        match token {
-            Token::Open(_) => path.push(0),
-            Token::Close => {
-                path.pop();
-                *path.last_mut().expect("balanced") += 1;
+        match (a, b) {
+            (None, None) => break,
+            (Some(x), Some(y)) if x == y => {
+                if x & 3 == kind::TEXT {
+                    let units = (x >> 2) as usize;
+                    if old.text[old_text..old_text + units] != new.text[text..text + units] {
+                        replace(true, new, word, text, &mut path, program);
+                        break;
+                    }
+                    old_text += units;
+                    text += units;
+                }
+                step(&mut path, x);
+                old_word += 1;
+                word += 1;
             }
-            Token::Void(_) | Token::Text(_) => *path.last_mut().expect("balanced") += 1,
+            // A text node that grew: append to it, and go on comparing what follows.
+            (Some(x), Some(y))
+                if x & 3 == kind::TEXT
+                    && y & 3 == kind::TEXT
+                    && y >> 2 > x >> 2
+                    && old.text[old_text..old_text + (x >> 2) as usize]
+                        == new.text[text..text + (x >> 2) as usize] =>
+            {
+                first = false;
+                let (old_units, units) = ((x >> 2) as usize, (y >> 2) as usize);
+                program.path(op::APPEND, &path);
+                program.ops.push((text + old_units) as u32);
+                program.ops.push((text + units) as u32);
+                program.text(text + old_units);
+                old_text += old_units;
+                text += units;
+                step(&mut path, y);
+                old_word += 1;
+                word += 1;
+            }
+            (a, _) => {
+                replace(a.is_some(), new, word, text, &mut path, program);
+                break;
+            }
         }
     }
-    mark.at = resume;
-    mark.path.clear();
-    mark.path.extend_from_slice(&path);
-    walk(old, new, resume, &mut path, program);
     mark.spare = path;
 }
 
-/// From `resume` (a token boundary in both, `path` there) on: the edit.
-fn walk(old: &str, new: &str, resume: usize, path: &mut Vec<u32>, program: &mut Program) {
-    let mut olds = Tokens { html: old, at: resume };
-    let mut news = Tokens { html: new, at: resume };
-    loop {
-        let (a, b) = (olds.next(), news.next());
-        match (a, b) {
-            (None, None) => return,
-            (Some((_, x)), Some((_, y))) if x == y => match x {
-                Token::Open(_) => path.push(0),
-                Token::Close => {
-                    path.pop();
-                    *path.last_mut().expect("balanced") += 1;
+/// Removes the old nodes from `path` on (when there are any) and builds the new tokens
+/// from `word` (text from `text`) on, cut where each open level closes.
+fn replace(remove: bool, new: Tokens<'_>, word: usize, text: usize, path: &mut [u32], program: &mut Program) {
+    if remove {
+        program.path(op::REMOVE, path);
+    }
+    let mut depth = 0usize;
+    let mut levels = path.len();
+    let (mut start, mut start_text) = (word, text);
+    let mut at_text = text;
+    for (index, &token) in new.words.iter().enumerate().skip(word) {
+        match token & 3 {
+            kind::OPEN => depth += 1,
+            kind::CLOSE if depth > 0 => depth -= 1,
+            kind::CLOSE => {
+                // Closes the element at `path[..levels - 1]`.
+                levels -= 1;
+                if index > start {
+                    build(program, &path[..levels], start, index, start_text);
                 }
-                Token::Void(_) | Token::Text(_) => *path.last_mut().expect("balanced") += 1,
-            },
-            // A text node that grew: append to it, and go on comparing what follows.
-            (Some((_, Token::Text(x))), Some((_, Token::Text(y)))) if y.starts_with(x) => {
-                program.path(op::APPEND, &path);
-                program.string(&decode(&y[x.len()..]));
-                *path.last_mut().expect("balanced") += 1;
+                (start, start_text) = (index + 1, at_text);
             }
-            (a, b) => {
-                if a.is_some() {
-                    program.path(op::REMOVE, &path);
-                }
-                let Some((from, _)) = b else { return };
-                // The new HTML from the difference on, cut where each open level closes.
-                let rest = &new[from..];
-                let mut depth = 0usize;
-                let mut level_start = 0;
-                let mut tokens = Tokens { html: rest, at: 0 };
-                let mut levels = path.len();
-                while let Some((at, token)) = tokens.next() {
-                    match token {
-                        Token::Open(_) => depth += 1,
-                        Token::Close if depth > 0 => depth -= 1,
-                        Token::Close => {
-                            // Closes the element at `path[..levels - 1]`.
-                            levels -= 1;
-                            if at > level_start {
-                                program.insert(&path[..levels], &rest[level_start..at]);
-                            }
-                            level_start = tokens.at;
-                        }
-                        _ => {}
-                    }
-                }
-                if level_start < rest.len() {
-                    program.insert(&[], &rest[level_start..]);
-                }
-                return;
-            }
+            kind::TEXT => at_text += (token >> 2) as usize,
+            _ => {}
         }
     }
+    if start < new.words.len() {
+        build(program, &[], start, new.words.len(), start_text);
+    }
+}
+
+fn build(program: &mut Program, path: &[u32], start: usize, end: usize, text: usize) {
+    program.path(op::BUILD, path);
+    program.ops.extend_from_slice(&[start as u32, end as u32, text as u32]);
+    program.text(text);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tokens::{Out, tag};
 
-    fn run(old: &str, new: &str) -> (Vec<u32>, String) {
+    fn run(old: &Out, new: &Out) -> Vec<u32> {
         let mut program = Program::default();
-        diff(old, new, &mut program, &mut Mark::default());
-        (program.ops, program.text)
+        program.clear();
+        fn view(out: &Out) -> Tokens<'_> {
+            Tokens { words: &out.words, text: &out.text }
+        }
+        diff(view(old), view(new), &mut program, &mut Mark::default());
+        program.ops
+    }
+
+    fn para(parts: &[(&str, bool)]) -> Out {
+        let mut out = Out::default();
+        out.open(tag::P);
+        for &(text, em) in parts {
+            if em {
+                out.open(tag::EM);
+                out.text(text);
+                out.close();
+            } else {
+                out.text(text);
+            }
+        }
+        out.close();
+        out
     }
 
     #[test]
     fn growing_text_is_one_append() {
-        let (ops, text) = run("<p>ab <em>c</em></p>", "<p>ab <em>cd</em></p>");
-        assert_eq!(ops, [op::APPEND, 3, 0, 1, 0, 0, 1]);
-        assert_eq!(text, "d");
+        let ops = run(&para(&[("ab ", false), ("c", true)]), &para(&[("ab ", false), ("cd", true)]));
+        assert_eq!(ops, [op::APPEND, 3, 0, 1, 0, 4, 5]);
     }
 
     #[test]
     fn a_changed_element_is_replaced_from_there() {
-        let (ops, text) = run("<p>a *b</p>", "<p>a <em>b</em></p>");
-        assert_eq!(ops, [op::REMOVE, 2, 0, 0, op::BUILD, 1, 0, 4, item::TEXT, 0, 2, item::OPEN, item::TEXT, 6, 7, item::CLOSE]);
-        assert_eq!(text, "a <em>b");
+        let ops = run(&para(&[("a *b", false)]), &para(&[("a ", false), ("b", true)]));
+        // The text differs: remove it, build `a `, `<em>b</em>` in the paragraph.
+        assert_eq!(ops, [op::REMOVE, 2, 0, 0, op::BUILD, 1, 0, 1, 5, 0]);
     }
 
     #[test]
     fn growing_text_then_more_after_it() {
-        let (ops, text) = run("<p><em>a</em></p>", "<p><em>ab</em> c</p>");
-        assert_eq!(ops, [op::APPEND, 3, 0, 0, 0, 0, 1, op::REMOVE, 2, 0, 1, op::INSERT_TEXT, 1, 0, 1, 3]);
-        assert_eq!(text, "b c");
+        let ops = run(&para(&[("a", true)]), &para(&[("ab", true), (" c", false)]));
+        assert_eq!(ops, [op::APPEND, 3, 0, 0, 0, 1, 2, op::REMOVE, 2, 0, 1, op::BUILD, 1, 0, 4, 5, 2]);
     }
 
     #[test]
-    fn new_blocks_are_inserted_at_the_root() {
-        let (ops, text) = run("<p>a</p>", "<p>a</p><p>b</p>");
-        assert_eq!(ops, [op::BUILD, 0, 3, item::OPEN, item::TEXT, 3, 4, item::CLOSE]);
-        assert_eq!(text, "<p>b");
+    fn new_blocks_are_built_at_the_root() {
+        let mut new = para(&[("a", false)]);
+        new.open(tag::P);
+        new.text("b");
+        new.close();
+        let ops = run(&para(&[("a", false)]), &new);
+        assert_eq!(ops, [op::BUILD, 0, 3, 6, 1]);
     }
 }

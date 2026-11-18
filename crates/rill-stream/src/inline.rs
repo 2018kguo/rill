@@ -2,21 +2,16 @@
 //! as Streamdown's HTML. Emphasis follows CommonMark's delimiter algorithm as micromark
 //! runs it.
 //!
-//! Text is copied straight into the output as it is scanned; delimiter runs are written
-//! as their characters and remembered by position. Only a paragraph where emphasis
-//! matched is rewritten, once, to put the tags in.
+//! The scan records what is not plain text as events; the emit pass writes the tokens
+//! (see `tokens`), the plain text between events copied as it is.
 
 use rill_unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
 use crate::simd::ByteSet;
+use crate::tokens::{Out, tag};
 use crate::{Fallback, Result};
 
-const STRONG_OPEN: &str = r#"<span class="font-semibold" data-streamdown="strong">"#;
-const STRONG_CLOSE: &str = "</span>";
-const CODE_OPEN: &str =
-    r#"<code class="rounded bg-muted px-1.5 py-0.5 font-mono text-sm" data-streamdown="inline-code">"#;
-
 /// Bytes that end a run of plain text.
-const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<>[]~");
+const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<[]~");
 
 /// The first byte at or after `at` that is in `SPECIAL`, or the end.
 #[inline(always)]
@@ -59,7 +54,7 @@ enum Kind {
     Line { hard: bool },
     /// A backslash before a line ending.
     Break,
-    /// A fixed replacement (an escaped character, `&gt;`, ...).
+    /// A fixed replacement (an escaped character).
     Literal(&'static str),
     /// A code span's content `[start, end)`; `trim` after a hard break.
     Code { start: u32, end: u32, trim: bool },
@@ -103,15 +98,13 @@ impl Tags {
         Ok(())
     }
     /// The tags in order (bit 0 first: the outermost opener, the innermost closer).
-    fn write(self, out: &mut Vec<u8>, open: bool) {
+    fn write(self, out: &mut Out, open: bool) {
         for bit in 0..self.len {
-            let strong = self.bits >> bit & 1 == 1;
-            out.extend_from_slice(match (strong, open) {
-                (true, true) => STRONG_OPEN,
-                (true, false) => STRONG_CLOSE,
-                (false, true) => "<em>",
-                (false, false) => "</em>",
-            }.as_bytes());
+            if open {
+                out.open(if self.bits >> bit & 1 == 1 { tag::STRONG } else { tag::EM });
+            } else {
+                out.close();
+            }
         }
     }
 }
@@ -140,56 +133,47 @@ fn class(c: Option<char>) -> Class {
     }
 }
 
-/// ASCII punctuation that a backslash escapes, as its HTML.
+/// ASCII punctuation that a backslash escapes, as itself.
 fn escaped(byte: u8) -> &'static str {
     const PUNCT: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-    match byte {
-        b'&' => "&amp;",
-        b'<' => "&lt;",
-        b'>' => "&gt;",
-        _ => {
-            let at = PUNCT.find(char::from(byte)).expect("ASCII punctuation");
-            &PUNCT[at..=at]
-        }
-    }
+    let at = PUNCT.find(char::from(byte)).expect("ASCII punctuation");
+    &PUNCT[at..=at]
 }
 
 impl Inline {
     /// Renders `text` into `out`: a paragraph's lines from its first content character
     /// to its last, continuation lines with their indents.
-    pub fn render(&mut self, text: &str, out: &mut String) -> Result {
+    pub fn render(&mut self, text: &str, out: &mut Out) -> Result {
         self.runs.clear();
         self.delims.clear();
         self.events.clear();
         self.scan(text)?;
         self.emphasis()?;
-        // SAFETY: only whole UTF-8 text between ASCII positions and ASCII markup go in.
-        let buffer = unsafe { out.as_mut_vec() };
-        let bytes = text.as_bytes();
         let mut cursor = 0;
         for event in &self.events {
-            buffer.extend_from_slice(&bytes[cursor..event.at as usize]);
+            out.text(&text[cursor..event.at as usize]);
             match event.kind {
-                Kind::Line { hard } => buffer.extend_from_slice(if hard { b"<br>\n" } else { b"\n" }),
-                Kind::Break => buffer.extend_from_slice(b"<br>\n"),
-                Kind::Literal(html) => buffer.extend_from_slice(html.as_bytes()),
+                Kind::Line { hard: false } => out.text("\n"),
+                Kind::Line { hard: true } | Kind::Break => {
+                    out.void(tag::BR);
+                    out.text("\n");
+                }
+                Kind::Literal(literal) => out.text(literal),
                 Kind::Code { start, end, trim } => {
-                    buffer.extend_from_slice(CODE_OPEN.as_bytes());
-                    code_content(buffer, &bytes[start as usize..end as usize], trim);
-                    buffer.extend_from_slice(b"</code>");
+                    out.open(tag::CODE);
+                    code_content(out, &text[start as usize..end as usize], trim);
+                    out.close();
                 }
                 Kind::Run { index } => {
                     let run = &self.runs[index as usize];
-                    run.closes.write(buffer, false);
-                    for _ in 0..run.count {
-                        buffer.push(run.marker);
-                    }
-                    run.opens.write(buffer, true);
+                    run.closes.write(out, false);
+                    out.repeat(run.marker, run.count);
+                    run.opens.write(out, true);
                 }
             }
             cursor = event.resume as usize;
         }
-        buffer.extend_from_slice(&bytes[cursor..]);
+        out.text(&text[cursor..]);
         Ok(())
     }
 
@@ -266,21 +250,15 @@ impl Inline {
                         }
                     }
                 }
-                b'>' => {
-                    self.event(at, at + 1, Kind::Literal("&gt;"));
-                    at += 1;
-                }
                 // A `&` that cannot start a character reference, a `<` that cannot start
-                // HTML or an autolink.
+                // HTML or an autolink: text.
                 b'&' if !bytes.get(at + 1).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'#') => {
-                    self.event(at, at + 1, Kind::Literal("&amp;"));
                     at += 1;
                 }
                 b'<' if !bytes
                     .get(at + 1)
                     .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?')) =>
                 {
-                    self.event(at, at + 1, Kind::Literal("&lt;"));
                     at += 1;
                 }
                 b'*' | b'_' => {
@@ -396,26 +374,23 @@ fn closing_backticks(bytes: &[u8], from: usize, run: usize) -> Option<usize> {
     None
 }
 
-/// A code span's content, escaped: line endings as spaces, one space stripped from each
-/// side when both have one and it is not all spaces; after a hard break, no leading spaces.
-fn code_content(out: &mut Vec<u8>, raw: &[u8], after_break: bool) {
+/// A code span's content: line endings as spaces, one space stripped from each side when
+/// both have one and it is not all spaces; after a hard break, no leading spaces.
+fn code_content(out: &mut Out, raw: &str, after_break: bool) {
     let space = |b: u8| b == b' ' || b == b'\n';
-    let strip = raw.len() >= 2 && space(raw[0]) && space(raw[raw.len() - 1]) && raw.iter().any(|&b| !space(b));
+    let bytes = raw.as_bytes();
+    let strip = bytes.len() >= 2
+        && space(bytes[0])
+        && space(bytes[bytes.len() - 1])
+        && bytes.iter().any(|&b| !space(b));
     let mut raw = if strip { &raw[1..raw.len() - 1] } else { raw };
     if after_break {
-        while let [first, rest @ ..] = raw
-            && space(*first)
-        {
-            raw = rest;
-        }
+        raw = raw.trim_start_matches([' ', '\n']);
     }
-    for &byte in raw {
-        match byte {
-            b'&' => out.extend_from_slice(b"&amp;"),
-            b'<' => out.extend_from_slice(b"&lt;"),
-            b'>' => out.extend_from_slice(b"&gt;"),
-            b'\n' => out.push(b' '),
-            _ => out.push(byte),
+    for (index, line) in raw.split('\n').enumerate() {
+        if index > 0 {
+            out.text(" ");
         }
+        out.text(line);
     }
 }

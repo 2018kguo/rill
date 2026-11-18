@@ -9,10 +9,12 @@ mod diff;
 mod inline;
 mod session;
 mod simd;
+pub mod tokens;
 
 pub use session::{Outcome, Session};
 
 use inline::Inline;
+use tokens::{Out, tag};
 
 /// The text holds something this engine does not render exactly (yet).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,29 +22,36 @@ pub struct Fallback;
 
 pub type Result<T = ()> = core::result::Result<T, Fallback>;
 
-/// Streamdown's DOM for `source` (one whole, finished document), appended to `out`.
+/// Streamdown's DOM for `source` (one whole, finished document), as HTML appended to
+/// `out`.
 pub fn render(source: &str, out: &mut String) -> Result {
-    render_split(source, out).map(|_| ())
+    let mut tokens = Out::default();
+    render_split(source, &mut tokens, &mut Inline::default())?;
+    tokens::to_html(&tokens.words, &tokens.text, out);
+    Ok(())
 }
 
-/// [`render`], and where the last open block starts: its offset in `source`, its offset
-/// in the HTML appended, and how many blocks (root nodes) come before it. Text appended
-/// to `source` can change only that block and what follows.
-pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize, u32)> {
-    render_split_with(source, out, &mut Inline::default())
+/// Where the last open block starts (text appended to the source can change only that
+/// block and what follows): in the source, in the tokens, in their text, and the blocks
+/// (root nodes) before it.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Split {
+    pub source: usize,
+    pub words: usize,
+    pub text: usize,
+    pub nodes: u32,
 }
 
-/// [`render_split`] with the inline scanner's buffers kept by the caller.
-pub(crate) fn render_split_with(source: &str, out: &mut String, inline: &mut Inline) -> Result<(usize, usize, u32)> {
+/// Streamdown's DOM for `source` as tokens appended to `out` (see [`tokens`]), and where
+/// its last open block starts.
+pub(crate) fn render_split(source: &str, out: &mut Out, inline: &mut Inline) -> Result<Split> {
     let bytes = source.as_bytes();
     if memchr::memchr3(b'\r', b'\t', b'|', bytes).is_some() || memchr::memchr(0, bytes).is_some() {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
         return Err(Fallback);
     }
-    // Markup is about a third again the text: one allocation up front.
-    out.reserve(source.len() + source.len() / 2);
-    let base = out.len();
-    let mut blocks = Blocks { source, out, inline, para: None, list: None, last: (0, base, 0), before: (0, base, 0), opened: 0 };
+    let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0 };
+    let mut blocks = Blocks { source, out, inline, para: None, list: None, last: base, before: base, opened: 0 };
     let mut start = 0;
     while start <= source.len() {
         let end = memchr_newline(bytes, start);
@@ -53,27 +62,26 @@ pub(crate) fn render_split_with(source: &str, out: &mut String, inline: &mut Inl
     blocks.close_list()?;
     // A block opened on the unfinished last line may still turn into a continuation of
     // the block before it (`****` growing into `****#`): that one stays open too.
-    let split = if !source.ends_with('\n') && !source[blocks.last.0..].contains('\n') {
+    let split = if !source.ends_with('\n') && !source[blocks.last.source..].contains('\n') {
         blocks.before
     } else {
         blocks.last
     };
-    Ok((split.0, split.1 - base, split.2))
+    Ok(split)
 }
 
 struct Blocks<'a, 'o> {
     source: &'a str,
-    out: &'o mut String,
+    out: &'o mut Out,
     inline: &'o mut Inline,
     /// The open paragraph: from its first content byte to the end of its last line.
     para: Option<(usize, usize)>,
     /// The open list.
     list: Option<List>,
-    /// Where the last block opened: its source offset, the output length then (all HTML
-    /// before it belongs to blocks that are closed), and the blocks before it.
-    last: (usize, usize, u32),
+    /// Where the last block opened (all output before it belongs to closed blocks).
+    last: Split,
     /// Where the block before it opened.
-    before: (usize, usize, u32),
+    before: Split,
     /// Blocks opened so far.
     opened: u32,
 }
@@ -190,7 +198,7 @@ impl<'a> Blocks<'a, '_> {
                 self.close_paragraph()?;
                 self.close_list()?;
                 self.open_block(offset);
-                self.out.push_str(r#"<hr class="my-6 border-border" data-streamdown="horizontal-rule">"#);
+                self.out.void(tag::HR);
                 return Ok(());
             }
             // Blocks not handled yet: quotes, lists, fences, HTML, definitions, setext.
@@ -224,7 +232,7 @@ impl<'a> Blocks<'a, '_> {
 
     fn open_block(&mut self, offset: usize) {
         self.before = self.last;
-        self.last = (offset, self.out.len(), self.opened);
+        self.last = Split { source: offset, words: self.out.words.len(), text: self.out.text.len(), nodes: self.opened };
         self.opened += 1;
     }
 
@@ -333,53 +341,28 @@ impl<'a> Blocks<'a, '_> {
         let Some(list) = self.list.take() else {
             return Ok(());
         };
-        let (tag, class, data) = if list.ordered {
-            ("ol", "list-inside list-decimal whitespace-normal [li_&amp;]:pl-6", "ordered-list")
-        } else {
-            ("ul", "list-inside list-disc whitespace-normal [li_&amp;]:pl-6", "unordered-list")
-        };
-        let out = &mut *self.out;
-        out.push('<');
-        out.push_str(tag);
-        out.push_str(" class=\"");
-        out.push_str(class);
-        out.push_str("\" data-streamdown=\"");
-        out.push_str(data);
-        out.push('"');
-        if list.ordered && list.start != 1 {
-            out.push_str(" start=\"");
-            out.push_str(&list.start.to_string());
-            out.push('"');
-        }
-        out.push_str(">\n");
+        self.out.open(match (list.ordered, list.start) {
+            (false, _) => tag::UL,
+            (true, 1) => tag::OL,
+            (true, start) => tag::OL_START + start,
+        });
+        self.out.text("\n");
         for item in list.items {
-            self.out.push_str(r#"<li class="py-1 [&amp;&gt;p]:inline" data-streamdown="list-item">"#);
+            self.out.open(tag::LI);
             if let Some((start, end)) = item {
                 self.inline.render(self.source[start..end].trim_end_matches(' '), self.out)?;
             }
-            self.out.push_str("</li>\n");
+            self.out.close();
+            self.out.text("\n");
         }
-        self.out.push_str("</");
-        self.out.push_str(tag);
-        self.out.push('>');
+        self.out.close();
         Ok(())
     }
 
     fn heading(&mut self, level: u8, content: &str) -> Result {
-        let (class, data) = HEADINGS[usize::from(level - 1)];
-        let tag = [b'h', b'0' + level];
-        let tag = core::str::from_utf8(&tag).expect("ascii");
-        self.out.push('<');
-        self.out.push_str(tag);
-        self.out.push_str(" class=\"");
-        self.out.push_str(class);
-        self.out.push_str("\" data-streamdown=\"");
-        self.out.push_str(data);
-        self.out.push_str("\">");
+        self.out.open(tag::H1 + u32::from(level) - 1);
         self.inline.render(content, self.out)?;
-        self.out.push_str("</");
-        self.out.push_str(tag);
-        self.out.push('>');
+        self.out.close();
         Ok(())
     }
 
@@ -396,23 +379,16 @@ impl<'a> Blocks<'a, '_> {
         match level {
             Some(level) => self.heading(level, content),
             None => {
-                self.out.push_str("<p>");
+                self.out.open(tag::P);
                 self.inline.render(content, self.out)?;
-                self.out.push_str("</p>");
+                self.out.close();
                 Ok(())
             }
         }
     }
 }
 
-const HEADINGS: [(&str, &str); 6] = [
-    ("mt-6 mb-2 font-semibold text-3xl", "heading-1"),
-    ("mt-6 mb-2 font-semibold text-2xl", "heading-2"),
-    ("mt-6 mb-2 font-semibold text-xl", "heading-3"),
-    ("mt-6 mb-2 font-semibold text-lg", "heading-4"),
-    ("mt-6 mb-2 font-semibold text-base", "heading-5"),
-    ("mt-6 mb-2 font-semibold text-sm", "heading-6"),
-];
+
 
 /// An ATX heading's level and content (`rest` starts at the first `#`).
 fn atx(rest: &str) -> Option<(u8, &str)> {
@@ -472,6 +448,12 @@ mod wasm {
         super::render(source, &mut out).ok().map(|()| out)
     }
 
+    /// The open tags of the token stream's tag ids (see [`crate::tokens`]), one a line.
+    #[wasm_bindgen(js_name = streamTags)]
+    pub fn stream_tags() -> String {
+        crate::tokens::TAGS.join("\n")
+    }
+
     /// The module's memory.
     #[wasm_bindgen(js_name = streamMemory)]
     pub fn memory() -> JsValue {
@@ -483,17 +465,17 @@ mod wasm {
     pub struct Stream {
         session: crate::Session,
         input: Vec<u16>,
-        /// After each update: the outcome, the opcodes' `u32` index and count, the
-        /// strings' byte index and length (UTF-8), the root nodes that became final, and
-        /// the new tags' string ranges' `u32` index and count.
-        header: [u32; 8],
+        /// After each update: the outcome; the edit's opcodes, as a `u32` index and count;
+        /// the rendering's tokens, the same; its text, as a `u16` index and count; the
+        /// first text unit the edit refers to; the root nodes that became final.
+        header: [u32; 9],
     }
 
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 8] }
+            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 9] }
         }
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
@@ -521,26 +503,32 @@ mod wasm {
         pub fn header_at(&self) -> usize {
             self.header.as_ptr() as usize / 4
         }
-        /// After a reset: the whole HTML.
+        /// The last update's whole HTML.
         #[wasm_bindgen(getter)]
         pub fn html(&self) -> String {
-            let (addition, pending) = self.session.html();
-            [addition, pending].concat()
+            self.session.html()
         }
     }
 
     impl Stream {
         fn fill(&mut self, outcome: crate::Outcome) -> u32 {
             let program = &self.session.program;
+            let rendering = self.session.rendering();
+            let text_from = if outcome == crate::Outcome::Patch {
+                program.text_from.min(rendering.text.len() as u32)
+            } else {
+                0
+            };
             self.header = [
                 outcome as u32,
                 program.ops.as_ptr() as u32 / 4,
                 program.ops.len() as u32,
-                program.text.as_ptr() as u32,
-                program.text.len() as u32,
+                rendering.words.as_ptr() as u32 / 4,
+                rendering.words.len() as u32,
+                rendering.text.as_ptr() as u32 / 2,
+                rendering.text.len() as u32,
+                text_from,
                 self.session.final_nodes,
-                program.defs.as_ptr() as u32 / 4,
-                program.defs.len() as u32,
             ];
             outcome as u32
         }
