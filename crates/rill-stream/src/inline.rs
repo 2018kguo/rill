@@ -10,6 +10,9 @@ use crate::simd::ByteSet;
 use crate::tokens::{Out, tag};
 use crate::{Fallback, Result};
 
+/// Units past a resume point that scanning before it may read.
+const LOOKAHEAD: usize = 3;
+
 /// Bytes that end a run of plain text.
 const SPECIAL: ByteSet = ByteSet::new(b"*_`\\\n&<[]~@:.");
 
@@ -42,6 +45,24 @@ pub struct Inline {
     delims: Vec<usize>,
     /// What the scan found, in source order; the text between them is copied as it is.
     events: Vec<Event>,
+    /// Where the last scan left the first backtick run without a closer (a later one
+    /// may close it).
+    open_ticks: Option<usize>,
+    /// The spans of matched emphasis, from opener to closer.
+    pairs: Vec<(u32, u32)>,
+    /// The last render's tokens up to a point no later text can change.
+    resume: Resume,
+}
+
+/// The tokens of `[..at]` of the content starting at `start` in the whole text: final
+/// once no delimiter run or backtick run before `at` can pair with one after it.
+#[derive(Default)]
+struct Resume {
+    start: usize,
+    at: usize,
+    words: Vec<u32>,
+    text: Vec<u16>,
+    origins: Vec<u32>,
 }
 
 /// Something at a source position other than plain text.
@@ -70,6 +91,9 @@ enum Kind {
 
 /// A run of `*` or `_`.
 struct Run {
+    /// Where the run is in the text.
+    at: u32,
+    end: u32,
     marker: u8,
     count: u32,
     can_open: bool,
@@ -152,14 +176,47 @@ fn escaped(byte: u8) -> &'static str {
 impl Inline {
     /// Renders `text` into `out`: a paragraph's lines from its first content character
     /// to its last, continuation lines with their indents.
-    pub fn render(&mut self, text: &[u16], out: &mut Out) -> Result {
+    pub fn render(&mut self, text: &[u16], out: &mut Out, stable: usize) -> Result {
         self.runs.clear();
         self.delims.clear();
         self.events.clear();
-        self.scan(text)?;
+        self.pairs.clear();
+        self.open_ticks = None;
+        // The content's start in the whole text, and how much of it is as last time.
+        let start = out.offset_of(text);
+        let unchanged = stable.saturating_sub(start.unwrap_or(usize::MAX));
+        let mut from = 0;
+        if start == Some(self.resume.start) && self.resume.at > 0 && self.resume.at + LOOKAHEAD <= unchanged.min(text.len()) {
+            out.extend(&self.resume.words, &self.resume.text, &self.resume.origins);
+            from = self.resume.at;
+        }
+        let base = (out.words.len() - self.resume.words.len() * usize::from(from > 0), out.text.len() - self.resume.text.len() * usize::from(from > 0));
+        self.scan(text, from)?;
         self.emphasis()?;
-        let mut cursor = 0;
+        // The next render's resume point: the latest one this render can vouch for.
+        // (The next render checks that the text is the same through it and its lookahead.)
+        let next = start.and_then(|_| self.checkpoint(text, from, text.len().saturating_sub(LOOKAHEAD)));
+        self.resume.at = 0;
+        let mut cursor = from;
+        let record = |out: &Out, resume: &mut Resume, at: usize| {
+            resume.words.clear();
+            resume.words.extend_from_slice(&out.words[base.0..]);
+            resume.origins.clear();
+            resume.origins.extend_from_slice(&out.origins[base.0..]);
+            resume.text.clear();
+            resume.text.extend_from_slice(&out.text[base.1..]);
+            resume.start = start.expect("a source slice");
+            resume.at = at;
+        };
         for event in &self.events {
+            if let Some(next) = next
+                && cursor <= next
+                && next <= event.at as usize
+            {
+                out.text(&text[cursor..next]);
+                record(out, &mut self.resume, next);
+                cursor = next;
+            }
             out.text(&text[cursor..event.at as usize]);
             match event.kind {
                 Kind::Line { hard: false } => out.ascii("\n"),
@@ -182,23 +239,65 @@ impl Inline {
             }
             cursor = event.resume as usize;
         }
+        if let Some(next) = next
+            && cursor <= next
+        {
+            out.text(&text[cursor..next]);
+            record(out, &mut self.resume, next);
+            cursor = next;
+        }
         out.text(&text[cursor..]);
         Ok(())
+    }
+
+    /// The latest position up to `limit` the next render may resume at: before every
+    /// run that may still open and every backtick run that may still open a code span,
+    /// inside no matched emphasis, in plain text after a unit that starts nothing (so
+    /// the scan from there is the scan through there).
+    fn checkpoint(&self, text: &[u16], from: usize, limit: usize) -> Option<usize> {
+        let mut ceiling = limit.min(self.open_ticks.unwrap_or(usize::MAX));
+        for run in &self.runs {
+            if run.can_open && run.count > 0 {
+                ceiling = ceiling.min(run.at as usize);
+                break;
+            }
+        }
+        let valid = |at: usize| {
+            let unit = text[at - 1];
+            unit != 0x20
+                && !(unit < 0x80 && SPECIAL.contains(unit as u8))
+                && !self.pairs.iter().any(|&(start, end)| (start as usize) < at && at < end as usize)
+        };
+        // The plain stretches between events, from the last.
+        let mut end = text.len();
+        for event in self.events.iter().rev().map(Some).chain([None]) {
+            let gap = event.map_or(from, |event| event.resume as usize);
+            let mut at = end.min(ceiling);
+            while at > gap.max(from) {
+                if valid(at) {
+                    return Some(at);
+                }
+                at -= 1;
+            }
+            let Some(event) = event else { break };
+            end = event.at as usize;
+        }
+        None
     }
 
     fn event(&mut self, at: usize, resume: usize, kind: Kind) {
         self.events.push(Event { at: at as u32, resume: resume as u32, kind });
     }
 
-    fn scan(&mut self, text: &[u16]) -> Result {
+    fn scan(&mut self, text: &[u16], from: usize) -> Result {
         let bytes = text;
         if u32::try_from(bytes.len()).is_err() {
             return Err(Fallback);
         }
 
-        let mut at = 0;
+        let mut at = from;
         // Where plain text began: the spaces before a line ending are trimmed back to it.
-        let mut plain = 0;
+        let mut plain = from;
         // mdast-util-to-hast trims the start of whatever follows a hard break: the source
         // position right after the last break.
         let mut broke_at = usize::MAX;
@@ -251,6 +350,7 @@ impl Inline {
                             at = end + run;
                         }
                         None => {
+                            self.open_ticks.get_or_insert(at);
                             at += run;
                             continue; // literal backticks are text
                         }
@@ -298,6 +398,8 @@ impl Inline {
                         self.delims.push(self.runs.len());
                         let index = self.runs.len() as u32;
                         self.runs.push(Run {
+                            at: at as u32,
+                            end: (at + length) as u32,
                             marker: byte,
                             count: length32,
                             can_open,
@@ -354,6 +456,7 @@ impl Inline {
             self.runs[opener].opens.push_front(used == 2)?;
             self.runs[closer].count -= used;
             self.runs[closer].closes.push_back(used == 2)?;
+            self.pairs.push((self.runs[opener].at, self.runs[closer].end));
             // Runs between them can no longer match.
             self.delims.drain(opener_at + 1..closer_at);
             closer_at = opener_at + 1;

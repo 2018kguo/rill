@@ -43,24 +43,38 @@ pub(crate) struct Split {
     pub nodes: u32,
     /// The block opened here is a list.
     pub list: bool,
+    /// Where its first line ends, when the block before it ended because of what that
+    /// line is (no blank line parts them); else 0.
+    pub decides: usize,
 }
 
 /// Streamdown's DOM for `source` (UTF-16) as tokens appended to `out` (see [`tokens`]),
 /// and where its last open block starts.
 pub(crate) fn render_split(source: &[u16], out: &mut Out, inline: &mut Inline) -> Result<Split> {
-    render_split_at(source, 0, out, inline)
+    render_split_at(source, 0, 0, usize::MAX, out, inline)
 }
 
 /// [`render_split`] for a `source` that starts at `at` in the whole text (the text
-/// tokens' origins count from there).
-pub(crate) fn render_split_at(source: &[u16], at: usize, out: &mut Out, inline: &mut Inline) -> Result<Split> {
+/// tokens' origins count from there), of which `..stable` is as it was for the last call
+/// (the inline renderer resumes where that holds).
+///
+/// From `agree` on, the text is not the text as given but the repair's (its closers):
+/// no block is final on the strength of a line holding any of it.
+pub(crate) fn render_split_at(
+    source: &[u16],
+    at: usize,
+    stable: usize,
+    agree: usize,
+    out: &mut Out,
+    inline: &mut Inline,
+) -> Result<Split> {
     out.set_source(source, at);
     if source.iter().fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0x7C | 0)) {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
         return Err(Fallback);
     }
-    let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0, list: false };
-    let mut blocks = Blocks { source, out, inline, para: None, list: None, last: base, before: base, opened: 0 };
+    let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0, list: false, decides: 0 };
+    let mut blocks = Blocks { source, out, inline, stable, para: None, list: None, last: base, before: base, opened: 0, older: [base; 2] };
     let mut start = 0;
     while start <= source.len() {
         let end = newline(source, start);
@@ -74,26 +88,41 @@ pub(crate) fn render_split_at(source: &[u16], at: usize, out: &mut Out, inline: 
     // too, unless a blank line parts them and it is not a list (which takes items after
     // blank lines).
     let last = blocks.last.source;
-    let parted = last >= 2 && source[last - 1] == NL && {
-        let line = &source[..last - 1];
+    let last_parted = parted(source, last);
+    let mut back = usize::from(
+        source.last() != Some(&NL) && !source[last..].contains(&NL) && !(last_parted && !blocks.before.list),
+    );
+    // Lines from the one holding the repair's first unit on may still change what they
+    // are: blocks opened on them keep the block before open.
+    let repaired = agree.saturating_sub(at);
+    if repaired < source.len() {
+        let limit = source[..repaired].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+        while back < 4 && blocks.back(back, base).source >= limit && blocks.back(back, base).source > 0 {
+            back += 1;
+        }
+    }
+    let mut split = blocks.back(back, base);
+    if split.source > 0 && !parted(source, split.source) {
+        split.decides = newline(source, split.source) + 1;
+    }
+    Ok(split)
+}
+
+/// Whether a blank line comes right before the line starting at `at`.
+fn parted(source: &[u16], at: usize) -> bool {
+    at >= 2 && source[at - 1] == NL && {
+        let line = &source[..at - 1];
         let start = line.iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
         line[start..].iter().all(|&unit| unit == SP)
-    };
-    let split = if source.last() != Some(&NL)
-        && !source[last..].contains(&NL)
-        && !(parted && !blocks.before.list)
-    {
-        blocks.before
-    } else {
-        blocks.last
-    };
-    Ok(split)
+    }
 }
 
 struct Blocks<'a, 'o> {
     source: &'a [u16],
     out: &'o mut Out,
     inline: &'o mut Inline,
+    /// The whole text is as it was for the last render up to here.
+    stable: usize,
     /// The open paragraph: from its first content byte to the end of its last line.
     para: Option<(usize, usize)>,
     /// The open list.
@@ -104,6 +133,8 @@ struct Blocks<'a, 'o> {
     before: Split,
     /// Blocks opened so far.
     opened: u32,
+    /// Where the two blocks before `before` opened.
+    older: [Split; 2],
 }
 
 /// A tight list of one-paragraph items.
@@ -201,6 +232,15 @@ fn trim_end_spaces(text: &[u16]) -> &[u16] {
 }
 
 impl<'a> Blocks<'a, '_> {
+    /// Where the block `back` blocks before the last opened (`base` past the ones kept).
+    fn back(&self, back: usize, base: Split) -> Split {
+        let opened = self.opened as usize;
+        if back >= opened.min(4) {
+            return base;
+        }
+        [self.last, self.before, self.older[1], self.older[0]][back]
+    }
+
     fn line(&mut self, offset: usize, line: &'a [u16]) -> Result {
         let spaces = indent(line);
         let rest = &line[spaces..];
@@ -270,8 +310,9 @@ impl<'a> Blocks<'a, '_> {
     }
 
     fn open_block(&mut self, offset: usize) {
+        self.older = [self.older[1], self.before];
         self.before = self.last;
-        self.last = Split { source: offset, words: self.out.words.len(), text: self.out.text.len(), nodes: self.opened, list: false };
+        self.last = Split { source: offset, words: self.out.words.len(), text: self.out.text.len(), nodes: self.opened, list: false, decides: 0 };
         self.opened += 1;
     }
 
@@ -390,7 +431,7 @@ impl<'a> Blocks<'a, '_> {
         for item in list.items {
             self.out.open(tag::LI);
             if let Some((start, end)) = item {
-                self.inline.render(trim_end_spaces(&self.source[start..end]), self.out)?;
+                self.inline.render(trim_end_spaces(&self.source[start..end]), self.out, self.stable)?;
             }
             self.out.close();
             self.out.ascii("\n");
@@ -401,7 +442,7 @@ impl<'a> Blocks<'a, '_> {
 
     fn heading(&mut self, level: u8, content: &[u16]) -> Result {
         self.out.open(tag::H1 + u32::from(level) - 1);
-        self.inline.render(content, self.out)?;
+        self.inline.render(content, self.out, self.stable)?;
         self.out.close();
         Ok(())
     }
@@ -420,7 +461,7 @@ impl<'a> Blocks<'a, '_> {
             Some(level) => self.heading(level, content),
             None => {
                 self.out.open(tag::P);
-                self.inline.render(content, self.out)?;
+                self.inline.render(content, self.out, self.stable)?;
                 self.out.close();
                 Ok(())
             }

@@ -83,6 +83,19 @@ impl Out {
         self.source_at = at as u32;
     }
 
+    /// Where `text` starts in the whole text, when it is a slice of the source.
+    pub fn offset_of(&self, text: &[u16]) -> Option<usize> {
+        let offset = (text.as_ptr() as usize).wrapping_sub(self.source.0) / 2;
+        (offset <= self.source.1).then(|| self.source_at as usize + offset)
+    }
+
+    /// Appends tokens as they were written before (`origins` per word).
+    pub fn extend(&mut self, words: &[u32], text: &[u16], origins: &[u32]) {
+        self.words.extend_from_slice(words);
+        self.text.extend_from_slice(text);
+        self.origins.extend_from_slice(origins);
+    }
+
     #[inline]
     fn word(&mut self, word: u32) {
         self.words.push(word);

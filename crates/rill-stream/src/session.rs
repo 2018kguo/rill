@@ -21,6 +21,11 @@ pub struct Session {
     stable: usize,
     /// The repaired text equals the text as given up to here.
     pub agree: usize,
+    /// The repaired text is as it was for the last update up to here.
+    unchanged: usize,
+    /// The final blocks ended because of what the open tail's first line is: a repair
+    /// that changes the text before this reaches into them.
+    decides: usize,
     /// This update's rendering: the blocks that became final (before `split`), then the
     /// open ones.
     next: Out,
@@ -69,7 +74,7 @@ impl Session {
         let fresh = reset || self.failed;
         self.failed = false;
         let mut outcome = if fresh { Outcome::Reset } else { Outcome::Patch };
-        if fresh || keep < self.stable {
+        if fresh || keep < self.stable || keep < self.decides {
             // A new text, or a repair reaching back into final blocks: render it all.
             self.stable = 0;
             outcome = Outcome::Reset;
@@ -83,6 +88,7 @@ impl Session {
             agree += 1;
         }
         self.agree = agree;
+        self.unchanged = if outcome == Outcome::Reset { 0 } else { keep };
         let checked = &healed[if outcome == Outcome::Reset { 0 } else { keep }..];
         let surrogates = checked.iter().fold(false, |any, &unit| any | (unit & 0xF800 == 0xD800));
         if surrogates && char::decode_utf16(checked.iter().copied()).any(|c| c.is_err()) {
@@ -131,10 +137,75 @@ impl Session {
     fn render_tail(&mut self) -> crate::Result {
         self.next.clear();
         // What comes before the last block is final.
-        let split = render_split_at(&self.remend.healed()[self.stable..], self.stable, &mut self.next, &mut self.inline)?;
+        let split = render_split_at(
+            &self.remend.healed()[self.stable..],
+            self.stable,
+            self.unchanged,
+            self.agree,
+            &mut self.next,
+            &mut self.inline,
+        )?;
         self.final_nodes = split.nodes;
+        if split.source > 0 || self.stable == 0 {
+            self.decides = if split.decides > 0 { self.stable + split.decides } else { 0 };
+        }
         self.split = split;
         self.stable += split.source;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// After every chunk, the session's HTML is the whole repaired text rendered from
+    /// scratch: what each update keeps (final blocks, the inline resume point) is what
+    /// rendering again would make. Random texts dense in what the renderer handles.
+    #[test]
+    fn streaming_render_is_whole_text_render() {
+        const PIECES: [&str; 30] = [
+            "a", "b", "word", " ", " ", "  ", "\n", "\n\n", "*", "**", "***", "_", "__", "`", "``", "\\",
+            "&", "<", "é", "😀", "# ", "- ", "1. ", "---", "x.", ":", "  \n", "www.", "=", "\\*",
+        ];
+        let mut seed = std::env::var("STREAM_SEED").map_or(0x9e37_79b9_7f4a_7c15u64, |s| s.parse().unwrap());
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let rounds = std::env::var("STREAM_ROUNDS").map_or(3000, |n| n.parse().unwrap());
+        for _ in 0..rounds {
+            let mut text = String::new();
+            for _ in 0..next(60) {
+                text.push_str(PIECES[next(PIECES.len())]);
+            }
+            let mut session = super::Session::default();
+            // The blocks earlier updates made final, as the DOM keeps them.
+            let mut kept = String::new();
+            let mut start = 0;
+            while start < text.len() {
+                let mut end = (start + 1 + next(16)).min(text.len());
+                while !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                let outcome = session.update(&text[start..end], start == 0);
+                if outcome == super::Outcome::Reset {
+                    kept.clear();
+                }
+                if outcome != super::Outcome::Fallback {
+                    let (shown, split) = (&session.shown, session.shown_from);
+                    let text_final = &shown.text[..split.text];
+                    crate::tokens::to_html(&shown.words[..split.words], text_final, &mut kept);
+                    let mut now = kept.clone();
+                    crate::tokens::to_html(&shown.words[split.words..], &shown.text[split.text..], &mut now);
+                    let healed = String::from_utf16(session.remend.healed()).expect("no lone surrogates");
+                    let mut whole = String::new();
+                    if crate::render(&healed, &mut whole).is_ok() {
+                        assert_eq!(now, whole, "{:?}", &text[..end]);
+                    }
+                }
+                start = end;
+            }
+        }
     }
 }
