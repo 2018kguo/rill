@@ -83,8 +83,9 @@ impl Session {
             agree += 1;
         }
         self.agree = agree;
-        let checked = healed[if outcome == Outcome::Reset { 0 } else { keep }..].iter().copied();
-        if char::decode_utf16(checked).any(|c| c.is_err()) {
+        let checked = &healed[if outcome == Outcome::Reset { 0 } else { keep }..];
+        let surrogates = checked.iter().fold(false, |any, &unit| any | (unit & 0xF800 == 0xD800));
+        if surrogates && char::decode_utf16(checked.iter().copied()).any(|c| c.is_err()) {
             self.failed = true;
             return Outcome::Fallback;
         }
