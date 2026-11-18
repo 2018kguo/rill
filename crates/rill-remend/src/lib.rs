@@ -1619,7 +1619,7 @@ const RUNS: [&[u16]; 4] = [
 ];
 
 /// A bit per marker [`Settled::extended`] counts (0 for other units).
-fn marker_bit(unit: u16) -> u16 {
+const fn marker_bit(unit: u16) -> u16 {
     match unit {
         STAR => 1,
         UNDERSCORE => 2,
@@ -1636,7 +1636,16 @@ fn marker_bit(unit: u16) -> u16 {
 
 /// The markers in `text`, as [`marker_bit`]s.
 fn seen_markers(text: &[u16]) -> u16 {
-    text.iter().fold(0, |seen, &unit| seen | marker_bit(unit))
+    const BITS: [u16; 129] = {
+        let mut bits = [0; 129];
+        let mut unit = 0;
+        while unit < 128 {
+            bits[unit] = marker_bit(unit as u16);
+            unit += 1;
+        }
+        bits
+    };
+    text.iter().fold(0, |seen, &unit| seen | BITS[usize::from(unit.min(128))])
 }
 
 fn later(old: Option<usize>, new: Option<usize>) -> Option<usize> {
