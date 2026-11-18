@@ -143,6 +143,8 @@ fn decode(text: &str) -> std::borrow::Cow<'_, str> {
 pub struct Mark {
     at: usize,
     path: Vec<u32>,
+    /// A buffer for the next diff's walk.
+    spare: Vec<u32>,
 }
 
 impl Mark {
@@ -158,11 +160,16 @@ pub fn diff(old: &str, new: &str, program: &mut Program, mark: &mut Mark) {
     // Tokens wholly inside the common prefix are the same in both: walk them once, for
     // the path (the index of the next child at each level).
     let common = common_prefix(old.as_bytes(), new.as_bytes());
-    let (mut resume, mut path) = if mark.at > 0 && mark.at <= common {
-        (mark.at, std::mem::take(&mut mark.path))
+    // Two buffers that live in the mark: the walk's path and the mark's own.
+    let mut path = std::mem::take(&mut mark.spare);
+    path.clear();
+    let mut resume = mark.at;
+    if resume == 0 || resume > common {
+        resume = 0;
+        path.push(0);
     } else {
-        (0, vec![0])
-    };
+        path.extend_from_slice(&mark.path);
+    }
     let mut olds = Tokens { html: old, at: resume };
     while let Some((_, token)) = olds.next() {
         let whole = match token {
@@ -185,6 +192,12 @@ pub fn diff(old: &str, new: &str, program: &mut Program, mark: &mut Mark) {
     mark.at = resume;
     mark.path.clear();
     mark.path.extend_from_slice(&path);
+    walk(old, new, resume, &mut path, program);
+    mark.spare = path;
+}
+
+/// From `resume` (a token boundary in both, `path` there) on: the edit.
+fn walk(old: &str, new: &str, resume: usize, path: &mut Vec<u32>, program: &mut Program) {
     let mut olds = Tokens { html: old, at: resume };
     let mut news = Tokens { html: new, at: resume };
     loop {

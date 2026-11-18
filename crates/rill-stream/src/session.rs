@@ -9,7 +9,8 @@
 use rill_remend::Stream as Remend;
 
 use crate::diff::{Mark, Program, diff};
-use crate::{Fallback, render_split};
+use crate::inline::Inline;
+use crate::{Fallback, render_split_with};
 
 #[derive(Default)]
 pub struct Session {
@@ -30,6 +31,8 @@ pub struct Session {
     pub program: Program,
     /// Where the next diff may start walking `shown`.
     mark: Mark,
+    /// The inline scanner, its buffers kept between updates.
+    inline: Inline,
     /// How many root nodes of `addition` became final.
     pub final_nodes: u32,
     /// The last update fell back: the next one starts over.
@@ -124,7 +127,7 @@ impl Session {
     fn render_tail(&mut self) -> crate::Result {
         self.html.clear();
         // What comes before the last block is final.
-        let (source, html, nodes) = render_split(&self.tail, &mut self.html)?;
+        let (source, html, nodes) = render_split_with(&self.tail, &mut self.html, &mut self.inline)?;
         self.final_nodes = nodes;
         self.split = html;
         self.stable += self.tail[..source].encode_utf16().count();

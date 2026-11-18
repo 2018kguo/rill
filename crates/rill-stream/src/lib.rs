@@ -29,6 +29,11 @@ pub fn render(source: &str, out: &mut String) -> Result {
 /// in the HTML appended, and how many blocks (root nodes) come before it. Text appended
 /// to `source` can change only that block and what follows.
 pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize, u32)> {
+    render_split_with(source, out, &mut Inline::default())
+}
+
+/// [`render_split`] with the inline scanner's buffers kept by the caller.
+pub(crate) fn render_split_with(source: &str, out: &mut String, inline: &mut Inline) -> Result<(usize, usize, u32)> {
     let bytes = source.as_bytes();
     if memchr::memchr3(b'\r', b'\t', b'|', bytes).is_some() || memchr::memchr(0, bytes).is_some() {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
@@ -37,7 +42,7 @@ pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize, u32
     // Markup is about a third again the text: one allocation up front.
     out.reserve(source.len() + source.len() / 2);
     let base = out.len();
-    let mut blocks = Blocks { source, out, inline: Inline::default(), para: None, list: None, last: (0, base, 0), before: (0, base, 0), opened: 0 };
+    let mut blocks = Blocks { source, out, inline, para: None, list: None, last: (0, base, 0), before: (0, base, 0), opened: 0 };
     let mut start = 0;
     while start <= source.len() {
         let end = memchr_newline(bytes, start);
@@ -59,7 +64,7 @@ pub fn render_split(source: &str, out: &mut String) -> Result<(usize, usize, u32
 struct Blocks<'a, 'o> {
     source: &'a str,
     out: &'o mut String,
-    inline: Inline,
+    inline: &'o mut Inline,
     /// The open paragraph: from its first content byte to the end of its last line.
     para: Option<(usize, usize)>,
     /// The open list.

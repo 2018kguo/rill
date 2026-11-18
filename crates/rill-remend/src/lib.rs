@@ -111,6 +111,8 @@ pub struct Stream {
     work: Units,
     /// The last healed text when it came from healing the whole text instead.
     whole: Option<Units>,
+    /// Scratch: the last heal's tail after the settled prefix.
+    previous_tail: Units,
 }
 
 impl Stream {
@@ -154,7 +156,11 @@ impl Stream {
     fn heal_input<M>(&mut self, reset: bool, take: impl FnOnce(&[u16], &[u16]) -> M) -> (usize, M) {
         let known = self.prefix.len;
         let previous_whole = self.whole.take();
-        let previous_tail = self.work.split_off(known);
+        // The last tail, kept in a buffer that lives as long as the stream.
+        let mut previous_tail = std::mem::take(&mut self.previous_tail);
+        previous_tail.clear();
+        previous_tail.extend_from_slice(&self.work[known..]);
+        self.work.truncate(known);
         self.settle();
         // What the last heal returned: `work[..known]` and then `previous_tail`, or
         // `previous_whole`.
@@ -180,6 +186,7 @@ impl Stream {
         if self.heal_tail().is_some() {
             let keep = keep_of(&self.work, &self.work);
             let middle = take(&self.work[keep..], &self.input);
+            self.previous_tail = previous_tail;
             return (keep, middle);
         }
         let whole = self.heal_earlier();
@@ -187,6 +194,7 @@ impl Stream {
         let keep = keep_of(&self.work, &whole);
         let middle = take(&whole[keep..], &self.input);
         self.whole = Some(whole);
+        self.previous_tail = previous_tail;
         (keep, middle)
     }
 
@@ -210,7 +218,9 @@ impl Stream {
         if self.input.is_empty() {
             return Some(());
         }
-        let tail = self.escaped_tail();
+        let end = stripped_end(&self.input);
+        let tail1 = single_tilde(&self.input[..end], self.settled, self.fence1);
+        let tail = comparison_operators(&tail1, 0, self.fence2).0;
         self.work.extend_from_slice(&tail);
         heal_handlers(&mut self.work, &self.prefix, &self.regions)
     }
@@ -415,8 +425,12 @@ fn at(text: &[u16], index: isize) -> Option<u16> {
 }
 
 fn ends_with(text: &[u16], suffix: &str) -> bool {
-    let suffix = units(suffix);
-    text.ends_with(&suffix)
+    debug_assert!(suffix.is_ascii());
+    text.len() >= suffix.len()
+        && text[text.len() - suffix.len()..]
+            .iter()
+            .zip(suffix.bytes())
+            .all(|(&unit, byte)| unit == u16::from(byte))
 }
 
 /// `text.indexOf(pattern, from)`.
@@ -1692,8 +1706,10 @@ impl<'p> Ctx<'p> {
     }
 
     fn append(&mut self, suffix: &str) -> Option<()> {
-        let at = self.text.len();
-        self.edit(at, &units(suffix))
+        // `text` is never shorter than the settled prefix.
+        self.text.extend(suffix.encode_utf16());
+        self.scan = TailScan::new(&self.text[self.prefix.len..], self.prefix.fence);
+        Some(())
     }
 
     /// `lastIndexOf(pattern)`, limited to starts at or before `limit`.
