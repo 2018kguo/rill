@@ -20,10 +20,12 @@ pub type Result<T = ()> = core::result::Result<T, Fallback>;
 /// Streamdown's DOM for `source` (one whole, finished document), appended to `out`.
 pub fn render(source: &str, out: &mut String) -> Result {
     let bytes = source.as_bytes();
-    if bytes.iter().any(|&b| matches!(b, b'\r' | b'\t' | 0 | b'|')) {
+    if memchr::memchr3(b'\r', b'\t', b'|', bytes).is_some() || memchr::memchr(0, bytes).is_some() {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
         return Err(Fallback);
     }
+    // Markup is about a third again the text: one allocation up front.
+    out.reserve(source.len() + source.len() / 2);
     let mut blocks = Blocks { source, out, inline: Inline::default(), para: None };
     let mut start = 0;
     while start <= source.len() {
@@ -43,7 +45,7 @@ struct Blocks<'a, 'o> {
 }
 
 fn memchr_newline(bytes: &[u8], from: usize) -> usize {
-    bytes[from..].iter().position(|&b| b == b'\n').map_or(bytes.len(), |at| from + at)
+    memchr::memchr(b'\n', &bytes[from..]).map_or(bytes.len(), |at| from + at)
 }
 
 /// Leading spaces (tabs were ruled out).

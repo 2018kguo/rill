@@ -217,6 +217,7 @@ dependencies = [
 name = "rill-stream"
 version = "0.1.0"
 dependencies = [
+ "memchr",
  "wasm-bindgen",
 ]
 

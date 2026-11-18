@@ -18,7 +18,7 @@ const CODE_OPEN: &str =
 static SPECIAL: [bool; 256] = {
     let mut table = [false; 256];
     let mut index = 0;
-    let specials = b"*_`\\\n&<>[]~@:.";
+    let specials = b"*_`\\\n&<>[]~";
     while index < specials.len() {
         table[specials[index] as usize] = true;
         index += 1;
@@ -133,24 +133,61 @@ impl Inline {
         let start = out.len();
         self.scan(text, out, start)?;
         if self.emphasis()? {
-            let html = out.split_off(start);
-            let mut copied = 0;
-            for run in &self.runs {
-                out.push_str(&html[copied..run.at]);
-                run.closes.write(out, false);
+            // Grow the paragraph's HTML in place, moving each piece right once, from the end.
+            let tag_len = |tags: Tags, open: bool| -> usize {
+                (0..tags.len)
+                    .map(|bit| match (tags.bits >> bit & 1 == 1, open) {
+                        (true, true) => STRONG_OPEN.len(),
+                        (true, false) => STRONG_CLOSE.len(),
+                        (false, true) => 4,
+                        (false, false) => 5,
+                    })
+                    .sum()
+            };
+            let growth: usize = self
+                .runs
+                .iter()
+                .map(|run| tag_len(run.closes, false) + tag_len(run.opens, true) + run.count as usize)
+                .sum::<usize>()
+                - self.runs.iter().map(|run| run.original as usize).sum::<usize>();
+            let old_len = out.len();
+            // SAFETY: every byte written below is ASCII markup or moved whole UTF-8 text.
+            let buffer = unsafe { out.as_mut_vec() };
+            buffer.resize(old_len + growth, 0);
+            let mut end = old_len; // end of the not-yet-moved source
+            let mut write = old_len + growth;
+            let mut scratch = String::new();
+            for run in self.runs.iter().rev() {
+                let source_end = start + run.at + run.original as usize;
+                let piece = end - source_end;
+                buffer.copy_within(source_end..end, write - piece);
+                write -= piece;
+                scratch.clear();
+                run.closes.write(&mut scratch, false);
                 for _ in 0..run.count {
-                    out.push(char::from(run.marker));
+                    scratch.push(char::from(run.marker));
                 }
-                run.opens.write(out, true);
-                copied = run.at + run.original as usize;
+                run.opens.write(&mut scratch, true);
+                write -= scratch.len();
+                buffer[write..write + scratch.len()].copy_from_slice(scratch.as_bytes());
+                end = start + run.at;
             }
-            out.push_str(&html[copied..]);
+            debug_assert_eq!(write, end);
         }
         Ok(())
     }
 
     fn scan(&mut self, text: &str, out: &mut String, start: usize) -> Result {
         let bytes = text.as_bytes();
+        // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
+        if memchr::memchr(b'@', bytes).is_some() || memchr::memmem::find(bytes, b"://").is_some() {
+            return Err(Fallback);
+        }
+        for dot in memchr::memchr_iter(b'.', bytes) {
+            if dot >= 3 && bytes[dot - 3..dot].eq_ignore_ascii_case(b"www") {
+                return Err(Fallback);
+            }
+        }
         let mut at = 0;
         let mut plain = 0;
         // mdast-util-to-hast trims the start of whatever follows a hard break.
@@ -223,16 +260,6 @@ impl Inline {
                     .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?')) =>
                 {
                     out.push_str("&lt;");
-                    at += 1;
-                }
-                // `www.` starts a GFM autolink literal.
-                b'.' if !(at >= 3 && bytes[at - 3..at].eq_ignore_ascii_case(b"www")) => {
-                    out.push('.');
-                    at += 1;
-                }
-                // `scheme://` does too; a `:` otherwise is text.
-                b':' if !bytes[at + 1..].starts_with(b"//") => {
-                    out.push(':');
                     at += 1;
                 }
                 b'*' | b'_' => {

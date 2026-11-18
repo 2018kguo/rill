@@ -8,8 +8,8 @@ fn main() {
         return;
     }
     let mut best = f64::MAX;
-    for _ in 0..500 {
-        out.clear();
+    for _ in 0..std::env::var("N").map_or(500, |n| n.parse().unwrap()) {
+        out = String::new();
         let t = Instant::now();
         rill_stream::render(&source, &mut out).unwrap();
         best = best.min(t.elapsed().as_secs_f64());
