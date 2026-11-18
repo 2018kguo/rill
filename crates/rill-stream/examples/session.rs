@@ -13,7 +13,7 @@ fn main() {
         ends.push(end);
     }
     let mut best = vec![f64::MAX; ends.len()];
-    for _ in 0..20 {
+    for _ in 0..std::env::var("N").map_or(20, |n| n.parse().unwrap()) {
         let mut session = rill_stream::Session::default();
         let mut start = 0;
         for (index, &end) in ends.iter().enumerate() {

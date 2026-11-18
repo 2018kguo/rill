@@ -48,7 +48,12 @@ for (const [name, pieces, depth] of ALPHABETS) {
         updates += 1;
         if (renderer.update(text)) {
           shown += 1;
-          const got = `${host.innerHTML}\n${textNodes(host)}`;
+          // While a block streams its text may sit in several adjacent text nodes; the
+          // HTML must match at every update, and the text nodes once normalized (as
+          // each block is when it is final).
+          const settled = host.cloneNode(true) as Element;
+          settled.normalize();
+          const got = `${host.innerHTML}\n${textNodes(settled)}`;
           const want = await theirs.render(text, { isAnimating: true, controls: false });
           if (got !== want) {
             let at = 0;

@@ -94,11 +94,15 @@ impl<'a> Iterator for Tokens<'a> {
             // Attribute values are quoted, and may hold `>`.
             let mut at = start + 1;
             let mut quoted = false;
-            while at < bytes.len() && (quoted || bytes[at] != b'>') {
+            while let Some(offset) = memchr::memchr2(b'"', b'>', &bytes[at..]) {
+                at += offset;
+                if bytes[at] == b'>' && !quoted {
+                    break;
+                }
                 quoted ^= bytes[at] == b'"';
                 at += 1;
             }
-            self.at = at + 1;
+            self.at = (at + 1).min(bytes.len());
             let tag = &self.html[start..self.at];
             let token = if bytes[start + 1] == b'/' {
                 Token::Close
@@ -113,6 +117,24 @@ impl<'a> Iterator for Tokens<'a> {
         self.at = end;
         Some((start, Token::Text(&self.html[start..end])))
     }
+}
+
+/// The length of the longest common prefix, 16 bytes at a time.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    let length = a.len().min(b.len());
+    let mut at = 0;
+    while at + 16 <= length {
+        let x = u128::from_ne_bytes(a[at..at + 16].try_into().expect("16"));
+        let y = u128::from_ne_bytes(b[at..at + 16].try_into().expect("16"));
+        if x != y {
+            break;
+        }
+        at += 16;
+    }
+    while at < length && a[at] == b[at] {
+        at += 1;
+    }
+    at
 }
 
 fn decode(text: &str) -> String {
@@ -138,10 +160,33 @@ pub fn top_level_nodes(html: &str) -> u32 {
 
 /// The program that turns the DOM of `old` into that of `new`.
 pub fn diff(old: &str, new: &str, program: &mut Program) {
-    let mut olds = Tokens { html: old, at: 0 };
-    let mut news = Tokens { html: new, at: 0 };
     // The index of the next child at each level.
     let mut path: Vec<u32> = vec![0];
+    // Tokens wholly inside the common prefix are the same in both: walk them once, for
+    // the path.
+    let common = common_prefix(old.as_bytes(), new.as_bytes());
+    let mut olds = Tokens { html: old, at: 0 };
+    let mut resume = 0;
+    while let Some((_, token)) = olds.next() {
+        let whole = match token {
+            Token::Text(_) => olds.at < common,
+            _ => olds.at <= common,
+        };
+        if !whole {
+            break;
+        }
+        resume = olds.at;
+        match token {
+            Token::Open(_) => path.push(0),
+            Token::Close => {
+                path.pop();
+                *path.last_mut().expect("balanced") += 1;
+            }
+            Token::Void(_) | Token::Text(_) => *path.last_mut().expect("balanced") += 1,
+        }
+    }
+    let mut olds = Tokens { html: old, at: resume };
+    let mut news = Tokens { html: new, at: resume };
     loop {
         let (a, b) = (olds.next(), news.next());
         match (a, b) {
