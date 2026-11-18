@@ -15,11 +15,21 @@ pub mod op {
     /// `depth, path...`: remove the node at the path, the siblings after it, and the
     /// siblings after each of its ancestors (up to the tail).
     pub const REMOVE: u32 = 1;
-    /// `depth, path..., html`: insert `html` at the end of the element at the path
-    /// (depth 0: the root).
-    pub const INSERT: u32 = 2;
+    /// `depth, path..., count, items...`: build `count` items at the end of the element
+    /// at the path (depth 0: the root). An item is one word, `kind | id << 2`: `OPEN`
+    /// an element like tag `id` (see `Program::tags`) and go into it, `CLOSE` it, or a
+    /// `VOID` element; or `TEXT` then a string: a text node.
+    pub const BUILD: u32 = 2;
     /// `depth, path..., text`: append a text node holding `text` to the element at the path.
     pub const INSERT_TEXT: u32 = 3;
+}
+
+/// `BUILD` item kinds.
+pub mod item {
+    pub const OPEN: u32 = 0;
+    pub const CLOSE: u32 = 1;
+    pub const VOID: u32 = 2;
+    pub const TEXT: u32 = 3;
 }
 
 /// The program: opcodes with their operands, strings as `[start, end)` UTF-16 ranges in
@@ -29,6 +39,11 @@ pub struct Program {
     pub ops: Vec<u32>,
     pub text: String,
     utf16: u32,
+    /// Every distinct open tag built so far in the session; an item's `id` indexes it.
+    tags: Vec<Box<str>>,
+    /// The tags new this update, as string ranges (the DOM side makes one element of
+    /// each, to clone).
+    pub defs: Vec<u32>,
 }
 
 impl Program {
@@ -36,6 +51,20 @@ impl Program {
         self.ops.clear();
         self.text.clear();
         self.utf16 = 0;
+        self.defs.clear();
+    }
+
+    fn tag(&mut self, tag: &str) -> u32 {
+        if let Some(id) = self.tags.iter().position(|known| **known == *tag) {
+            return id as u32;
+        }
+        self.tags.push(tag.into());
+        let units = tag.len() as u32; // ASCII markup
+        self.text.push_str(tag);
+        self.defs.push(self.utf16);
+        self.defs.push(self.utf16 + units);
+        self.utf16 += units;
+        (self.tags.len() - 1) as u32
     }
 
     fn string(&mut self, value: &str) {
@@ -48,13 +77,34 @@ impl Program {
 
     /// Inserts `html` at the end of the element at `path`: as a text node when it is text.
     fn insert(&mut self, path: &[u32], html: &str) {
-        if html.contains('<') {
-            self.path(op::INSERT, path);
-            self.string(html);
-        } else {
+        if !html.contains('<') {
             self.path(op::INSERT_TEXT, path);
             self.string(&decode(html));
+            return;
         }
+        self.path(op::BUILD, path);
+        let count_at = self.ops.len();
+        self.ops.push(0);
+        let mut count = 0;
+        for (_, token) in (Tokens { html, at: 0 }) {
+            count += 1;
+            match token {
+                Token::Open(tag) => {
+                    let id = self.tag(tag);
+                    self.ops.push(item::OPEN | id << 2);
+                }
+                Token::Close => self.ops.push(item::CLOSE),
+                Token::Void(tag) => {
+                    let id = self.tag(tag);
+                    self.ops.push(item::VOID | id << 2);
+                }
+                Token::Text(text) => {
+                    self.ops.push(item::TEXT);
+                    self.string(&decode(text));
+                }
+            }
+        }
+        self.ops[count_at] = count;
     }
 
     fn path(&mut self, opcode: u32, path: &[u32]) {
@@ -273,8 +323,8 @@ mod tests {
     #[test]
     fn a_changed_element_is_replaced_from_there() {
         let (ops, text) = run("<p>a *b</p>", "<p>a <em>b</em></p>");
-        assert_eq!(ops, [op::REMOVE, 2, 0, 0, op::INSERT, 1, 0, 0, 12]);
-        assert_eq!(text, "a <em>b</em>");
+        assert_eq!(ops, [op::REMOVE, 2, 0, 0, op::BUILD, 1, 0, 4, item::TEXT, 0, 2, item::OPEN, item::TEXT, 6, 7, item::CLOSE]);
+        assert_eq!(text, "a <em>b");
     }
 
     #[test]
@@ -287,7 +337,7 @@ mod tests {
     #[test]
     fn new_blocks_are_inserted_at_the_root() {
         let (ops, text) = run("<p>a</p>", "<p>a</p><p>b</p>");
-        assert_eq!(ops, [op::INSERT, 0, 0, 8]);
-        assert_eq!(text, "<p>b</p>");
+        assert_eq!(ops, [op::BUILD, 0, 3, item::OPEN, item::TEXT, 3, 4, item::CLOSE]);
+        assert_eq!(text, "<p>b");
     }
 }

@@ -484,15 +484,16 @@ mod wasm {
         session: crate::Session,
         input: Vec<u16>,
         /// After each update: the outcome, the opcodes' `u32` index and count, the
-        /// strings' byte index and length (UTF-8), the root nodes that became final.
-        header: [u32; 6],
+        /// strings' byte index and length (UTF-8), the root nodes that became final, and
+        /// the new tags' string ranges' `u32` index and count.
+        header: [u32; 8],
     }
 
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 6] }
+            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 8] }
         }
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
@@ -538,6 +539,8 @@ mod wasm {
                 program.text.as_ptr() as u32,
                 program.text.len() as u32,
                 self.session.final_nodes,
+                program.defs.as_ptr() as u32 / 4,
+                program.defs.len() as u32,
             ];
             outcome as u32
         }
