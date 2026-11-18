@@ -554,6 +554,22 @@ fn last_index_of(text: &[u16], pattern: &[u16], from: Option<isize>) -> Option<u
         Some(from) => usize::try_from(from.max(0)).unwrap_or(0).min(limit),
         None => limit,
     } + 1;
+    if rest.iter().all(|&unit| unit == first) {
+        // A run of one unit (`**`): from each last unit found, the run it ends.
+        let length = pattern.len();
+        let mut top = (end + length - 1).min(text.len());
+        while let Some(last) = rfind_unit(&text[..top], first) {
+            let mut start = last;
+            while start > 0 && text[start - 1] == first && last + 1 - start < length {
+                start -= 1;
+            }
+            if last + 1 - start == length {
+                return Some(start);
+            }
+            top = start;
+        }
+        return None;
+    }
     while end > 0 {
         let found = rfind_unit(&text[..end], first)?;
         if text[found + 1..found + pattern.len()] == *rest {
@@ -1347,17 +1363,19 @@ fn count_single_underscores(view: &View<'_>, from: usize) -> usize {
 }
 
 fn count_triple_asterisks(view: &View<'_>, from: usize) -> usize {
+    // Runs of stars in prose, found star by star rather than unit by unit.
+    let text = view.text;
     let mut count = 0;
-    let mut run = 0;
-    for (index, &unit) in view.text.iter().enumerate().skip(from) {
-        if unit == STAR && view.region_at(index) == PROSE {
-            run += 1;
-        } else {
-            count += run / 3;
-            run = 0;
+    let mut at = from;
+    while let Some(start) = index_of_unit(text, STAR, at) {
+        let mut end = start;
+        while end < text.len() && text[end] == STAR && view.region_at(end) == PROSE {
+            end += 1;
         }
+        count += (end - start) / 3;
+        at = end.max(start + 1);
     }
-    count + run / 3
+    count
 }
 
 /// `hasUnmatchedDoubleUnderscore` from `from`: whether an odd number of runs count.
