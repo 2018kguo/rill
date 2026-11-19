@@ -28,7 +28,7 @@ pub fn render(source: &str, out: &mut String) -> Result {
     let mut tokens = Out::default();
     let units: Vec<u16> = source.encode_utf16().collect();
     render_split(&units, &mut tokens, &mut Inline::default())?;
-    tokens::to_html(&tokens.words, &tokens.text, out);
+    tokens::to_html(&tokens.words, &tokens.text, &tokens.origins, &units, out);
     Ok(())
 }
 
@@ -68,7 +68,7 @@ pub(crate) fn render_split_at(
     out: &mut Out,
     inline: &mut Inline,
 ) -> Result<Split> {
-    out.set_source(source, at);
+    out.set_source(source, at, agree);
     if source.iter().fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0x7C | 0)) {
         // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
         return Err(Fallback);

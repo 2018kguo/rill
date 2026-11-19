@@ -240,7 +240,7 @@ function apply(root: Root, ops: number, length: number, words: number) {
  * at the end of `parent`: how many nodes it added to `parent` itself.
  */
 function build(root: Root, parent: Element, start: number, end: number, text: number) {
-  const { u32, tags, origins, agree, input } = root;
+  const { u32, tags, origins, input } = root;
   let node: Node = parent;
   let added = 0;
   for (let at = start; at < end; at += 1) {
@@ -253,10 +253,11 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
     else if (kind === VOID) node.appendChild(clone(tags, id));
     else {
       const origin = u32[origins + at]!;
-      (node as Element).append(
-        origin !== NOWHERE && origin + id <= agree ? input.slice(origin, origin + id) : root.literal(text, text + id),
-      );
-      text += id;
+      if (origin !== NOWHERE) (node as Element).append(input.slice(origin, origin + id));
+      else {
+        (node as Element).append(root.literal(text, text + id));
+        text += id;
+      }
     }
   }
   return added;

@@ -73,9 +73,24 @@ impl Mark {
 #[derive(Clone, Copy)]
 pub struct Tokens<'a> {
     pub words: &'a [u32],
+    /// The literal text (of the text tokens with no origin).
     pub text: &'a [u16],
     /// Per word, the text token's origin (see `tokens::Out`).
     pub origins: &'a [u32],
+    /// The text as given, which the origins point into.
+    pub source: &'a [u16],
+}
+
+impl<'a> Tokens<'a> {
+    /// The text of text token `word` of `units` units, and the literal units it takes
+    /// from `literal` on.
+    #[inline]
+    fn units(&self, word: usize, literal: usize, units: usize) -> (&'a [u16], usize) {
+        match self.origins[word] {
+            NOWHERE => (&self.text[literal..literal + units], units),
+            origin => (&self.source[origin as usize..origin as usize + units], 0),
+        }
+    }
 }
 
 fn step(path: &mut Vec<u32>, word: u32) {
@@ -92,8 +107,7 @@ fn step(path: &mut Vec<u32>, word: u32) {
 /// The program that turns the DOM of `old` into that of `new` (positions in `program`
 /// are in `new`). `mark` is a boundary in `old` (from the diff that produced it, or
 /// cleared), and is left at the last boundary before the first difference in `new`.
-/// The rendered text equals the text as given up to `agree`.
-pub fn diff(old: Tokens<'_>, new: Tokens<'_>, agree: usize, program: &mut Program, mark: &mut Mark) {
+pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut Mark) {
     let mut path = std::mem::take(&mut mark.spare);
     path.clear();
     let (mut word, mut text) = (mark.word, mark.text);
@@ -102,6 +116,7 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, agree: usize, program: &mut Progra
         && word <= old.words.len().min(new.words.len())
         && text <= old.text.len().min(new.text.len())
         && old.words[..word] == new.words[..word]
+        && old.origins[..word] == new.origins[..word]
         && old.text[..text] == new.text[..text];
     if holds {
         path.extend_from_slice(&mark.path);
@@ -124,12 +139,14 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, agree: usize, program: &mut Progra
             (Some(x), Some(y)) if x == y => {
                 if x & 3 == kind::TEXT {
                     let units = (x >> 2) as usize;
-                    if old.text[old_text..old_text + units] != new.text[text..text + units] {
+                    let (a, old_taken) = old.units(old_word, old_text, units);
+                    let (b, taken) = new.units(word, text, units);
+                    if a != b {
                         replace(true, new, word, text, &mut path, program);
                         break;
                     }
-                    old_text += units;
-                    text += units;
+                    old_text += old_taken;
+                    text += taken;
                 }
                 step(&mut path, x);
                 old_word += 1;
@@ -140,14 +157,14 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, agree: usize, program: &mut Progra
                 if x & 3 == kind::TEXT
                     && y & 3 == kind::TEXT
                     && y >> 2 > x >> 2
-                    && old.text[old_text..old_text + (x >> 2) as usize]
-                        == new.text[text..text + (x >> 2) as usize] =>
+                    && old.units(old_word, old_text, (x >> 2) as usize).0
+                        == new.units(word, text, (x >> 2) as usize).0 =>
             {
                 first = false;
                 let (old_units, units) = ((x >> 2) as usize, (y >> 2) as usize);
                 program.path(op::APPEND, &path);
                 let origin = new.origins[word];
-                if origin != NOWHERE && origin as usize + units <= agree {
+                if origin != NOWHERE {
                     program.ops.push((origin + old_units as u32) | op::SOURCE);
                     program.ops.push(origin + units as u32);
                 } else {
@@ -155,8 +172,8 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, agree: usize, program: &mut Progra
                     program.ops.push((text + units) as u32);
                     program.text(text + old_units);
                 }
-                old_text += old_units;
-                text += units;
+                old_text += old.units(old_word, old_text, old_units).1;
+                text += new.units(word, text, units).1;
                 step(&mut path, y);
                 old_word += 1;
                 word += 1;
@@ -194,7 +211,7 @@ fn replace(remove: bool, new: Tokens<'_>, word: usize, text: usize, path: &mut [
                 }
                 (start, start_text) = (index + 1, at_text);
             }
-            kind::TEXT => at_text += (token >> 2) as usize,
+            kind::TEXT if new.origins[index] == NOWHERE => at_text += (token >> 2) as usize,
             _ => {}
         }
     }
@@ -218,9 +235,9 @@ mod tests {
         let mut program = Program::default();
         program.clear();
         fn view(out: &Out) -> Tokens<'_> {
-            Tokens { words: &out.words, text: &out.text, origins: &out.origins }
+            Tokens { words: &out.words, text: &out.text, origins: &out.origins, source: &[] }
         }
-        diff(view(old), view(new), 0, &mut program, &mut Mark::default());
+        diff(view(old), view(new), &mut program, &mut Mark::default());
         program.ops
     }
 

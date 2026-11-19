@@ -8,10 +8,10 @@ const counts: Record<string, number> = {};
 let built = 0;
 let prev = 0;
 const names = ["append", "remove", "build"];
-for (let end = 256; ; end += 256) {
+for (let end = 270; ; end += 270) {
   const cut = Math.min(end, source.length);
   const outcome = s.update(source.slice(prev, cut), prev === 0);
-  const header = new Uint32Array(memory().buffer, s.headerAt() * 4, 9);
+  const header = new Uint32Array(memory().buffer, s.headerAt() * 4, 11);
   prev = cut;
   const ops = new Uint32Array(memory().buffer, header[1]! * 4, header[2]);
   let at = 0;

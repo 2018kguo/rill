@@ -103,9 +103,15 @@ impl Session {
                         words: &self.shown.words[self.shown_from.words..],
                         text: &self.shown.text[self.shown_from.text..],
                         origins: &self.shown.origins[self.shown_from.words..],
+                        source: self.remend.input(),
                     };
-                    let new = Tokens { words: &self.next.words, text: &self.next.text, origins: &self.next.origins };
-                    diff(old, new, self.agree, &mut self.program, &mut self.mark);
+                    let new = Tokens {
+                        words: &self.next.words,
+                        text: &self.next.text,
+                        origins: &self.next.origins,
+                        source: self.remend.input(),
+                    };
+                    diff(old, new, &mut self.program, &mut self.mark);
                 }
                 // The mark is in `next`; the next diff starts from `next` after `split`.
                 if outcome != Outcome::Patch || self.split.words != 0 {
@@ -130,7 +136,8 @@ impl Session {
     /// The last update's HTML (the blocks that became final, then the open ones).
     pub fn html(&self) -> String {
         let mut html = String::new();
-        crate::tokens::to_html(&self.shown.words, &self.shown.text, &mut html);
+        let shown = &self.shown;
+        crate::tokens::to_html(&shown.words, &shown.text, &shown.origins, self.remend.input(), &mut html);
         html
     }
 
@@ -194,10 +201,12 @@ mod tests {
                 }
                 if outcome != super::Outcome::Fallback {
                     let (shown, split) = (&session.shown, session.shown_from);
-                    let text_final = &shown.text[..split.text];
-                    crate::tokens::to_html(&shown.words[..split.words], text_final, &mut kept);
+                    let input = session.remend.input();
+                    let (words, origins) = (&shown.words[..split.words], &shown.origins[..split.words]);
+                    crate::tokens::to_html(words, &shown.text[..split.text], origins, input, &mut kept);
                     let mut now = kept.clone();
-                    crate::tokens::to_html(&shown.words[split.words..], &shown.text[split.text..], &mut now);
+                    let (words, origins) = (&shown.words[split.words..], &shown.origins[split.words..]);
+                    crate::tokens::to_html(words, &shown.text[split.text..], origins, input, &mut now);
                     let healed = String::from_utf16(session.remend.healed()).expect("no lone surrogates");
                     let mut whole = String::new();
                     if crate::render(&healed, &mut whole).is_ok() {
