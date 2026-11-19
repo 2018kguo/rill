@@ -24,8 +24,10 @@ export type StreamSession = {
    * opcodes, as a `u32` index and count; the rendering's tokens, the same; its text, as a
    * `u16` index and count; the first text unit the edit refers to; the root nodes that
    * became final; the tokens' origins, as a `u32` index (one a token); how far the
-   * rendered text equals the text as given. */
+   * rendered text equals the text as given; how many strings are interned. */
   headerAt(): number;
+  /** The interned strings from `from` on, each ended by a NUL. */
+  strings(from: number): string;
   free(): void;
 };
 
@@ -44,9 +46,8 @@ const REMOVE = 1;
 const OPEN = 0;
 const CLOSE = 1;
 const VOID = 2;
-/** Tag ids from here on: an ordered list starting at `id - OL_START`. */
-const OL_START = 16;
-const OL = 11;
+/** Tag ids from here on: interned strings (an open tag, or a whole subtree as `VOID`). */
+const INTERNED = 16;
 /** An APPEND range in the text as given. */
 const SOURCE = 0x80000000;
 /** A text token that is not one stretch of the text as given. */
@@ -75,7 +76,9 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
     u32: new Uint32Array(0),
     input: "",
     origins: 0,
-    agree: 0,
+    interned: [],
+    nodes: [],
+    template,
     literal: (start, end) => {
       // Decoded once an update, on first use.
       if (state.strings === undefined) {
@@ -129,7 +132,11 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
       state.strings = undefined;
       state.input = next;
       state.origins = u32[header + 9]! - words;
-      state.agree = u32[header + 10]!;
+      const interned = u32[header + 11]!;
+      if (interned > state.interned.length) {
+        const added = session.strings(state.interned.length).split("\0");
+        for (let at = 0; at < added.length - 1; at += 1) state.interned.push(added[at]!);
+      }
       if (outcome === PATCH) {
         apply(state, u32[header + 1]!, u32[header + 2]!, words);
       } else {
@@ -157,9 +164,12 @@ type Root = {
   count: number;
   /** All of memory. */
   u32: Uint32Array;
-  /** The text as given, and how far the rendered text equals it. */
+  /** The text as given. */
   input: string;
-  agree: number;
+  /** The interned strings, and each one's node once parsed (see `clone`). */
+  interned: string[];
+  nodes: (Node | undefined)[];
+  template: HTMLTemplateElement;
   /** From a token's index to its origin's. */
   origins: number;
   /** The rendering's text `[start, end)`. */
@@ -248,9 +258,9 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
     const id = word >>> 2;
     const kind = word & 3;
     if (node === parent && kind !== CLOSE) added += 1;
-    if (kind === OPEN) node = node.appendChild(clone(tags, id));
+    if (kind === OPEN) node = node.appendChild(clone(root, id, false));
     else if (kind === CLOSE) node = node.parentNode!;
-    else if (kind === VOID) node.appendChild(clone(tags, id));
+    else if (kind === VOID) node.appendChild(clone(root, id, true));
     else {
       const origin = u32[origins + at]!;
       if (origin !== NOWHERE) (node as Element).append(input.slice(origin, origin + id));
@@ -263,9 +273,16 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
   return added;
 }
 
-function clone(tags: Element[], id: number): Node {
-  if (id < OL_START) return tags[id]!.cloneNode(false);
-  const list = tags[OL]!.cloneNode(false) as Element;
-  list.setAttribute("start", String(id - OL_START));
-  return list;
+/** A new node for tag `id`: an element (`OPEN`), or a whole subtree (`VOID`). */
+function clone(root: Root, id: number, whole: boolean): Node {
+  if (id < INTERNED) return root.tags[id]!.cloneNode(false);
+  const at = id - INTERNED;
+  let node = root.nodes[at];
+  if (node === undefined) {
+    // Parsed once: an open tag with its end tag, or the subtree as it is.
+    const html = root.interned[at]!;
+    root.template.innerHTML = whole ? html : `${html}</${html.slice(1, html.search(/[\s>]/))}>`;
+    node = root.nodes[at] = root.template.content.firstChild!;
+  }
+  return node.cloneNode(whole);
 }

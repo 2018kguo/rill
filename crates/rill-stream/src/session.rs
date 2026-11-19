@@ -137,12 +137,22 @@ impl Session {
     pub fn html(&self) -> String {
         let mut html = String::new();
         let shown = &self.shown;
-        crate::tokens::to_html(&shown.words, &shown.text, &shown.origins, self.remend.input(), &mut html);
+        let strings = shown.strings.borrow();
+        crate::tokens::to_html(&shown.words, &shown.text, &shown.origins, self.remend.input(), &strings, &mut html);
         html
+    }
+
+    /// The interned strings.
+    pub fn strings(&self) -> std::cell::Ref<'_, crate::tokens::Strings> {
+        self.shown.strings.borrow()
     }
 
     fn render_tail(&mut self) -> crate::Result {
         self.next.clear();
+        // Both renderings name the same strings.
+        if !std::rc::Rc::ptr_eq(&self.next.strings, &self.shown.strings) {
+            self.next.strings = self.shown.strings.clone();
+        }
         // What comes before the last block is final.
         let split = render_split_at(
             &self.remend.healed()[self.stable..],
@@ -202,11 +212,12 @@ mod tests {
                 if outcome != super::Outcome::Fallback {
                     let (shown, split) = (&session.shown, session.shown_from);
                     let input = session.remend.input();
+                    let strings = shown.strings.borrow();
                     let (words, origins) = (&shown.words[..split.words], &shown.origins[..split.words]);
-                    crate::tokens::to_html(words, &shown.text[..split.text], origins, input, &mut kept);
+                    crate::tokens::to_html(words, &shown.text[..split.text], origins, input, &strings, &mut kept);
                     let mut now = kept.clone();
                     let (words, origins) = (&shown.words[split.words..], &shown.origins[split.words..]);
-                    crate::tokens::to_html(words, &shown.text[split.text..], origins, input, &mut now);
+                    crate::tokens::to_html(words, &shown.text[split.text..], origins, input, &strings, &mut now);
                     let healed = String::from_utf16(session.remend.healed()).expect("no lone surrogates");
                     let mut whole = String::new();
                     if crate::render(&healed, &mut whole).is_ok() {

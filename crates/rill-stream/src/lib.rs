@@ -28,7 +28,7 @@ pub fn render(source: &str, out: &mut String) -> Result {
     let mut tokens = Out::default();
     let units: Vec<u16> = source.encode_utf16().collect();
     render_split(&units, &mut tokens, &mut Inline::default())?;
-    tokens::to_html(&tokens.words, &tokens.text, &tokens.origins, &units, out);
+    tokens::to_html(&tokens.words, &tokens.text, &tokens.origins, &units, &tokens.strings.borrow(), out);
     Ok(())
 }
 
@@ -422,11 +422,14 @@ impl<'a> Blocks<'a, '_> {
         let Some(list) = self.list.take() else {
             return Ok(());
         };
-        self.out.open(match (list.ordered, list.start) {
-            (false, _) => tag::UL,
-            (true, 1) => tag::OL,
-            (true, start) => tag::OL_START + start,
-        });
+        match (list.ordered, list.start) {
+            (false, _) => self.out.open(tag::UL),
+            (true, 1) => self.out.open(tag::OL),
+            (true, start) => {
+                let ol = tokens::TAGS[tag::OL as usize];
+                self.out.open_html(&format!("{} start=\"{start}\">", &ol[..ol.len() - 1]));
+            }
+        }
         self.out.ascii("\n");
         for item in list.items {
             self.out.open(tag::LI);
@@ -548,15 +551,15 @@ mod wasm {
         /// the rendering's tokens, the same; its text, as a `u16` index and count; the
         /// first text unit the edit refers to; the root nodes that became final; the
         /// tokens' origins, as a `u32` index (one a token); how far the rendered text
-        /// equals the text as given.
-        header: [u32; 11],
+        /// equals the text as given; how many strings are interned.
+        header: [u32; 12],
     }
 
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 11] }
+            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 12] }
         }
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
@@ -583,6 +586,16 @@ mod wasm {
         #[wasm_bindgen(js_name = headerAt)]
         pub fn header_at(&self) -> usize {
             self.header.as_ptr() as usize / 4
+        }
+        /// The interned strings from `from` on, each ended by a NUL.
+        pub fn strings(&self, from: usize) -> String {
+            let strings = self.session.strings();
+            let mut joined = String::new();
+            for string in &strings.list[from..] {
+                joined.push_str(string);
+                joined.push('\0');
+            }
+            joined
         }
         /// The last update's whole HTML.
         #[wasm_bindgen(getter)]
@@ -612,6 +625,7 @@ mod wasm {
                 self.session.final_nodes,
                 rendering.origins.as_ptr() as u32 / 4,
                 self.session.agree as u32,
+                self.session.strings().list.len() as u32,
             ];
             outcome as u32
         }

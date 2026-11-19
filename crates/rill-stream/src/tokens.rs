@@ -5,9 +5,10 @@
 //! itself next in `text`). Adjacent text is one token, as it is one DOM text node.
 //!
 //! Tags are a fixed table, so a tag is one word to write, compare and send, and the DOM
-//! side clones an element it parsed once. An ordered list starting at `n` other than 1
-//! is tag `OL_START + n`. Text is kept unescaped in UTF-16, the unit both the DOM and
-//! the diff measure it in.
+//! side clones an element it parsed once. Ids from [`tag::INTERNED`] on are strings
+//! interned for the whole session (see [`Strings`]): with `OPEN`, an element's open tag
+//! (attributes and all); with `VOID`, a whole static subtree. Text is kept unescaped in
+//! UTF-16, the unit both the DOM and the diff measure it in.
 
 pub mod kind {
     pub const OPEN: u32 = 0;
@@ -29,8 +30,8 @@ pub mod tag {
     pub const LI: u32 = 12;
     pub const HR: u32 = 13;
     pub const BR: u32 = 14;
-    /// `OL_START + start`: an ordered list with a `start` attribute.
-    pub const OL_START: u32 = 16;
+    /// `INTERNED + index`: [`super::Strings`]' string `index`.
+    pub const INTERNED: u32 = 16;
 }
 
 /// Each tag's open tag, as Streamdown writes it.
@@ -52,6 +53,31 @@ pub const TAGS: [&str; 15] = [
     "<br>",
 ];
 
+/// The strings interned tokens name, kept for a whole session so that a token means the
+/// same in every rendering.
+#[derive(Default)]
+pub struct Strings {
+    pub list: Vec<String>,
+    index: std::collections::HashMap<String, u32>,
+}
+
+impl Strings {
+    /// The id of `string` (interning it).
+    pub fn id(&mut self, string: &str) -> u32 {
+        if let Some(&id) = self.index.get(string) {
+            return id;
+        }
+        let id = tag::INTERNED + self.list.len() as u32;
+        self.list.push(string.to_owned());
+        self.index.insert(string.to_owned(), id);
+        id
+    }
+
+    fn get(&self, id: u32) -> &str {
+        &self.list[(id - tag::INTERNED) as usize]
+    }
+}
+
 /// An origin for text that is not one stretch of the source.
 pub const NOWHERE: u32 = u32::MAX;
 
@@ -70,6 +96,8 @@ pub struct Out {
     source: (usize, usize),
     source_at: usize,
     agree: usize,
+    /// The session's interned strings (shared by its renderings).
+    pub strings: std::rc::Rc<std::cell::RefCell<Strings>>,
 }
 
 impl Out {
@@ -120,6 +148,18 @@ impl Out {
     #[inline]
     pub fn void(&mut self, tag: u32) {
         self.word(kind::VOID | tag << 2);
+    }
+
+    /// Opens an element with the open tag `html`.
+    pub fn open_html(&mut self, html: &str) {
+        let id = self.strings.borrow_mut().id(html);
+        self.open(id);
+    }
+
+    /// A static subtree, `html`.
+    pub fn subtree(&mut self, html: &str) {
+        let id = self.strings.borrow_mut().id(html);
+        self.void(id);
     }
 
     /// Appends text, to the text token before when there is one.
@@ -198,30 +238,24 @@ impl Out {
 
 /// The HTML of `words` (the literal text from `text[0]`, source text from `source`, the
 /// whole text), appended to `out`.
-pub fn to_html(words: &[u32], text: &[u16], origins: &[u32], source: &[u16], out: &mut String) {
+pub fn to_html(words: &[u32], text: &[u16], origins: &[u32], source: &[u16], strings: &Strings, out: &mut String) {
     let mut open: Vec<u32> = Vec::new();
     let mut at = 0;
     for (index, &word) in words.iter().enumerate() {
         let id = word >> 2;
         match word & 3 {
             kind::OPEN => {
-                if id >= tag::OL_START {
-                    out.push_str(&TAGS[tag::OL as usize][..TAGS[tag::OL as usize].len() - 1]);
-                    out.push_str(&format!(" start=\"{}\">", id - tag::OL_START));
-                } else {
-                    out.push_str(TAGS[id as usize]);
-                }
-                open.push(if id >= tag::OL_START { tag::OL } else { id });
+                out.push_str(if id >= tag::INTERNED { strings.get(id) } else { TAGS[id as usize] });
+                open.push(id);
             }
             kind::CLOSE => {
                 let id = open.pop().expect("balanced");
-                let name = &TAGS[id as usize][1..];
-                let name = &name[..name.find([' ', '>']).expect("a tag")];
+                let tag = if id >= tag::INTERNED { strings.get(id) } else { TAGS[id as usize] };
                 out.push_str("</");
-                out.push_str(name);
+                out.push_str(&tag[1..tag.find([' ', '>']).expect("a tag")]);
                 out.push('>');
             }
-            kind::VOID => out.push_str(TAGS[id as usize]),
+            kind::VOID => out.push_str(if id >= tag::INTERNED { strings.get(id) } else { TAGS[id as usize] }),
             _ => {
                 let units = if origins[index] == NOWHERE {
                     at += id as usize;
