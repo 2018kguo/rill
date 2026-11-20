@@ -1,0 +1,131 @@
+//! rill-stream against the exact pipeline (`rill`, which matches Streamdown): over random
+//! documents, whatever rill-stream renders has the same elements and text as the HAST
+//! `rill` builds, after Streamdown's components (`MemoLi` renders an item holding only a
+//! paragraph as the paragraph's content). Attributes and text-node splits are
+//! js/test/stream*.test.ts's to check, against Streamdown itself.
+//!   STRUCTURE_ROUNDS=1000000 cargo test --release -p rill-stream --test structure
+
+use serde_json::Value;
+
+const PIECES: [&str; 34] = [
+    "a", "b", " ", "  ", "   ", "    ", "\n", "\n", "\n\n", "> ", ">", "- ", "* ", "1. ", "2) ", "# ", "---",
+    "*", "**", "_", "`", "\\", "[x](/u)", "[", "]", "&amp;", "  \n", "x", "=", "+ ", "10. ", "é",
+    "\n> ", "\n  ",
+];
+
+#[test]
+fn same_structure_as_the_exact_pipeline() {
+    let rounds = std::env::var("STRUCTURE_ROUNDS").map_or(20_000, |n| n.parse().unwrap());
+    let mut seed = std::env::var("STRUCTURE_SEED").map_or(0x2545_f491_4f6c_dd1du64, |s| s.parse().unwrap());
+    let mut next = |bound: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % bound as u64) as usize
+    };
+    let (mut rendered, mut total) = (0, 0);
+    for _ in 0..rounds {
+        let mut text = String::new();
+        for _ in 0..1 + next(24) {
+            text.push_str(PIECES[next(PIECES.len())]);
+        }
+        total += 1;
+        let Some(ours) = ours(&text) else { continue };
+        let Some(theirs) = theirs(&text) else { continue };
+        rendered += 1;
+        assert_eq!(ours, theirs, "{text:?}");
+    }
+    eprintln!("rendered {rendered}/{total}");
+}
+
+/// rill-stream's rendering, as nested tags and merged text.
+fn ours(text: &str) -> Option<String> {
+    let mut html = String::new();
+    rill_stream::render(text, &mut html).ok()?;
+    // Parse our own HTML back: tags by name, text unescaped.
+    let mut out = String::new();
+    let mut rest = html.as_str();
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("</") {
+            let end = after.find('>').unwrap();
+            out.push_str(&format!("</{}>", hast_name(&after[..end])));
+            rest = &after[end + 1..];
+        } else if let Some(after) = rest.strip_prefix('<') {
+            let end = after.find('>').unwrap();
+            let name = &after[..after[..end].find([' ', '>']).unwrap_or(end)];
+            out.push_str(&format!("<{}>", hast_name(name)));
+            if matches!(name, "br" | "hr" | "img" | "input") {
+                out.push_str(&format!("</{name}>"));
+            }
+            rest = &after[end + 1..];
+        } else {
+            let end = rest.find('<').unwrap_or(rest.len());
+            out.push_str(&rest[..end].replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"));
+            rest = &rest[end..];
+        }
+    }
+    Some(out)
+}
+
+/// The HAST tag Streamdown's component for `name` renders from.
+fn hast_name(name: &str) -> &str {
+    match name {
+        "button" => "a",
+        other => other,
+    }
+}
+
+/// `rill`'s HAST of each block Streamdown's split makes (rill-stream's cuts, which the JS
+/// tests check against Streamdown's), as nested tags and merged text, with Streamdown's
+/// components applied.
+fn theirs(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut from = 0;
+    for cut in rill_stream::block_cuts(text).into_iter().chain([text.len()]) {
+        out.push_str(&block(&text[from..cut])?);
+        from = cut;
+    }
+    Some(out)
+}
+
+fn block(text: &str) -> Option<String> {
+    let json = rill::hast::render_json(text, &rill::Options::default()).ok()?;
+    let value: Value = serde_json::from_str(&json).ok()?;
+    if value["kind"] != "complete" {
+        return None;
+    }
+    let mut out = String::new();
+    // Streamdown renders blocks back to back; within one, the root's line endings
+    // between its children stay.
+    for child in value["tree"]["children"].as_array()? {
+        write(child, &mut out)?;
+    }
+    Some(out)
+}
+
+fn write(node: &Value, out: &mut String) -> Option<()> {
+    match node["type"].as_str()? {
+        "text" => out.push_str(node["value"].as_str()?),
+        "element" => {
+            let tag = node["tagName"].as_str()?;
+            // `strong` renders as a span; the HTML parse above names it by tag.
+            let shown = if tag == "strong" { "span" } else { tag };
+            out.push_str(&format!("<{shown}>"));
+            let children = node["children"].as_array()?;
+            let kept: Vec<&Value> = children.iter().filter(|c| !(c["type"] == "text" && c["value"] == "\n")).collect();
+            // MemoLi: an item holding only a paragraph renders the paragraph's content.
+            if tag == "li" && kept.len() == 1 && kept[0]["tagName"] == "p" {
+                for child in kept[0]["children"].as_array()? {
+                    write(child, out)?;
+                }
+            } else {
+                for child in children {
+                    write(child, out)?;
+                }
+            }
+            out.push_str(&format!("</{shown}>"));
+        }
+        _ => return None,
+    }
+    Some(())
+}

@@ -177,12 +177,33 @@ mod tests {
     /// After every chunk, the session's HTML is the whole repaired text rendered from
     /// scratch: what each update keeps (final blocks, the inline resume point) is what
     /// rendering again would make. Random texts dense in what the renderer handles.
+    /// `STREAM_REPLAY=<json text> STREAM_ENDS=7,20`: each update's HTML, and the whole.
+    #[test]
+    fn replay() {
+        let (Ok(text), Ok(ends)) = (std::env::var("STREAM_REPLAY"), std::env::var("STREAM_ENDS")) else { return };
+        let text: String = text.replace("\\n", "\n");
+        let mut session = super::Session::default();
+        let mut start = 0;
+        for end in ends.split(',').map(|e| e.parse::<usize>().unwrap()) {
+            let outcome = session.update(&text[start..end], start == 0);
+            let healed = String::from_utf16(session.remend.healed()).unwrap();
+            let mut whole = String::new();
+            let _ = crate::render(&healed, &mut whole);
+            println!("{end} {outcome:?} stable={} healed={healed:?}\n  session: {}\n  whole:   {whole}", session.stable, session.html());
+            let r = session.rendering();
+            let literal: usize = r.words.iter().zip(&r.origins).filter(|(w, o)| *w & 3 == 3 && **o == crate::tokens::NOWHERE).map(|(w, _)| (*w >> 2) as usize).sum();
+            println!("  literal units {literal} text {} words {:?} origins {:?}", r.text.len(), r.words.iter().map(|w| (w & 3, w >> 2)).collect::<Vec<_>>(), r.origins);
+            start = end;
+        }
+    }
+
     #[test]
     fn streaming_render_is_whole_text_render() {
-        const PIECES: [&str; 42] = [
+        const PIECES: [&str; 50] = [
             "a", "b", "word", " ", " ", "  ", "\n", "\n\n", "*", "**", "***", "_", "__", "`", "``", "\\",
             "&", "<", "é", "😀", "# ", "- ", "1. ", "---", "x.", ":", "  \n", "www.", "=", "\\*",
             "[", "]", "(", ")", "](", "[x](/u)", "<a:b>", "&amp;", "&#", ";", "](javascript:x)", "\"t\"",
+            "> ", "\n> ", ">", "\n  ", "\n    ", "  - ", "\n- ", "\n\n  ",
         ];
         let mut seed = std::env::var("STREAM_SEED").map_or(0x9e37_79b9_7f4a_7c15u64, |s| s.parse().unwrap());
         let mut next = |bound: usize| {
@@ -201,11 +222,13 @@ mod tests {
             // The blocks earlier updates made final, as the DOM keeps them.
             let mut kept = String::new();
             let mut start = 0;
+            let mut ends = Vec::new();
             while start < text.len() {
                 let mut end = (start + 1 + next(16)).min(text.len());
                 while !text.is_char_boundary(end) {
                     end += 1;
                 }
+                ends.push(end);
                 let outcome = session.update(&text[start..end], start == 0);
                 if outcome == super::Outcome::Reset {
                     kept.clear();
@@ -221,8 +244,10 @@ mod tests {
                     crate::tokens::to_html(words, &shown.text[split.text..], origins, input, &strings, &mut now);
                     let healed = String::from_utf16(session.remend.healed()).expect("no lone surrogates");
                     let mut whole = String::new();
-                    if crate::render(&healed, &mut whole).is_ok() {
-                        assert_eq!(now, whole, "{:?}", &text[..end]);
+                    if crate::render(&healed, &mut whole).is_ok() && now != whole {
+                        let at = now.bytes().zip(whole.bytes()).take_while(|(a, b)| a == b).count();
+                        let at = (at.saturating_sub(80)..=at).rev().find(|&at| now.is_char_boundary(at) && whole.is_char_boundary(at)).unwrap_or(0);
+                        panic!("{:?} (updates ending at {ends:?})\n  streamed: …{}\n  whole:    …{}", &text[..end], &now[at..], &whole[at..]);
                     }
                 }
                 start = end;

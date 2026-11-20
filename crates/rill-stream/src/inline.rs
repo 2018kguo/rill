@@ -214,8 +214,8 @@ fn escaped(byte: u8) -> &'static str {
 
 impl Inline {
     /// Renders `text` into `out`: a paragraph's lines from its first content character
-    /// to its last, continuation lines with their indents.
-    pub fn render(&mut self, text: &[u16], out: &mut Out, stable: usize) -> Result {
+    /// to its last, each continuation line after `strip` spaces of container indent.
+    pub fn render(&mut self, text: &[u16], strip: usize, out: &mut Out, stable: usize) -> Result {
         self.runs.clear();
         self.delims.clear();
         self.events.clear();
@@ -255,7 +255,13 @@ impl Inline {
                 out.text(units);
             }
         };
+        // The token before the content: text the content joins (a list item's line
+        // ending) is not the content's to replay, so no resume point then.
+        let before = base.0.checked_sub(1).map(|at| (out.words[at], out.origins[at]));
         let record = |out: &Out, resume: &mut Resume, at: usize| {
+            if before.is_some_and(|before| (out.words[base.0 - 1], out.origins[base.0 - 1]) != before) {
+                return;
+            }
             resume.words.clear();
             resume.words.extend_from_slice(&out.words[base.0..]);
             resume.origins.clear();
@@ -289,7 +295,7 @@ impl Inline {
                 Kind::Code { start, end, trim } => {
                     broke = false;
                     out.open(tag::CODE);
-                    code_content(out, &text[start as usize..end as usize], trim);
+                    code_content(out, &text[start as usize..end as usize], trim, strip);
                     out.close();
                 }
                 Kind::Run { index } => {
@@ -882,18 +888,30 @@ fn closing_backticks(units: &[u16], from: usize, run: usize) -> Option<usize> {
 
 /// A code span's content: line endings as spaces, one space stripped from each side when
 /// both have one and it is not all spaces; after a hard break, no leading spaces.
-fn code_content(out: &mut Out, raw: &[u16], after_break: bool) {
-    let space = |u: u16| u == 0x20 || u == 0x0A;
+fn code_content(out: &mut Out, raw: &[u16], after_break: bool, indent: usize) {
+    // Across lines: the text without container indents, line endings as spaces (rare;
+    // a copy).
+    let joined: Vec<u16>;
+    let raw = if raw.contains(&0x0A) {
+        let mut text = Vec::with_capacity(raw.len());
+        for (index, line) in raw.split(|&u| u == 0x0A).enumerate() {
+            if index > 0 {
+                text.push(0x20);
+            }
+            let skip = if index > 0 { line.iter().take(indent).take_while(|&&u| u == 0x20).count() } else { 0 };
+            text.extend_from_slice(&line[skip..]);
+        }
+        joined = text;
+        &joined[..]
+    } else {
+        raw
+    };
+    let space = |u: u16| u == 0x20;
     let strip = raw.len() >= 2 && space(raw[0]) && space(raw[raw.len() - 1]) && raw.iter().any(|&u| !space(u));
     let mut raw = if strip { &raw[1..raw.len() - 1] } else { raw };
     if after_break {
         let lead = raw.iter().take_while(|&&u| space(u)).count();
         raw = &raw[lead..];
     }
-    for (index, line) in raw.split(|&u| u == 0x0A).enumerate() {
-        if index > 0 {
-            out.ascii(" ");
-        }
-        out.text(line);
-    }
+    out.text(raw);
 }

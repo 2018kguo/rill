@@ -47,6 +47,10 @@ const ALPHABETS: [name: string, pieces: string[], depth: number, fast?: number][
   ["links", ["[", "]", "(", ")", "a", " ", "*", "<", "\n", "\\"], 5],
   ["destinations", ["[a](", "<", ">", ")", "(", "\"", "/", ":", "j", " "], 5],
   ["references", ["&", "amp", ";", "#", "x", "41", "[", "](u)", "a", "\\"], 4],
+  ["quotes", [">", " ", "a", "\n", "*", "- ", "#"], 5],
+  ["containers", ["> ", "- ", "1. ", "  ", "a", "\n", "\n\n"], 5],
+  ["nesting", ["- ", "  ", "> ", "b", "\n", "=", "`"], 5],
+  ["item children", ["- ", "  ", "# ", "b", "\n", "- b"], 5],
   // A letter after `<` is raw HTML, which takes the exact path for now.
   ["autolink brackets", ["<", ">", "a", ":", "@", ".", "b", "-", " "], 5, 0.4],
 ];
@@ -67,7 +71,7 @@ for (const [name, pieces, depth, fast = 0.5] of ALPHABETS) {
           if (got !== want) {
             let at = 0;
             while (got[at] === want[at]) at += 1;
-            assert.fail(`${JSON.stringify(text)}\n  ours:       …${got.slice(at - 60, at + 80)}\n  Streamdown: …${want.slice(at - 60, at + 80)}`);
+            assert.fail(`${JSON.stringify(text)}\n  ours:       …${got.slice(at - 60, at + 160).replaceAll("\n", "⏎")}\n  Streamdown: …${want.slice(at - 60, at + 160).replaceAll("\n", "⏎")}`);
           }
         }
         if (left > 1) await walk(text, left - 1);

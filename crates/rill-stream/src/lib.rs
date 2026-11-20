@@ -5,6 +5,8 @@
 //! each block, parsed by the browser into the same DOM. Anything this does not reproduce
 //! exactly returns [`Fallback`], and the caller renders the text the exact way.
 
+mod block;
+mod marked;
 mod diff;
 mod inline;
 mod session;
@@ -14,7 +16,7 @@ pub mod tokens;
 pub use session::{Outcome, Session};
 
 use inline::Inline;
-use tokens::{Out, tag};
+use tokens::Out;
 
 /// The text holds something this engine does not render exactly (yet).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +32,15 @@ pub fn render(source: &str, out: &mut String) -> Result {
     render_split(&units, &mut tokens, &mut Inline::default())?;
     tokens::to_html(&tokens.words, &tokens.text, &tokens.origins, &units, &tokens.strings.borrow(), out);
     Ok(())
+}
+
+/// Where Streamdown's block split cuts `source` (byte offsets), for tests.
+#[doc(hidden)]
+pub fn block_cuts(source: &str) -> Vec<usize> {
+    let units: Vec<u16> = source.encode_utf16().collect();
+    let cuts = marked::cuts(&units).unwrap_or_default();
+    // UTF-16 offsets of line starts to byte offsets.
+    cuts.iter().map(|&cut| String::from_utf16_lossy(&units[..cut]).len()).collect()
 }
 
 /// Where the last open block starts (text appended to the source can change only that
@@ -74,34 +85,48 @@ pub(crate) fn render_split_at(
         return Err(Fallback);
     }
     let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0, list: false, decides: 0 };
-    let mut blocks = Blocks { source, out, inline, stable, para: None, list: None, last: base, before: base, opened: 0, older: [base; 2] };
-    let mut start = 0;
-    while start <= source.len() {
-        let end = newline(source, start);
-        blocks.line(start, &source[start..end])?;
-        start = end + 1;
-    }
-    blocks.close_paragraph()?;
-    blocks.close_list()?;
+    let mut splits = Vec::new();
+    block::render(source, out, inline, stable, &mut splits)?;
+    // The block `back` blocks before the last (`base` past the last four).
+    let back_of = |back: usize| if back >= splits.len().min(4) { base } else { splits[splits.len() - 1 - back] };
     // A block opened on the unfinished last line may still turn into a continuation of
     // the block before it (`***` growing into `***a`, a lazy line): that one stays open
     // too, unless a blank line parts them and it is not a list (which takes items after
     // blank lines).
-    let last = blocks.last.source;
+    let last = back_of(0).source;
     let last_parted = parted(source, last);
     let mut back = usize::from(
-        source.last() != Some(&NL) && !source[last..].contains(&NL) && !(last_parted && !blocks.before.list),
+        source.last() != Some(&NL) && !source[last..].contains(&NL) && !(last_parted && !back_of(1).list),
     );
     // Lines from the one holding the repair's first unit on may still change what they
     // are: blocks opened on them keep the block before open.
     let repaired = agree.saturating_sub(at);
     if repaired < source.len() {
         let limit = source[..repaired].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
-        while back < 4 && blocks.back(back, base).source >= limit && blocks.back(back, base).source > 0 {
+        while back < 4 && back_of(back).source >= limit && back_of(back).source > 0 {
             back += 1;
         }
     }
-    let mut split = blocks.back(back, base);
+    // A paragraph ends before a line that a table delimiter row follows (`marked`'s
+    // lookahead), so a line that may still change into or out of one (the unfinished
+    // last line, if it could be a delimiter row so far; a repaired one) may move the cut
+    // on the line before it: blocks from there keep the block before open.
+    let line_start = |at: usize| source[..at].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+    let last_line = line_start(source.len());
+    let mut changing = usize::MAX;
+    if source.last() != Some(&NL) && source[last_line..].iter().all(|&unit| matches!(ascii(unit), b' ' | b':' | b'-')) {
+        changing = last_line;
+    }
+    if repaired < source.len() {
+        changing = changing.min(line_start(repaired));
+    }
+    if changing != usize::MAX && changing > 0 {
+        let limit = line_start(changing - 1);
+        while back < 4 && back_of(back).source >= limit && back_of(back).source > 0 {
+            back += 1;
+        }
+    }
+    let mut split = back_of(back);
     if split.source > 0 && !parted(source, split.source) {
         split.decides = newline(source, split.source) + 1;
     }
@@ -117,44 +142,9 @@ fn parted(source: &[u16], at: usize) -> bool {
     }
 }
 
-struct Blocks<'a, 'o> {
-    source: &'a [u16],
-    out: &'o mut Out,
-    inline: &'o mut Inline,
-    /// The whole text is as it was for the last render up to here.
-    stable: usize,
-    /// The open paragraph: from its first content byte to the end of its last line.
-    para: Option<(usize, usize)>,
-    /// The open list.
-    list: Option<List>,
-    /// Where the last block opened (all output before it belongs to closed blocks).
-    last: Split,
-    /// Where the block before it opened.
-    before: Split,
-    /// Blocks opened so far.
-    opened: u32,
-    /// Where the two blocks before `before` opened.
-    older: [Split; 2],
-}
-
-/// A tight list of one-paragraph items.
-struct List {
-    ordered: bool,
-    /// The bullet, or the ordered list's delimiter.
-    marker: u8,
-    start: u32,
-    /// Each item's content (`None`: empty so far), from its first content byte to the
-    /// end of its last line.
-    items: Vec<Option<(usize, usize)>>,
-    /// The column the last item's content starts at.
-    column: usize,
-    /// Blank lines since the last item's last line.
-    blank: u32,
-}
-
 /// A list item's marker at the start of `rest`: whether ordered, the bullet or delimiter,
 /// the start number, the content's offset in `rest` (`None`: the item is empty).
-struct Marker {
+pub(crate) struct Marker {
     ordered: bool,
     marker: u8,
     start: u32,
@@ -163,7 +153,7 @@ struct Marker {
     width: usize,
 }
 
-fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
+pub(crate) fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
     let (ordered, marker, start, after) = match ascii(rest[0]) {
         first @ (b'-' | b'*' | b'+') => (false, first, 0, 1),
         b'0'..=b'9' => {
@@ -191,21 +181,9 @@ fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
     Ok(Some(Marker { ordered, marker, start, content: Some(after + spaces), width: after + spaces }))
 }
 
-/// Whether `rest` (a line without its indent) starts a block other than a paragraph.
-fn starts_block(rest: &[u16]) -> Result<bool> {
-    let first = ascii(rest[0]);
-    Ok(match first {
-        b'#' => atx(rest).is_some(),
-        b'>' | b'<' => true,
-        b'`' | b'~' => run(rest, rest[0]) >= 3,
-        b'*' | b'-' | b'_' if thematic(rest) => true,
-        _ => list_marker(rest)?.is_some(),
-    })
-}
-
 /// Whether a line starting with `[` may start a link definition (`[label]:`): its
 /// label closes on the line with `]:`, or not on the line at all.
-fn may_define(line: &[u16]) -> bool {
+pub(crate) fn may_define(line: &[u16]) -> bool {
     let mut at = 1;
     while at < line.len() {
         match line[at] {
@@ -219,27 +197,22 @@ fn may_define(line: &[u16]) -> bool {
     true
 }
 
-const NL: u16 = b'\n' as u16;
-const SP: u16 = b' ' as u16;
+pub(crate) const NL: u16 = b'\n' as u16;
+pub(crate) const SP: u16 = b' ' as u16;
 
 /// A unit as an ASCII byte, or 0x80 (no markup) when it is not ASCII.
 #[inline(always)]
-fn ascii(unit: u16) -> u8 {
+pub(crate) fn ascii(unit: u16) -> u8 {
     if unit < 0x80 { unit as u8 } else { 0x80 }
 }
 
 /// How many units `text` starts with that equal `unit`.
-fn run(text: &[u16], unit: u16) -> usize {
+pub(crate) fn run(text: &[u16], unit: u16) -> usize {
     text.iter().take_while(|&&u| u == unit).count()
 }
 
-fn newline(text: &[u16], from: usize) -> usize {
+pub(crate) fn newline(text: &[u16], from: usize) -> usize {
     simd::find_unit(&text[from..], NL).map_or(text.len(), |at| from + at)
-}
-
-/// Leading spaces (tabs were ruled out).
-fn indent(line: &[u16]) -> usize {
-    run(line, SP)
 }
 
 fn trim_end_spaces(text: &[u16]) -> &[u16] {
@@ -247,253 +220,8 @@ fn trim_end_spaces(text: &[u16]) -> &[u16] {
     &text[..end]
 }
 
-impl<'a> Blocks<'a, '_> {
-    /// Where the block `back` blocks before the last opened (`base` past the ones kept).
-    fn back(&self, back: usize, base: Split) -> Split {
-        let opened = self.opened as usize;
-        if back >= opened.min(4) {
-            return base;
-        }
-        [self.last, self.before, self.older[1], self.older[0]][back]
-    }
-
-    fn line(&mut self, offset: usize, line: &'a [u16]) -> Result {
-        let spaces = indent(line);
-        let rest = &line[spaces..];
-        if rest.is_empty() {
-            if let Some(list) = &mut self.list {
-                list.blank += 1;
-            }
-            return self.close_paragraph();
-        }
-        if self.list.is_some() && self.list_line(offset, spaces, rest)? {
-            return Ok(());
-        }
-        if spaces < 4 && let Some(level) = setext(rest) && self.para.is_some() {
-            return self.close_paragraph_as(Some(level));
-        }
-        if spaces >= 4 {
-            let Some(para) = &mut self.para else {
-                return Err(Fallback); // indented code
-            };
-            para.1 = offset + line.len();
-            return Ok(());
-        }
-        let first = ascii(rest[0]);
-        match first {
-            b'#' => {
-                if let Some((level, content)) = atx(rest) {
-                    self.close_paragraph()?;
-                    self.close_list()?;
-                    self.open_block(offset);
-                    return self.heading(level, content);
-                }
-            }
-            b'*' | b'-' | b'_' if thematic(rest) => {
-                self.close_paragraph()?;
-                self.close_list()?;
-                self.open_block(offset);
-                self.out.void(tag::HR);
-                return Ok(());
-            }
-            // Blocks not handled yet: quotes, fences, HTML, definitions.
-            b'>' | b'<' => return Err(Fallback),
-            b'[' if self.para.is_none() && may_define(rest) => return Err(Fallback),
-            b'`' | b'~' if run(rest, rest[0]) >= 3 => {
-                return Err(Fallback);
-            }
-            _ => {
-                if let Some(marker) = list_marker(rest)? {
-                    // An empty item, or an ordered one not starting at 1, does not
-                    // interrupt a paragraph.
-                    let interrupts = marker.content.is_some() && (!marker.ordered || marker.start == 1);
-                    if self.para.is_none() || interrupts {
-                        self.close_paragraph()?;
-                        return self.open_item(offset, spaces, rest, marker);
-                    }
-                }
-            }
-        }
-        self.close_list()?;
-        let end = offset + line.len();
-        match &mut self.para {
-            Some(para) => para.1 = end,
-            None => {
-                self.open_block(offset);
-                self.para = Some((offset + spaces, end));
-            }
-        }
-        Ok(())
-    }
-
-    fn open_block(&mut self, offset: usize) {
-        self.older = [self.older[1], self.before];
-        self.before = self.last;
-        self.last = Split { source: offset, words: self.out.words.len(), text: self.out.text.len(), nodes: self.opened, list: false, decides: 0 };
-        self.opened += 1;
-    }
-
-    /// A line while a list is open: `true` when the list took it.
-    fn list_line(&mut self, offset: usize, spaces: usize, rest: &'a [u16]) -> Result<bool> {
-        let list = self.list.as_mut().expect("open list");
-        if spaces < list.column && matches!(ascii(rest[0]), b'*' | b'-' | b'_') && thematic(rest) {
-            // A thematic break wins over an item.
-            self.close_list()?;
-            return Ok(false);
-        }
-        let marker = list_marker(rest)?;
-        if list.blank > 0 {
-            // An empty item two blank lines back ends the list (Streamdown's blocks).
-            let ended = list.blank >= 2 && list.items.last().is_some_and(Option::is_none);
-            if ended {
-                self.close_list()?;
-                return Ok(false);
-            }
-            if spaces >= list.column {
-                return Err(Fallback); // a loose item: a block after a blank line inside it
-            }
-            // Items apart from each other by blank lines stay one tight list.
-            if let Some(marker) = marker
-                && marker.ordered == list.ordered
-                && marker.marker == list.marker
-            {
-                return self.open_item(offset, spaces, rest, marker).map(|()| true);
-            }
-            self.close_list()?;
-            return Ok(false);
-        }
-        let end = offset + spaces + rest.len();
-        let item = list.items.last_mut().expect("an item");
-        if spaces >= list.column {
-            // The item's own continuation.
-            match item {
-                Some(content) => {
-                    if starts_block(rest)? || setext(rest).is_some() {
-                        return Err(Fallback);
-                    }
-                    content.1 = end;
-                }
-                None => {
-                    // A task or a definition as the item's first content: the exact path.
-                    if starts_block(rest)? || rest[0] == u16::from(b'[') {
-                        return Err(Fallback);
-                    }
-                    *item = Some((offset + spaces, end));
-                }
-            }
-            return Ok(true);
-        }
-        if let Some(marker) = marker {
-            if marker.ordered == list.ordered && marker.marker == list.marker {
-                return self.open_item(offset, spaces, rest, marker).map(|()| true);
-            }
-            self.close_list()?;
-            return Ok(false);
-        }
-        // A lazy line continues the item's paragraph, unless it starts a block.
-        if let Some(content) = item
-            && !starts_block(rest)?
-            && setext(rest).is_none()
-        {
-            content.1 = end;
-            return Ok(true);
-        }
-        self.close_list()?;
-        Ok(false)
-    }
-
-    fn open_item(&mut self, offset: usize, spaces: usize, rest: &[u16], marker: Marker) -> Result {
-        let content = marker.content.map(|at| {
-            let start = offset + spaces + at;
-            (start, offset + spaces + rest.len())
-        });
-        if let Some(at) = marker.content
-            && (starts_block(&rest[at..])? || rest[at] == u16::from(b'['))
-        {
-            return Err(Fallback); // a nested block, a task, a definition
-        }
-        let same = self
-            .list
-            .as_ref()
-            .is_some_and(|list| list.ordered == marker.ordered && list.marker == marker.marker);
-        if !same {
-            self.close_list()?;
-            self.open_block(offset);
-            self.last.list = true;
-            self.list = Some(List {
-                ordered: marker.ordered,
-                marker: marker.marker,
-                start: marker.start,
-                items: Vec::new(),
-                column: 0,
-                blank: 0,
-            });
-        }
-        let list = self.list.as_mut().expect("open list");
-        list.blank = 0;
-        list.items.push(content);
-        list.column = spaces + marker.width;
-        Ok(())
-    }
-
-    fn close_list(&mut self) -> Result {
-        let Some(list) = self.list.take() else {
-            return Ok(());
-        };
-        match (list.ordered, list.start) {
-            (false, _) => self.out.open(tag::UL),
-            (true, 1) => self.out.open(tag::OL),
-            (true, start) => {
-                let ol = tokens::TAGS[tag::OL as usize];
-                self.out.open_html(&format!("{} start=\"{start}\">", &ol[..ol.len() - 1]));
-            }
-        }
-        self.out.ascii("\n");
-        for item in list.items {
-            self.out.open(tag::LI);
-            if let Some((start, end)) = item {
-                self.inline.render(trim_end_spaces(&self.source[start..end]), self.out, self.stable)?;
-            }
-            self.out.close();
-            self.out.ascii("\n");
-        }
-        self.out.close();
-        Ok(())
-    }
-
-    fn heading(&mut self, level: u8, content: &[u16]) -> Result {
-        self.out.open(tag::H1 + u32::from(level) - 1);
-        self.inline.render(content, self.out, self.stable)?;
-        self.out.close();
-        Ok(())
-    }
-
-    fn close_paragraph(&mut self) -> Result {
-        self.close_paragraph_as(None)
-    }
-
-    /// Closes the paragraph, as a setext heading of `level` when given.
-    fn close_paragraph_as(&mut self, level: Option<u8>) -> Result {
-        let Some((start, end)) = self.para.take() else {
-            return Ok(());
-        };
-        let content = trim_end_spaces(&self.source[start..end]);
-        match level {
-            Some(level) => self.heading(level, content),
-            None => {
-                self.out.open(tag::P);
-                self.inline.render(content, self.out, self.stable)?;
-                self.out.close();
-                Ok(())
-            }
-        }
-    }
-}
-
-
-
 /// An ATX heading's level and content (`rest` starts at the first `#`).
-fn atx(rest: &[u16]) -> Option<(u8, &[u16])> {
+pub(crate) fn atx(rest: &[u16]) -> Option<(u8, &[u16])> {
     let level = run(rest, u16::from(b'#'));
     if level > 6 {
         return None;
@@ -514,7 +242,7 @@ fn atx(rest: &[u16]) -> Option<(u8, &[u16])> {
 }
 
 /// A setext underline's heading level: `=`s (1) or `-`s (2), then only spaces.
-fn setext(rest: &[u16]) -> Option<u8> {
+pub(crate) fn setext(rest: &[u16]) -> Option<u8> {
     let level = match ascii(*rest.first()?) {
         b'=' => 1,
         b'-' => 2,
@@ -524,7 +252,7 @@ fn setext(rest: &[u16]) -> Option<u8> {
 }
 
 /// Three or more of one of `*-_`, with only spaces between.
-fn thematic(rest: &[u16]) -> bool {
+pub(crate) fn thematic(rest: &[u16]) -> bool {
     let marker = rest[0];
     let mut count = 0;
     for &unit in rest {

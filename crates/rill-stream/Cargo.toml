@@ -18,3 +18,7 @@ wasm-bindgen = { version = "=0.2.129", optional = true }
 
 [features]
 wasm = ["dep:wasm-bindgen", "rill-url/wasm"]
+
+[dev-dependencies]
+rill = { path = "../rill" }
+serde_json = "1"

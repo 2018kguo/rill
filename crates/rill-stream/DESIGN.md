@@ -15,9 +15,20 @@ appended text
   -> stream-dom.ts               runs the program against the DOM
 ```
 
+### Blocks
+
+Streamdown cuts the text with `marked` (v18, GFM) and parses each piece on its own, so
+the cuts decide what continues into what (a paragraph ends before a list item with
+content, or before a line a table delimiter row follows; a list keeps an indented heading).
+`marked.rs` computes the extents of `marked`'s top-level tokens (its block rules and
+list and blockquote tokenizers, ported) and the renderer parses each piece alone, root
+children joined by a line ending as remark's root joins them. A line that may still
+change (unfinished, repaired) can move the cut on the line before it, so the session
+keeps the blocks from there open.
+
 ### Renderer
 
-One single-pass parser and writer, no tree: lines go through the open containers
+Per block, one single-pass parser and writer, no tree: lines go through the open containers
 (quotes, list items), start blocks, and add content to the deepest open block; each
 block writes Streamdown's DOM as tokens as it closes (mdast-util-to-hast's whitespace
 text between block children, tight items' inline paragraphs, Streamdown's components:
@@ -69,6 +80,7 @@ output, so a text with one renders in full on every update (`Reset`).
 
 - `session::tests`: after every chunk, the session's DOM equals the whole repaired text
   rendered from scratch (1M random streams per seed).
-- A Rust differential against the exact `rill` pipeline for static content.
+- `tests/structure.rs`: random documents' tags and text against the exact `rill`
+  pipeline's HAST, block by block (1M per seed).
 - `js/test/stream*.test.ts`: Streamdown itself in happy-dom, over small alphabets and
   after every streamed update.
