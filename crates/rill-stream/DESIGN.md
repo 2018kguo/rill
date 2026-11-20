@@ -17,17 +17,22 @@ appended text
 
 ### Renderer
 
-One full parser, `rill-cmark` (micromark's grammar as Streamdown configures it), feeds a
-writer that emits tokens for Streamdown's DOM in the same pass: no MDAST or HAST. The
-writer owns everything the exact pipeline does in its tree passes (mdast-util-to-hast's
-whitespace text between block children, tight-list paragraphs, Streamdown's
-components: classes, link buttons, code block and table shells, images, task lists,
-footnotes, URL hardening).
+One single-pass parser and writer, no tree: lines go through the open containers
+(quotes, list items), start blocks, and add content to the deepest open block; each
+block writes Streamdown's DOM as tokens as it closes (mdast-util-to-hast's whitespace
+text between block children, tight items' inline paragraphs, Streamdown's components:
+classes, link buttons, code block and table shells, images, task lists). Inline content
+is scanned once per render, resuming where no later text can change it.
 
-The hand-written block and inline scanners stay as a fast path for the blocks they
-render exactly (headings, rules, tight lists, paragraphs with code spans and emphasis),
-including the incremental inline resume. Anything else goes to the full writer. Both
-write the same tokens, so the diff and the DOM side do not care which ran.
+The exact pipeline (`rill`: parser, MDAST, HAST) is the reference for every quirk and
+the path for whatever this does not render yet (the whole text, as before). It is not
+used per block: building trees costs 3-4x the parse, and the open block is rendered on
+every update.
+
+Coverage, in order: links and autolinks; fenced code (shell once, body by lines);
+containers (quotes, nested and loose lists); tables (row by row); images, task lists,
+strikethrough, raw HTML, indented code, setext headings; footnotes and definitions
+(which reset the session).
 
 ### Tokens
 

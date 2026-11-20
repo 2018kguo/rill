@@ -13,16 +13,14 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 rill-cmark = { path = "../rill-cmark" }
 rill-remend = { path = "../rill-remend" }
+rill-url = { path = "../rill-url" }
 memchr = "2.8"
 
 wasm-bindgen = { version = "=0.2.129", optional = true }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-url = "2.5"
-
 [features]
 # `rill::wasm`: the opcode boundary the JavaScript package reads, for builds with their
 # own plugins.
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "rill-url/wasm"]
 # The stock export (`renderHast`) the prebuilt package ships.
 wasm-exports = ["wasm"]

@@ -12,7 +12,9 @@ crate-type = ["rlib", "cdylib"]
 rill-unicode = { path = "../rill-unicode" }
 memchr = { version = "2.8", default-features = false }
 rill-remend = { path = "../rill-remend" }
+rill-cmark = { path = "../rill-cmark" }
+rill-url = { path = "../rill-url" }
 wasm-bindgen = { version = "=0.2.129", optional = true }
 
 [features]
-wasm = ["dep:wasm-bindgen"]
+wasm = ["dep:wasm-bindgen", "rill-url/wasm"]

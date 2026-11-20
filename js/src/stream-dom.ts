@@ -47,7 +47,7 @@ const OPEN = 0;
 const CLOSE = 1;
 const VOID = 2;
 /** Tag ids from here on: interned strings (an open tag, or a whole subtree as `VOID`). */
-const INTERNED = 16;
+const INTERNED = 32;
 /** An APPEND range in the text as given. */
 const SOURCE = 0x80000000;
 /** A text token that is not one stretch of the text as given. */

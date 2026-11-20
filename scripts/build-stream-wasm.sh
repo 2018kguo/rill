@@ -12,3 +12,5 @@ npx --no-install wasm-opt -O3 js/stream-wasm/rill_stream_bg.wasm -o js/stream-wa
   --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-multivalue --enable-reference-types
 echo '{"type":"commonjs"}' > js/stream-wasm/package.json
+# The URL snippet (rill-url's inline JS) is ESM; Node requires it as such.
+[ -d js/stream-wasm/snippets ] && echo '{"type":"module"}' > js/stream-wasm/snippets/package.json || true

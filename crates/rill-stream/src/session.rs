@@ -179,9 +179,10 @@ mod tests {
     /// rendering again would make. Random texts dense in what the renderer handles.
     #[test]
     fn streaming_render_is_whole_text_render() {
-        const PIECES: [&str; 30] = [
+        const PIECES: [&str; 42] = [
             "a", "b", "word", " ", " ", "  ", "\n", "\n\n", "*", "**", "***", "_", "__", "`", "``", "\\",
             "&", "<", "é", "😀", "# ", "- ", "1. ", "---", "x.", ":", "  \n", "www.", "=", "\\*",
+            "[", "]", "(", ")", "](", "[x](/u)", "<a:b>", "&amp;", "&#", ";", "](javascript:x)", "\"t\"",
         ];
         let mut seed = std::env::var("STREAM_SEED").map_or(0x9e37_79b9_7f4a_7c15u64, |s| s.parse().unwrap());
         let mut next = |bound: usize| {

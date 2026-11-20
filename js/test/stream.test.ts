@@ -1,19 +1,16 @@
 // rill-stream against Streamdown: every document over small alphabets either falls back or
-// renders Streamdown's exact DOM (the HTML and its text nodes).
+// renders Streamdown's exact DOM (the HTML and its text nodes), built as the DOM renderer
+// builds it from a fresh session.
 //   node --test test/stream.test.ts
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { test } from "node:test";
 
 import { mount } from "./dom.ts";
 
 const { Streamdown } = await import("streamdown");
-const { initRill } = await import("../src/index.ts");
-const rill = await initRill(readFileSync(new URL("../wasm/rill_bg.wasm", import.meta.url)));
-const { renderStream } = createRequire(import.meta.url)("../stream-wasm/rill_stream.js") as {
-  renderStream(source: string): string | undefined;
-};
+const { createStreamRenderer } = await import("../src/stream-dom.ts");
+const { Stream, streamMemory, streamTags } = createRequire(import.meta.url)("../stream-wasm/rill_stream.js");
 
 const ROOT = '<div class="space-y-4 whitespace-normal [&amp;>*:first-child]:mt-0 [&amp;>*:last-child]:mb-0">';
 
@@ -25,15 +22,18 @@ function textNodes(node: Node): string {
   return out;
 }
 const scratch = document.createElement("div");
+const module = { memory: streamMemory(), tags: streamTags() };
 function ours(text: string): string | undefined {
-  const healed = rill.remend!(text) ?? text;
-  const html = renderStream(healed);
-  if (html === undefined) return undefined;
-  scratch.innerHTML = `${ROOT}${html}</div>`;
-  return `${scratch.innerHTML}\n${textNodes(scratch)}`;
+  scratch.innerHTML = `${ROOT}</div>`;
+  const session = new Stream();
+  const renderer = createStreamRenderer(scratch.firstChild as Element, session, module);
+  const shown = renderer.update(text);
+  renderer.dispose();
+  return shown ? `${scratch.innerHTML}\n${textNodes(scratch)}` : undefined;
 }
 
-const ALPHABETS: [name: string, pieces: string[], depth: number][] = [
+// The last field: the share of documents that must take the fast engine (default half).
+const ALPHABETS: [name: string, pieces: string[], depth: number, fast?: number][] = [
   ["emphasis", [..."*_a \n"], 6],
   ["code and escapes", [..."`\\*a \n"], 5],
   ["blocks", ["# ", "#", "---", "***", "a", " ", "\n", "  ", "*"], 4],
@@ -44,9 +44,14 @@ const ALPHABETS: [name: string, pieces: string[], depth: number][] = [
   ["unicode", ["*", "_", "é", "—", "“", " ", "a", "\n"], 5],
   ["astral", ["*", "_", "😀", "𝐀", " ", "a"], 6],
   ["autolinks", ["www", ".", "@", ":", "//", "`", "\\", "a", " "], 5],
+  ["links", ["[", "]", "(", ")", "a", " ", "*", "<", "\n", "\\"], 5],
+  ["destinations", ["[a](", "<", ">", ")", "(", "\"", "/", ":", "j", " "], 5],
+  ["references", ["&", "amp", ";", "#", "x", "41", "[", "](u)", "a", "\\"], 4],
+  // A letter after `<` is raw HTML, which takes the exact path for now.
+  ["autolink brackets", ["<", ">", "a", ":", "@", ".", "b", "-", " "], 5, 0.4],
 ];
 
-for (const [name, pieces, depth] of ALPHABETS) {
+for (const [name, pieces, depth, fast = 0.5] of ALPHABETS) {
   test(`rill-stream renders Streamdown's DOM or falls back (${name})`, async () => {
     const theirs = mount(Streamdown);
     let rendered = 0;
@@ -71,6 +76,6 @@ for (const [name, pieces, depth] of ALPHABETS) {
     await walk("", depth);
     await theirs.unmount();
     console.log(`${name}: ${rendered}/${documents} rendered by rill-stream`);
-    assert.ok(rendered > documents / 2, "most documents should take the fast engine");
+    assert.ok(rendered > documents * fast, "most documents should take the fast engine");
   });
 }

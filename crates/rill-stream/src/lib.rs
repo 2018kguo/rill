@@ -203,6 +203,22 @@ fn starts_block(rest: &[u16]) -> Result<bool> {
     })
 }
 
+/// Whether a line starting with `[` may start a link definition (`[label]:`): its
+/// label closes on the line with `]:`, or not on the line at all.
+fn may_define(line: &[u16]) -> bool {
+    let mut at = 1;
+    while at < line.len() {
+        match line[at] {
+            0x5C => at += 1,
+            0x5B => return false,
+            0x5D => return line.get(at + 1) == Some(&u16::from(b':')),
+            _ => {}
+        }
+        at += 1;
+    }
+    true
+}
+
 const NL: u16 = b'\n' as u16;
 const SP: u16 = b' ' as u16;
 
@@ -280,8 +296,9 @@ impl<'a> Blocks<'a, '_> {
                 self.out.void(tag::HR);
                 return Ok(());
             }
-            // Blocks not handled yet: quotes, lists, fences, HTML, definitions, setext.
-            b'>' | b'<' | b'[' => return Err(Fallback),
+            // Blocks not handled yet: quotes, fences, HTML, definitions.
+            b'>' | b'<' => return Err(Fallback),
+            b'[' if self.para.is_none() && may_define(rest) => return Err(Fallback),
             b'`' | b'~' if run(rest, rest[0]) >= 3 => {
                 return Err(Fallback);
             }
@@ -357,7 +374,8 @@ impl<'a> Blocks<'a, '_> {
                     content.1 = end;
                 }
                 None => {
-                    if starts_block(rest)? {
+                    // A task or a definition as the item's first content: the exact path.
+                    if starts_block(rest)? || rest[0] == u16::from(b'[') {
                         return Err(Fallback);
                     }
                     *item = Some((offset + spaces, end));
@@ -390,9 +408,9 @@ impl<'a> Blocks<'a, '_> {
             (start, offset + spaces + rest.len())
         });
         if let Some(at) = marker.content
-            && starts_block(&rest[at..])?
+            && (starts_block(&rest[at..])? || rest[at] == u16::from(b'['))
         {
-            return Err(Fallback); // a nested block
+            return Err(Fallback); // a nested block, a task, a definition
         }
         let same = self
             .list

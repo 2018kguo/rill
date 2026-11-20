@@ -17,7 +17,6 @@ pub use rill_remend as remend;
 mod autolink;
 mod json;
 mod text;
-mod url;
 
 pub use hast::{
     BlockPolicy, Context, Footnotes, Harden, Kind, Options, Plugin, Rendered, Sanitize, Schema,

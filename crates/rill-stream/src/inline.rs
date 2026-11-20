@@ -1,6 +1,6 @@
-//! Inline content: text, code spans, emphasis and strong, escapes and hard breaks, written
-//! as Streamdown's HTML. Emphasis follows CommonMark's delimiter algorithm as micromark
-//! runs it.
+//! Inline content: text, code spans, emphasis and strong, links and autolinks, character
+//! references, escapes and hard breaks, written as Streamdown's HTML. Emphasis and links
+//! follow CommonMark's delimiter and bracket algorithms as micromark runs them.
 //!
 //! The scan records what is not plain text as events; the emit pass writes the tokens
 //! (see `tokens`), the plain text between events copied as it is.
@@ -48,8 +48,17 @@ pub struct Inline {
     /// Where the last scan left the first backtick run without a closer (a later one
     /// may close it).
     open_ticks: Option<usize>,
-    /// The spans of matched emphasis, from opener to closer.
+    /// The spans of matched emphasis and links, from opener to closer.
     pairs: Vec<(u32, u32)>,
+    /// Open `[`s, innermost last.
+    brackets: Vec<Bracket>,
+    /// Each link's rendering.
+    links: Vec<Link>,
+    /// Decoded character references, which events point into.
+    decoded: Vec<u16>,
+    /// The earliest position more text could change the scan at (an unclosed bracket, a
+    /// character reference that may not have ended).
+    ceiling: usize,
     /// The last render's tokens up to a point no later text can change.
     resume: Resume,
 }
@@ -64,6 +73,28 @@ struct Resume {
     text: Vec<u16>,
     origins: Vec<u32>,
 }
+
+/// A `[` that may still open a link.
+struct Bracket {
+    /// Its event (a `Kind::Open`).
+    event: usize,
+    /// How many delimiter runs came before it.
+    delims: usize,
+    /// No link encloses another: a link closing deactivates the brackets before it.
+    active: bool,
+}
+
+/// How a link renders (Streamdown's link safety: a button, unless rehype-harden blocks
+/// its URL).
+enum Link {
+    Button,
+    Incomplete,
+    /// A span titled `Blocked URL: ...`, the text followed by ` [blocked]`.
+    Blocked(String),
+}
+
+/// No link: a `Kind::Open` that is text.
+const NO_LINK: u32 = u32::MAX;
 
 /// Something at a source position other than plain text.
 #[derive(Clone, Copy)]
@@ -87,6 +118,14 @@ enum Kind {
     Code { start: u32, end: u32, trim: bool },
     /// A delimiter run, `runs[index]`.
     Run { index: u32 },
+    /// A `[`: link `link`'s start, or text.
+    Open { link: u32 },
+    /// The end of link `link` (`](destination "title")`).
+    Close { link: u32 },
+    /// An autolink, `<...>`: link `link` around the text `[start, end)`.
+    Autolink { link: u32, start: u32, end: u32 },
+    /// A character reference: `decoded[start..end]`.
+    Decoded { start: u32, end: u32 },
 }
 
 /// A run of `*` or `_`.
@@ -181,6 +220,10 @@ impl Inline {
         self.delims.clear();
         self.events.clear();
         self.pairs.clear();
+        self.brackets.clear();
+        self.links.clear();
+        self.decoded.clear();
+        self.ceiling = usize::MAX;
         self.open_ticks = None;
         // The content's start in the whole text, and how much of it is as last time.
         let start = out.offset_of(text);
@@ -192,12 +235,26 @@ impl Inline {
         }
         let base = (out.words.len() - self.resume.words.len() * usize::from(from > 0), out.text.len() - self.resume.text.len() * usize::from(from > 0));
         self.scan(text, from)?;
-        self.emphasis()?;
+        // Brackets still open may close later.
+        if let Some(first) = self.brackets.first() {
+            self.ceiling = self.ceiling.min(self.events[first.event].at as usize);
+        }
+        self.emphasis(0)?;
         // The next render's resume point: the latest one this render can vouch for.
         // (The next render checks that the text is the same through it and its lookahead.)
         let next = start.and_then(|_| self.checkpoint(text, from, text.len().saturating_sub(LOOKAHEAD)));
         self.resume.at = 0;
         let mut cursor = from;
+        // mdast-util-to-hast trims the start of the first text after a hard break, wherever
+        // it lands (inside a link, say).
+        let mut broke = false;
+        let text_after = |out: &mut Out, units: &[u16], broke: &mut bool| {
+            let units = if *broke { &units[units.iter().take_while(|&&u| u == 0x20 || u == 0x09).count()..] } else { units };
+            if !units.is_empty() {
+                *broke = false;
+                out.text(units);
+            }
+        };
         let record = |out: &Out, resume: &mut Resume, at: usize| {
             resume.words.clear();
             resume.words.extend_from_slice(&out.words[base.0..]);
@@ -213,19 +270,24 @@ impl Inline {
                 && cursor <= next
                 && next <= event.at as usize
             {
-                out.text(&text[cursor..next]);
+                text_after(out, &text[cursor..next], &mut broke);
                 record(out, &mut self.resume, next);
                 cursor = next;
             }
-            out.text(&text[cursor..event.at as usize]);
+            text_after(out, &text[cursor..event.at as usize], &mut broke);
             match event.kind {
                 Kind::Line { hard: false } => out.ascii("\n"),
                 Kind::Line { hard: true } | Kind::Break => {
                     out.void(tag::BR);
                     out.ascii("\n");
+                    broke = true;
                 }
-                Kind::Literal(literal) => out.ascii(literal),
+                Kind::Literal(literal) => {
+                    broke = false;
+                    out.ascii(literal);
+                }
                 Kind::Code { start, end, trim } => {
+                    broke = false;
                     out.open(tag::CODE);
                     code_content(out, &text[start as usize..end as usize], trim);
                     out.close();
@@ -233,20 +295,32 @@ impl Inline {
                 Kind::Run { index } => {
                     let run = &self.runs[index as usize];
                     run.closes.write(out, false);
+                    if run.count > 0 {
+                        broke = false;
+                    }
                     out.repeat(run.marker, run.count);
                     run.opens.write(out, true);
                 }
+                Kind::Open { link: NO_LINK } => text_after(out, &text[event.at as usize..event.resume as usize], &mut broke),
+                Kind::Open { link } => self.links[link as usize].open(out),
+                Kind::Close { link } => self.links[link as usize].close(out),
+                Kind::Autolink { link, start, end } => {
+                    self.links[link as usize].open(out);
+                    text_after(out, &text[start as usize..end as usize], &mut broke);
+                    self.links[link as usize].close(out);
+                }
+                Kind::Decoded { start, end } => text_after(out, &self.decoded[start as usize..end as usize], &mut broke),
             }
             cursor = event.resume as usize;
         }
         if let Some(next) = next
             && cursor <= next
         {
-            out.text(&text[cursor..next]);
+            text_after(out, &text[cursor..next], &mut broke);
             record(out, &mut self.resume, next);
             cursor = next;
         }
-        out.text(&text[cursor..]);
+        text_after(out, &text[cursor..], &mut broke);
         Ok(())
     }
 
@@ -255,7 +329,7 @@ impl Inline {
     /// inside no matched emphasis, in plain text after a unit that starts nothing (so
     /// the scan from there is the scan through there).
     fn checkpoint(&self, text: &[u16], from: usize, limit: usize) -> Option<usize> {
-        let mut ceiling = limit.min(self.open_ticks.unwrap_or(usize::MAX));
+        let mut ceiling = limit.min(self.open_ticks.unwrap_or(usize::MAX)).min(self.ceiling);
         for run in &self.runs {
             if run.can_open && run.count > 0 {
                 ceiling = ceiling.min(run.at as usize);
@@ -356,17 +430,75 @@ impl Inline {
                         }
                     }
                 }
-                // A `&` that cannot start a character reference, a `<` that cannot start
-                // HTML or an autolink: text.
-                b'&' if !bytes.get(at + 1).map(|&unit| ascii(unit)).is_some_and(|b| b.is_ascii_alphanumeric() || b == b'#') => {
+                b'&' => match entity(bytes, at) {
+                    Some((end, decoded)) => {
+                        let start = self.decoded.len() as u32;
+                        self.decoded.extend(decoded.encode_utf16());
+                        let kind = Kind::Decoded { start, end: self.decoded.len() as u32 };
+                        self.event(at, end, kind);
+                        at = end;
+                    }
+                    None => {
+                        // A reference not yet ended may end later.
+                        if at + MAX_REFERENCE > bytes.len() {
+                            self.ceiling = self.ceiling.min(at);
+                        }
+                        at += 1;
+                        continue; // text
+                    }
+                },
+                b'<' => {
+                    if let Some((end, start, close, email)) = autolink(bytes, at) {
+                        let content = String::from_utf16_lossy(&bytes[start..close]);
+                        let href = if email { format!("mailto:{content}") } else { content };
+                        let link = self.link(&href);
+                        self.event(at, end, Kind::Autolink { link, start: start as u32, end: close as u32 });
+                        at = end;
+                    } else if bytes
+                        .get(at + 1)
+                        .map(|&unit| ascii(unit))
+                        .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?'))
+                    {
+                        return Err(Fallback); // raw HTML
+                    } else {
+                        at += 1;
+                        continue; // text
+                    }
+                }
+                b'[' => {
+                    // An image (`![`, the `!` not escaped): the exact path.
+                    if at > 0 && bytes[at - 1] == u16::from(b'!') && bytes[..at - 1].iter().rev().take_while(|&&u| u == u16::from(b'\\')).count() % 2 == 0 {
+                        return Err(Fallback);
+                    }
+                    self.brackets.push(Bracket { event: self.events.len(), delims: self.delims.len(), active: true });
+                    self.event(at, at + 1, Kind::Open { link: NO_LINK });
                     at += 1;
                 }
-                b'<' if !bytes
-                    .get(at + 1)
-                    .map(|&unit| ascii(unit))
-                    .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?')) =>
-                {
-                    at += 1;
+                b']' => {
+                    let Some(bracket) = self.brackets.pop() else {
+                        at += 1;
+                        continue; // text
+                    };
+                    let resource = if bracket.active { inline_link(bytes, at + 1) } else { None };
+                    // Not a link (no definitions: a reference is text): the brackets are text.
+                    let Some((end, destination)) = resource else {
+                        let open = self.events[bracket.event].at as usize;
+                        self.ceiling = self.ceiling.min(open);
+                        at += 1;
+                        continue;
+                    };
+                    let link = self.link(&destination);
+                    let open = self.events[bracket.event].at;
+                    self.events[bracket.event].kind = Kind::Open { link };
+                    // Emphasis inside the link pairs inside it.
+                    self.emphasis(bracket.delims)?;
+                    self.delims.truncate(bracket.delims);
+                    self.pairs.push((open, end as u32));
+                    self.event(at, end, Kind::Close { link });
+                    for earlier in &mut self.brackets {
+                        earlier.active = false;
+                    }
+                    at = end;
                 }
                 // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
                 b'@' => return Err(Fallback),
@@ -415,18 +547,17 @@ impl Inline {
                         continue;
                     }
                 }
-                // Links, images, raw HTML, references, strikethrough, autolinks: the
-                // exact path.
+                // Strikethrough: the exact path.
                 _ => return Err(Fallback),
             }
             plain = at;
         }
     }
 
-    /// CommonMark's "process emphasis" over every delimiter run; whether any matched.
-    fn emphasis(&mut self) -> Result {
+    /// CommonMark's "process emphasis" over the delimiter runs from `bottom` on.
+    fn emphasis(&mut self, bottom: usize) -> Result {
         // ponytail: quadratic opener search; add openers_bottom if adversarial input shows up.
-        let mut closer_at = 0;
+        let mut closer_at = bottom;
         while closer_at < self.delims.len() {
             let closer = self.delims[closer_at];
             let c = &self.runs[closer];
@@ -435,7 +566,7 @@ impl Inline {
                 continue;
             }
             let (marker, close_count, closer_opens) = (c.marker, c.count, c.can_open);
-            let found = (0..closer_at).rev().find(|&opener_at| {
+            let found = (bottom..closer_at).rev().find(|&opener_at| {
                 let o = &self.runs[self.delims[opener_at]];
                 o.marker == marker
                     && o.can_open
@@ -470,6 +601,251 @@ impl Inline {
         }
         Ok(())
     }
+}
+
+impl Inline {
+    /// A link to `destination` (decoded): how Streamdown renders it.
+    fn link(&mut self, destination: &str) -> u32 {
+        let link = if destination == "streamdown:incomplete-link" {
+            Link::Incomplete
+        } else {
+            // micromark's normalizeUri, the sanitize schema's protocols, rehype-harden.
+            let href = rill_url::normalize_uri(destination.into());
+            let href = rill_url::protocol_allowed(&href, HREF_PROTOCOLS).then_some(href);
+            match href.as_deref().map(|href| rill_url::transform_url(href, rill_url::Resource::Link)) {
+                Some(Ok(_)) => Link::Button,
+                _ => Link::Blocked(format!("Blocked URL: {}", href.as_deref().unwrap_or("undefined"))),
+            }
+        };
+        self.links.push(link);
+        (self.links.len() - 1) as u32
+    }
+}
+
+/// The protocols Streamdown's sanitize schema allows in `href`.
+const HREF_PROTOCOLS: &[&str] = &["http", "https", "irc", "ircs", "mailto", "xmpp", "tel", "streamdown"];
+
+impl Link {
+    fn open(&self, out: &mut Out) {
+        match self {
+            Link::Button => out.open(tag::LINK),
+            Link::Incomplete => out.open(tag::LINK_INCOMPLETE),
+            Link::Blocked(title) => {
+                let mut html = String::from("<span title=\"");
+                escape_attribute(title, &mut html);
+                html.push_str("\" class=\"text-gray-500\">");
+                out.open_html(&html);
+            }
+        }
+    }
+
+    fn close(&self, out: &mut Out) {
+        if let Link::Blocked(_) = self {
+            out.split_text();
+            out.ascii(" [blocked]");
+        }
+        out.close();
+    }
+}
+
+fn escape_attribute(value: &str, out: &mut String) {
+    for c in value.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            c => out.push(c),
+        }
+    }
+}
+
+/// The longest character reference, `&` to `;` (`&CounterClockwiseContourIntegral;`).
+const MAX_REFERENCE: usize = 33;
+
+/// A character reference at `at` (`&name;`, `&#digits;`, `&#xhex;`): where it ends and
+/// what it decodes to.
+fn entity(units: &[u16], at: usize) -> Option<(usize, String)> {
+    let window = &units[at..units.len().min(at + MAX_REFERENCE)];
+    let semi = window.iter().position(|&u| u == u16::from(b';'))?;
+    let body: String = window[1..semi].iter().map(|&u| char::from_u32(u32::from(u)).filter(char::is_ascii).map_or('\u{80}', |c| c)).collect();
+    if !body.is_ascii() || body.is_empty() {
+        return None;
+    }
+    let decoded = if let Some(number) = body.strip_prefix('#') {
+        let (digits, radix, max) = match number.strip_prefix(['x', 'X']) {
+            Some(hex) => (hex, 16, 6),
+            None => (number, 10, 7),
+        };
+        if digits.is_empty() || digits.len() > max || !digits.chars().all(|c| c.is_digit(radix)) {
+            return None;
+        }
+        let code = u32::from_str_radix(digits, radix).ok()?;
+        // micromark: NUL, surrogates and out-of-range codes become U+FFFD.
+        let c = match code {
+            0 => '\u{FFFD}',
+            code => char::from_u32(code).unwrap_or('\u{FFFD}'),
+        };
+        c.to_string()
+    } else {
+        if !body.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        rill_cmark::named_entity(&body)?.to_owned()
+    };
+    Some((at + semi + 1, decoded))
+}
+
+/// An autolink at `at` (`<scheme:...>` or `<email>`): where it ends, its content's
+/// range, and whether it is an email.
+fn autolink(units: &[u16], at: usize) -> Option<(usize, usize, usize, bool)> {
+    let start = at + 1;
+    let close = start + units[start..].iter().position(|&u| u == u16::from(b'>'))?;
+    let content = &units[start..close];
+    let byte = |u: u16| if u < 0x80 { u as u8 } else { 0x80 };
+    // A scheme: a letter, then 1-31 letters, digits, `+`, `.` or `-`, then `:`.
+    let scheme = content.iter().position(|&u| u == u16::from(b':')).filter(|&colon| {
+        (2..=32).contains(&colon)
+            && byte(content[0]).is_ascii_alphabetic()
+            && content[1..colon].iter().all(|&u| matches!(byte(u), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'.' | b'-'))
+    });
+    if scheme.is_some() && content.iter().all(|&u| u > 0x20 && u != u16::from(b'<') && u != 0x7f) {
+        return Some((close + 1, start, close, false));
+    }
+    // An email: atext before `@`, then labels of letters, digits and `-` (not first or
+    // last, at most 63) joined by `.`.
+    let at_sign = content.iter().position(|&u| u == u16::from(b'@'))?;
+    let local = &content[..at_sign];
+    if local.is_empty() || !local.iter().all(|&u| matches!(byte(u), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'/' | b'=' | b'?' | b'^' | b'_' | b'`' | b'{' | b'|' | b'}' | b'~' | b'-')) {
+        return None;
+    }
+    let domain = &content[at_sign + 1..];
+    let labels_ok = !domain.is_empty()
+        && domain.split(|&u| u == u16::from(b'.')).all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.iter().all(|&u| byte(u).is_ascii_alphanumeric() || u == u16::from(b'-'))
+                && label[0] != u16::from(b'-')
+                && label[label.len() - 1] != u16::from(b'-')
+        });
+    labels_ok.then_some((close + 1, start, close, true))
+}
+
+/// micromark's limit on nested parentheses in a destination.
+const MAX_PARENS: usize = 32;
+
+/// An inline link's `(destination "title")` at `at`: where it ends and the destination,
+/// unescaped and with character references decoded.
+fn inline_link(units: &[u16], at: usize) -> Option<(usize, String)> {
+    let unit = |at: usize| units.get(at).copied();
+    if unit(at) != Some(u16::from(b'(')) {
+        return None;
+    }
+    let mut at = at + 1;
+    let separator = |at: &mut usize| {
+        while matches!(unit(*at), Some(0x20 | 0x09)) {
+            *at += 1;
+        }
+        if unit(*at) == Some(0x0A) {
+            *at += 1;
+            while matches!(unit(*at), Some(0x20 | 0x09)) {
+                *at += 1;
+            }
+        }
+    };
+    separator(&mut at);
+    let punct = |u: Option<u16>| u.is_some_and(|u| u < 0x80 && (u as u8).is_ascii_punctuation());
+    let (raw_start, raw_end);
+    if unit(at) == Some(u16::from(b'<')) {
+        let mut i = at + 1;
+        loop {
+            match unit(i)? {
+                0x0A | 0x0D | 0x3C => return None,
+                0x3E => break,
+                0x5C if punct(unit(i + 1)) => i += 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        (raw_start, raw_end) = (at + 1, i);
+        at = i + 1;
+    } else {
+        let mut i = at;
+        let mut nest = 0;
+        while let Some(u) = unit(i) {
+            match u {
+                0..=0x20 => break,
+                0x28 => {
+                    if nest > MAX_PARENS {
+                        return None;
+                    }
+                    nest += 1;
+                }
+                0x29 => {
+                    if nest == 0 {
+                        break;
+                    }
+                    nest -= 1;
+                }
+                0x5C if punct(unit(i + 1)) => i += 1,
+                _ => {}
+            }
+            i += 1;
+        }
+        if nest != 0 {
+            return None;
+        }
+        (raw_start, raw_end) = (at, i);
+        at = i;
+    }
+    separator(&mut at);
+    // A title: `"..."`, `'...'` or `(...)`.
+    if let Some(open) = unit(at).filter(|&u| matches!(u, 0x22 | 0x27 | 0x28)) {
+        let close = if open == 0x28 { 0x29 } else { open };
+        let mut i = at + 1;
+        loop {
+            let u = unit(i)?;
+            if u == close {
+                break;
+            }
+            if u == open {
+                return None;
+            }
+            if u == 0x5C && punct(unit(i + 1)) {
+                i += 1;
+            }
+            i += 1;
+        }
+        at = i + 1;
+        separator(&mut at);
+    }
+    if unit(at) != Some(0x29) {
+        return None;
+    }
+    Some((at + 1, unescape(&units[raw_start..raw_end])))
+}
+
+/// Backslash escapes removed and character references decoded.
+fn unescape(units: &[u16]) -> String {
+    let mut out = String::new();
+    let mut at = 0;
+    while at < units.len() {
+        let u = units[at];
+        if u == 0x5C && units.get(at + 1).is_some_and(|&n| n < 0x80 && (n as u8).is_ascii_punctuation()) {
+            out.push(char::from(units[at + 1] as u8));
+            at += 2;
+        } else if u == 0x26
+            && let Some((end, decoded)) = entity(units, at)
+        {
+            out.push_str(&decoded);
+            at = end;
+        } else {
+            let end = units[at..].iter().position(|&u| u == 0x5C || u == 0x26).map_or(units.len(), |n| at + n.max(1));
+            out.push_str(&String::from_utf16_lossy(&units[at..end]));
+            at = end;
+        }
+    }
+    out
 }
 
 /// Whether `www` (any case) ends at `at`.

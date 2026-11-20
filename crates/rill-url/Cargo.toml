@@ -1,0 +1,16 @@
+[package]
+name = "rill-url"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "The URL rules Streamdown applies to links and images."
+publish = false
+
+[dependencies]
+wasm-bindgen = { version = "=0.2.129", optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+url = "2.5"
+
+[features]
+wasm = ["dep:wasm-bindgen"]

@@ -30,12 +30,18 @@ pub mod tag {
     pub const LI: u32 = 12;
     pub const HR: u32 = 13;
     pub const BR: u32 = 14;
+    /// A link, as Streamdown's link safety renders it: a button.
+    pub const LINK: u32 = 15;
+    /// A link whose URL has not arrived (remend's `streamdown:incomplete-link`).
+    pub const LINK_INCOMPLETE: u32 = 16;
+    pub const DEL: u32 = 17;
+    pub const BLOCKQUOTE: u32 = 18;
     /// `INTERNED + index`: [`super::Strings`]' string `index`.
-    pub const INTERNED: u32 = 16;
+    pub const INTERNED: u32 = 32;
 }
 
 /// Each tag's open tag, as Streamdown writes it.
-pub const TAGS: [&str; 15] = [
+pub const TAGS: [&str; 19] = [
     "<p>",
     "<em>",
     r#"<span class="font-semibold" data-streamdown="strong">"#,
@@ -51,6 +57,10 @@ pub const TAGS: [&str; 15] = [
     r#"<li class="py-1 [&amp;&gt;p]:inline" data-streamdown="list-item">"#,
     r#"<hr class="my-6 border-border" data-streamdown="horizontal-rule">"#,
     "<br>",
+    r#"<button class="wrap-anywhere appearance-none text-left font-medium text-primary underline" data-incomplete="false" data-streamdown="link" type="button">"#,
+    r#"<button class="wrap-anywhere appearance-none text-left font-medium text-primary underline" data-incomplete="true" data-streamdown="link" type="button">"#,
+    "<del>",
+    r#"<blockquote class="my-4 border-muted-foreground/30 border-l-4 pl-4 text-muted-foreground italic" data-streamdown="blockquote">"#,
 ];
 
 /// The strings interned tokens name, kept for a whole session so that a token means the
@@ -98,10 +108,13 @@ pub struct Out {
     agree: usize,
     /// The session's interned strings (shared by its renderings).
     pub strings: std::rc::Rc<std::cell::RefCell<Strings>>,
+    /// The next text starts a text node of its own.
+    split: bool,
 }
 
 impl Out {
     pub fn clear(&mut self) {
+        self.split = false;
         self.words.clear();
         self.text.clear();
         self.origins.clear();
@@ -129,8 +142,15 @@ impl Out {
         self.origins.extend_from_slice(origins);
     }
 
+    /// Ends the text node: the next text starts another (as React keeps adjacent
+    /// strings apart).
+    pub fn split_text(&mut self) {
+        self.split = true;
+    }
+
     #[inline]
     fn word(&mut self, word: u32) {
+        self.split = false;
         self.words.push(word);
         self.origins.push(NOWHERE);
     }
@@ -179,6 +199,7 @@ impl Out {
                     return;
                 }
                 None => {
+                    self.split = false;
                     self.words.push(kind::TEXT | units << 2);
                     self.origins.push(origin as u32);
                     return;
@@ -204,6 +225,9 @@ impl Out {
 
     /// The last token's origin when it is text (`None` when it is not text).
     fn last_text(&self) -> Option<Option<usize>> {
+        if self.split {
+            return None;
+        }
         let &last = self.words.last()?;
         (last & 3 == kind::TEXT).then(|| {
             let origin = *self.origins.last().expect("parallel");
@@ -228,6 +252,7 @@ impl Out {
                 *self.words.last_mut().expect("a token") += units << 2;
             }
             None => {
+                self.split = false;
                 self.words.push(kind::TEXT | units << 2);
                 self.origins.push(NOWHERE);
             }
