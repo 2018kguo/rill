@@ -36,12 +36,31 @@ pub mod tag {
     pub const LINK_INCOMPLETE: u32 = 16;
     pub const DEL: u32 = 17;
     pub const BLOCKQUOTE: u32 = 18;
+    /// A code block's `<code>`, a line's span and a line's (single) token span.
+    pub const CODE_BLOCK: u32 = 19;
+    pub const CODE_LINE: u32 = 20;
+    pub const CODE_TOKEN: u32 = 21;
+    /// A table's wrapper and scroll container, then its elements; `TH`/`TD` + the
+    /// column's alignment (none, left, right, center).
+    pub const TABLE_WRAPPER: u32 = 22;
+    pub const TABLE_SCROLL: u32 = 23;
+    pub const TABLE: u32 = 24;
+    pub const THEAD: u32 = 25;
+    pub const TBODY: u32 = 26;
+    pub const TR: u32 = 27;
+    pub const TH: u32 = 28;
+    pub const TD: u32 = 32;
+    /// A task item's checkbox (unchecked, checked), and a list or item with tasks.
+    pub const CHECKBOX: u32 = 36;
+    pub const UL_TASKS: u32 = 38;
+    pub const OL_TASKS: u32 = 39;
+    pub const LI_TASK: u32 = 40;
     /// `INTERNED + index`: [`super::Strings`]' string `index`.
-    pub const INTERNED: u32 = 32;
+    pub const INTERNED: u32 = 64;
 }
 
 /// Each tag's open tag, as Streamdown writes it.
-pub const TAGS: [&str; 19] = [
+pub const TAGS: [&str; 41] = [
     "<p>",
     "<em>",
     r#"<span class="font-semibold" data-streamdown="strong">"#,
@@ -61,6 +80,28 @@ pub const TAGS: [&str; 19] = [
     r#"<button class="wrap-anywhere appearance-none text-left font-medium text-primary underline" data-incomplete="true" data-streamdown="link" type="button">"#,
     "<del>",
     r#"<blockquote class="my-4 border-muted-foreground/30 border-l-4 pl-4 text-muted-foreground italic" data-streamdown="blockquote">"#,
+    r#"<code class="[counter-increment:line_0] [counter-reset:line]">"#,
+    r#"<span class="block before:content-[counter(line)] before:inline-block before:[counter-increment:line] before:w-6 before:mr-4 before:text-[13px] before:text-right before:text-muted-foreground/50 before:font-mono before:select-none">"#,
+    r#"<span class="text-[var(--sdm-c,inherit)] dark:text-[var(--shiki-dark,var(--sdm-c,inherit))] bg-[var(--sdm-tbg)] dark:bg-[var(--shiki-dark-bg,var(--sdm-tbg))]" style="--sdm-c: inherit; --sdm-tbg: transparent;">"#,
+    r#"<div class="my-4 flex flex-col gap-2 rounded-lg border border-border bg-sidebar p-2" data-streamdown="table-wrapper">"#,
+    r#"<div class="border-collapse overflow-x-auto overflow-y-auto rounded-md border border-border bg-background" style="max-height: 300px;">"#,
+    r#"<table class="w-full divide-y divide-border" data-streamdown="table">"#,
+    r#"<thead class="bg-muted/80" data-streamdown="table-header">"#,
+    r#"<tbody class="divide-y divide-border" data-streamdown="table-body">"#,
+    r#"<tr class="border-border" data-streamdown="table-row">"#,
+    r#"<th class="whitespace-nowrap px-4 py-2 text-left font-semibold text-sm" data-streamdown="table-header-cell">"#,
+    r#"<th class="whitespace-nowrap px-4 py-2 text-left font-semibold text-sm" data-streamdown="table-header-cell" style="text-align: left;">"#,
+    r#"<th class="whitespace-nowrap px-4 py-2 text-left font-semibold text-sm" data-streamdown="table-header-cell" style="text-align: right;">"#,
+    r#"<th class="whitespace-nowrap px-4 py-2 text-left font-semibold text-sm" data-streamdown="table-header-cell" style="text-align: center;">"#,
+    r#"<td class="px-4 py-2 text-sm" data-streamdown="table-cell">"#,
+    r#"<td class="px-4 py-2 text-sm" data-streamdown="table-cell" style="text-align: left;">"#,
+    r#"<td class="px-4 py-2 text-sm" data-streamdown="table-cell" style="text-align: right;">"#,
+    r#"<td class="px-4 py-2 text-sm" data-streamdown="table-cell" style="text-align: center;">"#,
+    r#"<input disabled="" type="checkbox">"#,
+    r#"<input disabled="" type="checkbox" checked="">"#,
+    r#"<ul class="list-inside list-disc whitespace-normal [li_&amp;]:pl-6 contains-task-list" data-streamdown="unordered-list">"#,
+    r#"<ol class="list-inside list-decimal whitespace-normal [li_&amp;]:pl-6 contains-task-list" data-streamdown="ordered-list">"#,
+    r#"<li class="py-1 [&amp;&gt;p]:inline task-list-item" data-streamdown="list-item">"#,
 ];
 
 /// The strings interned tokens name, kept for a whole session so that a token means the
@@ -83,8 +124,31 @@ impl Strings {
         id
     }
 
-    fn get(&self, id: u32) -> &str {
+    pub(crate) fn get(&self, id: u32) -> &str {
         &self.list[(id - tag::INTERNED) as usize]
+    }
+}
+
+/// Streamdown's props the DOM depends on.
+#[derive(Clone, Copy)]
+pub struct Options {
+    /// `controls`: code blocks' and tables' buttons.
+    pub controls: bool,
+    /// `isAnimating`: the last block's unclosed code fence marks its code blocks
+    /// incomplete.
+    pub animating: bool,
+    /// `lineNumbers`: code lines count themselves.
+    pub line_numbers: bool,
+    /// `codeBlockMaxHeight` in pixels (0: none).
+    pub code_max_height: u32,
+    /// `dir`: each block in a `display: contents` element of this direction (0: none, 1:
+    /// `ltr`, 2: `rtl`).
+    pub dir: u8,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self { controls: true, animating: false, line_numbers: true, code_max_height: 400, dir: 0 }
     }
 }
 
@@ -110,6 +174,8 @@ pub struct Out {
     pub strings: std::rc::Rc<std::cell::RefCell<Strings>>,
     /// The next text starts a text node of its own.
     split: bool,
+    /// What the rendering depends on besides the text.
+    pub options: Options,
 }
 
 impl Out {
@@ -171,6 +237,17 @@ impl Out {
     #[inline]
     pub fn void(&mut self, tag: u32) {
         self.word(kind::VOID | tag << 2);
+    }
+
+    /// Adds `attribute` (` name="value"`) to the element word `at` opens (or is).
+    pub fn add_attribute(&mut self, at: usize, attribute: &str) {
+        let word = self.words[at];
+        let id = word >> 2;
+        let html = if id >= tag::INTERNED { self.strings.borrow().get(id).to_owned() } else { TAGS[id as usize].to_owned() };
+        let end = html.find('>').expect("an open tag");
+        let html = format!("{}{attribute}{}", &html[..end], &html[end..]);
+        let id = self.strings.borrow_mut().id(&html);
+        self.words[at] = word & 3 | id << 2;
     }
 
     /// Opens an element with the open tag `html`.

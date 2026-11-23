@@ -117,6 +117,25 @@ should work the same way, but CI doesn't check them.
 The drop-in starts downloading the WebAssembly as soon as the browser evaluates
 `@2018kguo/rill/streamdown`.
 
+### The streaming renderer
+
+When `<Streamdown>` gets only props that don't change Streamdown's default DOM
+(`children` as a string, `isAnimating`, `mode="streaming"`, `className`, `controls` as
+a boolean, `dir` as `ltr` or `rtl`, `lineNumbers`, `codeBlockMaxHeight`, `linkSafety`,
+`shikiTheme`, `animated={false}`, and `data-*`/`aria-*` attributes), it renders with
+rill-stream: a second, smaller WebAssembly module that renders only the part of the
+text that can still change on each update, and edits the DOM in place. React owns just
+the root element. The DOM is Streamdown's, byte for byte.
+
+A message goes back to the regular path, for good, when its text holds something
+rill-stream doesn't render itself (raw HTML, footnotes, math, images, reference
+definitions, tabs, and a few rare cases), or when someone clicks one of its buttons (a
+link, a code block's or table's controls): Streamdown's components then render the same
+DOM, and the click reaches the same button there. `initStream(bytes)` starts the
+module from its bytes where the page serves the WebAssembly itself
+(`@2018kguo/rill/wasm/rill_stream_bg.wasm`); otherwise the drop-in fetches it on first
+use.
+
 ### Using rill under Streamdown's own component
 
 Before the drop-in, rill plugged into Streamdown as a remark/rehype plugin pair, and that

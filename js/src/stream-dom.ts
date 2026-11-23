@@ -47,7 +47,7 @@ const OPEN = 0;
 const CLOSE = 1;
 const VOID = 2;
 /** Tag ids from here on: interned strings (an open tag, or a whole subtree as `VOID`). */
-const INTERNED = 32;
+const INTERNED = 64;
 /** An APPEND range in the text as given. */
 const SOURCE = 0x80000000;
 /** A text token that is not one stretch of the text as given. */
@@ -125,6 +125,12 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
       if (outcome === FALLBACK) return false;
       views();
       header ||= session.headerAt();
+      if (state.u32[header + 11]! > state.interned.length) {
+        const added = session.strings(state.interned.length).split("\0");
+        for (let at = 0; at < added.length - 1; at += 1) state.interned.push(added[at]!);
+        // Passing the strings out may grow memory, which detaches the views.
+        views();
+      }
       const u32 = state.u32;
       const words = u32[header + 3]!;
       // Only the text the edit refers to: from its first unit on.
@@ -132,11 +138,6 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
       state.strings = undefined;
       state.input = next;
       state.origins = u32[header + 9]! - words;
-      const interned = u32[header + 11]!;
-      if (interned > state.interned.length) {
-        const added = session.strings(state.interned.length).split("\0");
-        for (let at = 0; at < added.length - 1; at += 1) state.interned.push(added[at]!);
-      }
       if (outcome === PATCH) {
         apply(state, u32[header + 1]!, u32[header + 2]!, words);
       } else {

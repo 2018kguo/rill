@@ -70,6 +70,7 @@ import { DEFAULT_MAX_SOURCE_LENGTH, optionsOf } from "./plugins.ts";
 import { load, loadFailed, pluginsFor } from "./react.ts";
 import { reportFallback, type FallbackReason } from "./fallback.ts";
 import { knownLists } from "./known.ts";
+import { useStreamRoot } from "./stream-root.ts";
 import {
   animatedKey,
   beginPass,
@@ -158,6 +159,9 @@ export {
   type RillPluginsOptions,
 } from "./plugins.ts";
 export { useRill } from "./react.ts";
+// The streaming renderer for Streamdown's default setup: loaded on first use, or from
+// its bytes where the page serves the WebAssembly itself.
+export { initStream, loadStream } from "./stream.ts";
 export {
   setFallbackListener,
   type FallbackListener,
@@ -379,6 +383,10 @@ const staticBlocks = (text: string): string[] => [text];
 /** Streamdown 2.7.1's `<Streamdown>`, rendering its blocks with rill. */
 export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<Args>) {
   const props = givenProps as Props;
+  // Streamdown's default setup streams through rill-stream once its build has loaded,
+  // until the text needs the exact path or a control is used.
+  const streamRoot = useStreamRoot(props);
+  const streaming = streamRoot !== null;
   const { plugins, prefix, fallbackComponent, translations, icons } = props;
   const engine = props.engine ?? (rillEngine as Engine<Args>);
   const args = props.engineArgs ?? NO_ARGS;
@@ -473,6 +481,7 @@ export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<A
   // rill's port gives the same text, so Streamdown is told not to.
   const { children } = props;
   const heals =
+    !streaming &&
     typeof children === "string" &&
     props.mode !== "static" &&
     props.parseIncompleteMarkdown !== false &&
@@ -486,6 +495,7 @@ export const Streamdown = memo(function Streamdown(givenProps: StreamdownProps<A
     engineArgs: _engineArgs,
     ...streamdownProps
   } = props;
+  if (streamRoot) return streamRoot;
   if (staticMode) {
     // Streamdown's streaming path with one block, no remend and no caret renders what its
     // static path does; `Block` gives the components the context static mode would.

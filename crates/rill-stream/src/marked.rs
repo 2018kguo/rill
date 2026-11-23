@@ -3,7 +3,7 @@
 //! on its own, so the cuts decide what continues into what. Only the tokens' extents are
 //! computed, after `marked`'s tokenizer (`Lexer.blockTokens`, `Tokenizer.blockquote` and
 //! `list`, the block rules); what the renderer does not cover yet is [`Fallback`]:
-//! fences, HTML, definitions, tables, indented code, math.
+//! HTML, definitions, indented code, math.
 
 use crate::simd::ByteSet;
 use crate::{Fallback, NL, Result, SP, newline, run};
@@ -18,6 +18,8 @@ enum Kind {
     Blockquote,
     List,
     Paragraph,
+    Code,
+    Table,
 }
 
 struct Token {
@@ -30,24 +32,28 @@ struct Token {
 
 /// The UTF-16 offsets where Streamdown's blocks of `text` start, the first excepted.
 pub(crate) fn cuts(text: &[u16]) -> Result<Vec<usize>> {
-    precheck(text)?;
     let mut tokens = Vec::new();
     lex(text, &mut tokens, false)?;
+    // A block with an odd count of `$$` takes the next (math): blocks other than code.
+    let mut ends = tokens.iter().skip(1).map(|token| token.start).chain([text.len()]);
+    for token in &tokens {
+        let end = ends.next().expect("one end a token");
+        if token.kind != Kind::Code && text[token.start..end].windows(2).any(|pair| pair == [0x24, 0x24]) {
+            return Err(Fallback);
+        }
+    }
     Ok(tokens.iter().filter(|token| token.kind != Kind::Space && token.start > 0).map(|token| token.start).collect())
 }
 
-/// Fallback for what may make a token this does not lex: fences (```, ~~~), math
-/// (`$$`), definitions (`]:`), HTML at a line's start (after indents and quote markers).
-/// 16 units at a time, looking closer only at those characters.
+/// Fallback for what may make a paragraph, heading or rule's text a token this does
+/// not lex: a definition (`]:`), HTML at a line's start (after indents and quote
+/// markers). 16 units at a time, looking closer only at those characters.
 fn precheck(text: &[u16]) -> Result {
-    const SET: ByteSet = ByteSet::new(b"`~$]<");
+    const SET: ByteSet = ByteSet::new(b"]<");
     let fails = |at: usize| {
         let unit = text[at];
-        let next = |offset: usize| text.get(at + offset).copied();
         match unit {
-            0x60 | 0x7E => next(1) == Some(unit) && next(2) == Some(unit),
-            0x24 => next(1) == Some(0x24),
-            0x5D => next(1) == Some(u16::from(b':')),
+            0x5D => text.get(at + 1) == Some(&u16::from(b':')),
             _ => text[..at].iter().rev().find(|&&u| u != SP && u != u16::from(b'>')).is_none_or(|&u| u == NL),
         }
     };
@@ -84,23 +90,25 @@ fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result {
             continue;
         }
         let first = line(s, 0);
-        if run(first, SP) >= 4 {
-            return Err(Fallback); // indented code
-        }
-        let (kind, length) = if heading(first, 3) {
+        let (kind, length) = if run(first, SP) >= 4 {
+            (Kind::Code, indented(s))
+        } else if let Some(length) = fences(s)? {
+            (Kind::Code, length)
+        } else if heading(first, 3) {
             (Kind::Heading, first.len())
         } else if hr(first, 3) {
             (Kind::Hr, first.len())
         } else if let Some(length) = blockquote(s)? {
             (Kind::Blockquote, length)
-        } else if let Some(length) = list(s) {
+        } else if let Some(length) = list(s)? {
             (Kind::List, length)
-        } else if table(s) {
-            return Err(Fallback);
+        } else if let Some(length) = table(s)? {
+            (Kind::Table, length)
         } else if let Some(length) = lheading(s) {
             (Kind::Heading, length)
         } else {
             let length = paragraph(s, 0, true);
+            precheck(&s[..length])?;
             let merge = clipped && tokens.last().is_some_and(|last| last.kind == Kind::Paragraph);
             clipped = false;
             pos += length;
@@ -109,6 +117,9 @@ fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result {
             }
             continue;
         };
+        if kind == Kind::Heading || kind == Kind::Hr {
+            precheck(&s[..length])?;
+        }
         let raw = if matches!(kind, Kind::Blockquote | Kind::List) { s[..length].to_vec() } else { Vec::new() };
         tokens.push(Token { kind, start: pos, raw });
         pos += length;
@@ -214,26 +225,171 @@ fn underline(line: &[u16]) -> bool {
     spaces <= 3 && matches!(c, 0x3D | 0x2D) && line[spaces + marks..].iter().all(|&u| u == SP)
 }
 
-/// A table's delimiter row without pipes: ` {0,3}:?-+:? *` to the line's end.
-fn delimiter(line: &[u16]) -> bool {
-    let spaces = run(line, SP);
-    let mut at = spaces + usize::from(is(line.get(spaces), b':'));
-    let dashes = run(&line[at..], u16::from(b'-'));
-    at += dashes;
-    at += usize::from(is(line.get(at), b':'));
-    spaces <= 3 && dashes > 0 && line[at..].iter().all(|&u| u == SP)
+/// `fences`: the opening line, the content and the closing line (or the rest of the
+/// text). A closing fence micromark does not take (the other character after the
+/// opening's run) is [`Fallback`].
+fn fences(s: &[u16]) -> Result<Option<usize>> {
+    let first = line(s, 0);
+    let spaces = run(first, SP);
+    let Some((fence, length)) = (spaces <= 3).then(|| crate::block::fence_open(&first[spaces..])).flatten() else {
+        return Ok(None);
+    };
+    let mut end = first.len();
+    while end < s.len() {
+        let next = end + 1;
+        let l = line(s, next);
+        let indent = run(l, SP);
+        let rest = &l[indent..];
+        if indent <= 3 && run(rest, fence) >= length {
+            let marks = rest.iter().take_while(|&&u| u == 0x60 || u == 0x7E).count();
+            if rest[marks..].iter().all(|&u| u == SP) {
+                if rest[..marks].iter().any(|&u| u != fence) {
+                    return Err(Fallback);
+                }
+                return Ok(Some(next + l.len()));
+            }
+        }
+        end = next + l.len();
+    }
+    Ok(Some(s.len()))
 }
 
-/// Whether a table (`gfmTable`) starts at the line at `at`: it and a delimiter row.
+/// `code`: indented lines (four spaces and more), blank lines between them.
+fn indented(s: &[u16]) -> usize {
+    let mut end = 0;
+    let mut at = 0;
+    while at < s.len() {
+        let l = line(s, at);
+        if blank(l) {
+            at += l.len() + 1;
+            continue;
+        }
+        if run(l, SP) < 4 {
+            break;
+        }
+        end = at + l.len();
+        at = end + 1;
+    }
+    end
+}
+
+/// ` {0,max}(?:```|~~~)`.
+fn fence_begins(line: &[u16], max: usize) -> bool {
+    let spaces = run(line, SP);
+    spaces <= max && matches!(line.get(spaces), Some(&(0x60 | 0x7E))) && run(&line[spaces..], line[spaces]) >= 3
+}
+
+/// `gfmTable`'s delimiter row (` {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)`
+/// to the line's end): its cell count, and whether it has a pipe or a colon.
+fn delimiter(line: &[u16]) -> Option<(usize, bool)> {
+    let is = |at: usize, byte: u8| line.get(at) == Some(&u16::from(byte));
+    let spaces = run(line, SP);
+    if spaces > 3 {
+        return None;
+    }
+    let mut marked = false;
+    // A cell (`:?-+:? *`) at `at`: where it ends.
+    let mut cell = |at: usize| {
+        let left = is(at, b':');
+        let dashes = run(&line[at + usize::from(left)..], u16::from(b'-'));
+        if dashes == 0 {
+            return None;
+        }
+        let mut end = at + usize::from(left) + dashes;
+        let right = is(end, b':');
+        end += usize::from(right);
+        marked |= left || right;
+        Some(end + run(&line[end..], SP))
+    };
+    let mut at = spaces;
+    let pipe = is(at, b'|');
+    if pipe {
+        at += 1 + run(&line[at + 1..], SP);
+    }
+    at = cell(at)?;
+    let mut cells = 1;
+    let mut pipes = pipe;
+    while at < line.len() {
+        if !is(at, b'|') {
+            return None;
+        }
+        pipes = true;
+        at += 1 + run(&line[at + 1..], SP);
+        if at == line.len() {
+            break;
+        }
+        at = cell(at)?;
+        cells += 1;
+    }
+    Some((cells, marked || pipes))
+}
+
+/// Whether a table (`gfmTable`, without the tokenizer's checks) starts at the line at
+/// `at`: a line with a non-space, then a delimiter row.
 fn table_at(s: &[u16], at: usize) -> bool {
     let header = line(s, at);
     let next = at + header.len() + 1;
-    header.iter().any(|&u| u != SP) && next <= s.len() && delimiter(line(s, next))
+    header.iter().any(|&u| u != SP) && next <= s.len() && delimiter(line(s, next)).is_some()
 }
 
-/// `marked`'s table token (it needs a `:` in the delimiter row when there is no pipe).
-fn table(s: &[u16]) -> bool {
-    table_at(s, 0) && line(s, line(s, 0).len() + 1).contains(&u16::from(b':'))
+/// `marked`'s header cell count (`splitCells`, no escapes): split at pipes, a blank
+/// first and last cell dropped.
+fn header_cells(line: &[u16]) -> usize {
+    let cells: Vec<&[u16]> = line.split(|&u| u == u16::from(b'|')).collect();
+    let blank = |cell: &&[u16]| cell.iter().all(|&u| js_space(u));
+    let mut count = cells.len();
+    let mut from = 0;
+    if cells.first().is_some_and(blank) {
+        count -= 1;
+        from = 1;
+    }
+    if count > 0 && cells.last().is_some_and(blank) && cells.len() > from {
+        count -= 1;
+    }
+    count
+}
+
+/// `Tokenizer.table`: the header, the delimiter row (with a pipe or a colon, as many
+/// cells), then rows up to a blank line or another block's start.
+fn table(s: &[u16]) -> Result<Option<usize>> {
+    if !table_at(s, 0) {
+        return Ok(None);
+    }
+    let header = line(s, 0);
+    let rule_at = header.len() + 1;
+    let rule = line(s, rule_at);
+    let (count, marked) = delimiter(rule).expect("a delimiter row");
+    if !marked || header_cells(&header[run(header, SP)..]) != count {
+        return Ok(None);
+    }
+    if header.contains(&u16::from(b'\\')) {
+        return Err(Fallback);
+    }
+    let mut end = rule_at + rule.len();
+    while end < s.len() {
+        let next = end + 1;
+        let l = line(s, next);
+        let spaces = run(l, SP);
+        let rest = &l[spaces..];
+        if spaces <= 3 && is(rest.first(), b'<') {
+            return Err(Fallback);
+        }
+        let list = marker(l, 3).is_some_and(|(at, _, digits)| {
+            (digits == 0 || (digits == 1 && is(l.get(at - 2), b'1'))) && matches!(l.get(at), Some(&(SP | TAB)))
+        });
+        let stops = (blank(l) && next + l.len() < s.len())
+            || hr(l, 3)
+            || heading(l, 3)
+            || quote(l, 3)
+            || (spaces >= 4 && spaces < l.len())
+            || (spaces <= 3 && crate::block::fence_open(rest).is_some())
+            || list;
+        if stops {
+            break;
+        }
+        end = next + l.len();
+    }
+    Ok(Some(end))
 }
 
 /// Where a paragraph from `from` (a line's non-blank rest) ends: the rule's lookaheads
@@ -247,6 +403,7 @@ fn paragraph(s: &[u16], from: usize, root: bool) -> usize {
             || hr(l, 3)
             || heading(l, 3)
             || quote(l, 3)
+            || (run(l, SP) <= 3 && crate::block::fence_open(&l[run(l, SP)..]).is_some())
             || (blank(l) && next + l.len() < s.len())
             || if root { list_interrupts(l) || table_at(s, next) } else { bullet(l, 3).is_some() };
         if stops {
@@ -257,12 +414,23 @@ fn paragraph(s: &[u16], from: usize, root: bool) -> usize {
     end
 }
 
+/// A line (followed by more) that `lheading` does not run across.
+pub(crate) fn setext_stop(l: &[u16]) -> bool {
+    let bull = marker(l, 3).is_some_and(|(end, ..)| is(l.get(end), b' '));
+    let pipes = l.contains(&u16::from(b'|')) && l.iter().all(|&u| matches!(u, 0x20 | 0x2D | 0x3A | 0x7C));
+    trims_empty(l) || bull || quote(l, 3) || heading(l, 3) || hr(l, 3) || fence_begins(l, 3) || pipes
+}
+
 /// `lheading`: lines up to a setext underline.
 fn lheading(s: &[u16]) -> Option<usize> {
     // ` {0,3}(?:[*+-]|\d{1,9}[.)]) `
     let bull = |l: &[u16]| marker(l, 3).is_some_and(|(end, ..)| is(l.get(end), b' '));
+    // ` {0,3}\|?(?:[:\- ]*\|)+[\:\- ]*\n`: a row of pipes, colons, dashes, spaces.
+    let pipes = |l: &[u16], at: usize| {
+        at + l.len() < s.len() && l.contains(&u16::from(b'|')) && l.iter().all(|&u| matches!(u, 0x20 | 0x2D | 0x3A | 0x7C))
+    };
     let first = line(s, 0);
-    if bull(first) || quote(first, 3) || heading(first, 3) {
+    if bull(first) || quote(first, 3) || heading(first, 3) || fence_begins(first, 3) || pipes(first, 0) {
         return None;
     }
     let mut end = first.len();
@@ -273,7 +441,7 @@ fn lheading(s: &[u16]) -> Option<usize> {
             // JavaScript's `.` stops at line separators: no heading then (rare).
             return (!s[..end].iter().any(|&u| matches!(u, 0x2028 | 0x2029))).then_some(next + l.len());
         }
-        if trims_empty(l) || bull(l) || quote(l, 3) || heading(l, 3) || hr(l, 3) {
+        if trims_empty(l) || bull(l) || quote(l, 3) || heading(l, 3) || hr(l, 3) || fence_begins(l, 3) || pipes(l, next) {
             return None;
         }
         end = next + l.len();
@@ -363,7 +531,7 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
         }
         let Some(last) = tokens.last_mut() else { continue };
         match last.kind {
-            Kind::Heading | Kind::Hr => break,
+            Kind::Heading | Kind::Hr | Kind::Code => break,
             Kind::Blockquote => {
                 // The rest continues the nested quote, one marker less.
                 let mut text = last.raw.clone();
@@ -384,7 +552,7 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
                 let mut text = last.raw.clone();
                 text.push(NL);
                 text.extend(join(&lines[at..]));
-                let length = list(&text).ok_or(Fallback)?;
+                let length = list(&text)?.ok_or(Fallback)?;
                 if length > old {
                     at += text[old + 1..length].iter().filter(|&&u| u == NL).count() + 1;
                 }
@@ -397,8 +565,8 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
 }
 
 /// `Tokenizer.list`: its `raw`'s length.
-fn list(s: &[u16]) -> Option<usize> {
-    let (_, kind, digits) = bullet(line(s, 0), 3)?;
+fn list(s: &[u16]) -> Result<Option<usize>> {
+    let Some((_, kind, digits)) = bullet(line(s, 0), 3) else { return Ok(None) };
     let ordered = digits > 0;
     let mut pos = 0;
     let mut items = 0;
@@ -429,7 +597,10 @@ fn list(s: &[u16]) -> Option<usize> {
         let max = indent.saturating_sub(1).min(3);
         while pos < s.len() {
             let l = line(s, pos);
-            if heading(l, max) || quote(l, max) || bullet(l, max).is_some() || hr(l, max) {
+            if run(l, SP) <= max && is(l.get(run(l, SP)), b'<') {
+                return Err(Fallback); // an HTML block may start
+            }
+            if fence_begins(l, max) || heading(l, max) || quote(l, max) || bullet(l, max).is_some() || hr(l, max) {
                 break;
             }
             let deep = l.iter().position(|&u| u != SP).is_some_and(|at| at >= indent);
@@ -437,6 +608,7 @@ fn list(s: &[u16]) -> Option<usize> {
                 && !trims_empty(l)
                 && (blank_line
                     || item_line.iter().position(|&u| u != SP).is_some_and(|at| at >= 4)
+                    || fence_begins(item_line, max)
                     || heading(item_line, max)
                     || hr(item_line, max))
             {
@@ -448,13 +620,13 @@ fn list(s: &[u16]) -> Option<usize> {
         }
     }
     if items == 0 {
-        return None;
+        return Ok(None);
     }
     let mut end = pos;
     while end > 0 && js_space(s[end - 1]) {
         end -= 1;
     }
-    Some(end)
+    Ok(Some(end))
 }
 
 #[cfg(test)]

@@ -80,8 +80,8 @@ pub(crate) fn render_split_at(
     inline: &mut Inline,
 ) -> Result<Split> {
     out.set_source(source, at, agree);
-    if source.iter().fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0x7C | 0)) {
-        // ponytail: CR, tabs (column math), NUL and tables take the exact path for now.
+    if source.iter().fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0)) {
+        // ponytail: CR, tabs (column math) and NUL take the exact path for now.
         return Err(Fallback);
     }
     let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0, list: false, decides: 0 };
@@ -114,7 +114,7 @@ pub(crate) fn render_split_at(
     let line_start = |at: usize| source[..at].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
     let last_line = line_start(source.len());
     let mut changing = usize::MAX;
-    if source.last() != Some(&NL) && source[last_line..].iter().all(|&unit| matches!(ascii(unit), b' ' | b':' | b'-')) {
+    if source.last() != Some(&NL) && source[last_line..].iter().all(|&unit| matches!(ascii(unit), b' ' | b':' | b'-' | b'|')) {
         changing = last_line;
     }
     if repaired < source.len() {
@@ -126,9 +126,25 @@ pub(crate) fn render_split_at(
             back += 1;
         }
     }
+    // `marked`'s lheading: a setext underline still to come makes one heading token of the
+    // lines back to the last one it does not run across, whatever blocks they are now.
+    let mut chain = last_line;
+    while chain > 0 {
+        let previous = line_start(chain - 1);
+        if marked::setext_stop(&source[previous..chain - 1]) {
+            break;
+        }
+        chain = previous;
+    }
+    while back < 4 && back_of(back).source > chain {
+        back += 1;
+    }
     let mut split = back_of(back);
     if split.source > 0 && !parted(source, split.source) {
-        split.decides = newline(source, split.source) + 1;
+        // The block's first line decides the cut, and the line after it too when that
+        // makes the first a table's header.
+        let first = newline(source, split.source);
+        split.decides = if first < source.len() { newline(source, first + 1) + 1 } else { first + 1 };
     }
     Ok(split)
 }
@@ -270,6 +286,7 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     /// Streamdown's DOM for `source`, or `undefined` to render it the exact way.
+    #[cfg(feature = "probe")]
     #[wasm_bindgen(js_name = renderStream)]
     pub fn render_stream(source: &str) -> Option<String> {
         let mut out = String::with_capacity(source.len() * 2);
@@ -307,6 +324,20 @@ mod wasm {
         pub fn new() -> Self {
             Self { session: crate::Session::default(), input: Vec::new(), header: [0; 12] }
         }
+        /// Streamdown's `controls` and `isAnimating` (before the first update).
+        #[wasm_bindgen(js_name = setOptions)]
+        pub fn set_options(&mut self, controls: bool, animating: bool) {
+            let options = crate::tokens::Options { controls, animating, ..self.session.options() };
+            self.session.set_options(options);
+        }
+        /// Streamdown's `lineNumbers` and `codeBlockMaxHeight` (0: none), and `dir` (0:
+        /// none, 1: `ltr`, 2: `rtl`), before the first update.
+        #[wasm_bindgen(js_name = setLayout)]
+        pub fn set_layout(&mut self, line_numbers: bool, code_max_height: u32, dir: u8) {
+            let options = crate::tokens::Options { line_numbers, code_max_height, dir, ..self.session.options() };
+            self.session.set_options(options);
+        }
+        #[cfg(feature = "probe")]
         /// 0: patch, 1: reset, 2: fall back (see [`crate::Outcome`]).
         pub fn update(&mut self, appended: &str, reset: bool) -> u32 {
             let outcome = self.session.update(appended, reset);
@@ -343,6 +374,7 @@ mod wasm {
             }
             joined
         }
+        #[cfg(feature = "probe")]
         /// The last update's whole HTML.
         #[wasm_bindgen(getter)]
         pub fn html(&self) -> String {
@@ -378,6 +410,7 @@ mod wasm {
     }
 
     /// Bench probe: the HTML's length, without returning it.
+    #[cfg(feature = "probe")]
     #[wasm_bindgen(js_name = renderStreamLength)]
     pub fn render_stream_length(source: &str) -> usize {
         let mut out = String::with_capacity(source.len() * 2);

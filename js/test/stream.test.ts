@@ -26,6 +26,7 @@ const module = { memory: streamMemory(), tags: streamTags() };
 function ours(text: string): string | undefined {
   scratch.innerHTML = `${ROOT}</div>`;
   const session = new Stream();
+  session.setOptions(false, false);
   const renderer = createStreamRenderer(scratch.firstChild as Element, session, module);
   const shown = renderer.update(text);
   renderer.dispose();
@@ -51,6 +52,11 @@ const ALPHABETS: [name: string, pieces: string[], depth: number, fast?: number][
   ["containers", ["> ", "- ", "1. ", "  ", "a", "\n", "\n\n"], 5],
   ["nesting", ["- ", "  ", "> ", "b", "\n", "=", "`"], 5],
   ["item children", ["- ", "  ", "# ", "b", "\n", "- b"], 5],
+  ["fences", ["```", "~~~", "js", " ", "a", "\n", "`"], 5],
+  ["fences in containers", ["```", "- ", "> ", "  ", "a", "\n", "\n\n"], 5],
+  ["code lines", ["```\n", "a", " ", "|", "\n", "\n\n", "<b"], 5],
+  ["tables", ["| ", "a", "|", "--", ":", "\n", "*"], 5],
+  ["table rows", ["|a|\n|-|\n", "b", "|", "\n", "- ", "`"], 5],
   // A letter after `<` is raw HTML, which takes the exact path for now.
   ["autolink brackets", ["<", ">", "a", ":", "@", ".", "b", "-", " "], 5, 0.4],
 ];

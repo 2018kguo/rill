@@ -24,23 +24,31 @@ function textNodes(node: Node): string {
 }
 
 const LONG = `${"word ".repeat(60)}`;
-const ALPHABETS: [name: string, pieces: string[], depth: number][] = [
+const ALPHABETS: [name: string, pieces: string[], depth: number, controls?: boolean][] = [
   ["inline", [..."*_`a \n"], 6],
   ["blocks", ["# ", "---", "a", " ", "\n", "\n\n", "**", "  \n"], 5],
   ["paragraphs", [LONG, "\n\n", "*", "`", "\n", "# x"], 5],
   ["lists", ["- ", "* ", "1. ", "a", " ", "\n", "  ", "*", "\n\n"], 5],
   ["unicode", ["*", "`", "é", "😀", "“", " ", "\n\n", "~"], 5],
   ["mixed", ["**", "*", "_", "`", "a", " ", "\n", "# ", "\\", "é"], 5],
+  ["controls", ["```js\n", "a", "\n", "```", "| a |\n|--|\n", "| b |", "\n\n"], 5, true],
 ];
 
-for (const [name, pieces, depth] of ALPHABETS) {
+for (const [name, pieces, depth, controls = false] of ALPHABETS) {
+/** A session rendering for Streamdown's `controls` and `isAnimating`. */
+const streamWith = (controls: boolean, animating: boolean) => {
+  const stream = new Stream();
+  stream.setOptions(controls, animating);
+  return stream;
+};
+
   test(`a streaming session shows Streamdown's DOM after every update (${name})`, async () => {
     const theirs = mount(Streamdown);
     const host = document.createElement("div");
     const root = document.createElement("div");
     root.className = ROOT_CLASS;
     host.append(root);
-    const renderer = createStreamRenderer(root, new Stream(), { memory: streamMemory(), tags: streamTags() });
+    const renderer = createStreamRenderer(root, streamWith(controls, true), { memory: streamMemory(), tags: streamTags() });
     let shown = 0;
     let updates = 0;
     const walk = async (prefix: string, left: number) => {
@@ -55,7 +63,11 @@ for (const [name, pieces, depth] of ALPHABETS) {
           const settled = host.cloneNode(true) as Element;
           settled.normalize();
           const got = `${host.innerHTML}\n${textNodes(settled)}`;
-          const want = await theirs.render(text, { isAnimating: true, controls: false });
+          // (With controls, a fresh Streamdown: its memoized code blocks keep the
+          // `data-incomplete` of a longer text the walk cut back from.)
+          const fresh = controls ? mount(Streamdown) : theirs;
+          const want = await fresh.render(text, { isAnimating: true, controls });
+          if (controls) await fresh.unmount();
           if (got !== want) {
             let at = 0;
             while (got[at] === want[at]) at += 1;

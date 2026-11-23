@@ -58,6 +58,16 @@ pub enum Outcome {
 
 impl Session {
     /// Renders the text so far plus `appended` (with `reset`, `appended` is the whole text).
+    /// Streamdown's props the DOM depends on (before the first update).
+    pub fn options(&self) -> crate::tokens::Options {
+        self.next.options
+    }
+
+    pub fn set_options(&mut self, options: crate::tokens::Options) {
+        self.next.options = options;
+        self.shown.options = options;
+    }
+
     pub fn update(&mut self, appended: &str, reset: bool) -> Outcome {
         let (keep, ()) = self.remend.heal_with(appended, reset, |_, _| ());
         self.after_heal(keep, reset)
@@ -199,11 +209,15 @@ mod tests {
 
     #[test]
     fn streaming_render_is_whole_text_render() {
-        const PIECES: [&str; 50] = [
+        const PIECES: [&str; 69] = [
+    "https://", "@", ".co", 
+            "~", "~~", "- [x] ", "    ", 
             "a", "b", "word", " ", " ", "  ", "\n", "\n\n", "*", "**", "***", "_", "__", "`", "``", "\\",
             "&", "<", "é", "😀", "# ", "- ", "1. ", "---", "x.", ":", "  \n", "www.", "=", "\\*",
             "[", "]", "(", ")", "](", "[x](/u)", "<a:b>", "&amp;", "&#", ";", "](javascript:x)", "\"t\"",
             "> ", "\n> ", ">", "\n  ", "\n    ", "  - ", "\n- ", "\n\n  ",
+            "```", "\n```\n", "~~~", "```js\n", "  ```", "| ", "\n\n",
+            "|", "--", ":", "\n|--|\n", "| a |",
         ];
         let mut seed = std::env::var("STREAM_SEED").map_or(0x9e37_79b9_7f4a_7c15u64, |s| s.parse().unwrap());
         let mut next = |bound: usize| {

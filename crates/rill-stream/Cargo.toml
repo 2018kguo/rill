@@ -18,6 +18,8 @@ wasm-bindgen = { version = "=0.2.129", optional = true }
 
 [features]
 wasm = ["dep:wasm-bindgen", "rill-url/wasm"]
+# The UTF-8 and HTML entry points, for probes and the Node tests.
+probe = []
 
 [dev-dependencies]
 rill = { path = "../rill" }

@@ -647,12 +647,28 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     /// `]` closes the latest one, link or not.
     /// ponytail: brackets in code spans still count; spans are not resolved yet.
     fn in_literal_path(&mut self, from: usize, ix: usize) -> bool {
-        if self.literal_cache.0 != from {
-            self.literal_cache = (from, from, from);
-        }
-        let (_, mut scanned, mut end) = self.literal_cache;
         let text = self.text;
         let bytes = text.as_bytes();
+        if self.literal_cache.0 != from {
+            // A code span opened on an earlier line of the block covers this one's start.
+            let mut start = from;
+            if let Some(n) = self.open_code_span(from) {
+                let mut close = from;
+                while let Some(next) = memchr::memchr(b'`', &bytes[close..]) {
+                    let run = scan_ch_repeat(&bytes[close + next..], b'`');
+                    if run == n {
+                        start = close + next + n;
+                        break;
+                    }
+                    close += next + run;
+                }
+            }
+            self.literal_cache = (from, start, start);
+        }
+        let (_, mut scanned, mut end) = self.literal_cache;
+        if scanned > ix {
+            return false; // in that code span
+        }
         let atext = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'_');
         // Candidates: protocol and www starts, and email starts (an atext run's first byte).
         let candidate = |at: usize| {
@@ -660,7 +676,38 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 || atext(bytes[at]) && (at == from || !atext(bytes[at - 1]))
         };
         while scanned < ix && end <= ix {
-            let Some(at) = (scanned..ix).find(|&at| candidate(at)) else {
+            // A code span (its closer may come later) is code: no literal starts in it.
+            let mut found = None;
+            let mut at = scanned;
+            while at < ix {
+                if bytes[at] == b'`' && scan_rev_while(&bytes[from..at], |b| b == b'\\') % 2 == 0 {
+                    let n = scan_ch_repeat(&bytes[at..], b'`');
+                    let mut close = at + n;
+                    let closer = loop {
+                        let Some(next) = memchr::memchr(b'`', &bytes[close..]) else { break None };
+                        let run = scan_ch_repeat(&bytes[close + next..], b'`');
+                        if run == n {
+                            break Some(close + next);
+                        }
+                        close += next + run;
+                    };
+                    match closer {
+                        Some(closer) if closer + n > ix => {
+                            self.literal_cache = (from, at, end);
+                            return false;
+                        }
+                        Some(closer) => at = closer + n,
+                        None => at += n,
+                    }
+                    continue;
+                }
+                if candidate(at) {
+                    found = Some(at);
+                    break;
+                }
+                at += 1;
+            }
+            let Some(at) = found else {
                 scanned = ix;
                 break;
             };
@@ -684,6 +731,40 @@ impl<'a, 'b> FirstPass<'a, 'b> {
         }
         self.literal_cache = (from, scanned, end);
         end > ix
+    }
+
+    /// The length of the backtick run of a code span the block's earlier lines leave
+    /// open before `at`, if any.
+    fn open_code_span(&self, at: usize) -> Option<usize> {
+        let block = self.tree.peek_up()?;
+        let mut open = None;
+        let mut node = self.tree[block].child;
+        while let Some(ix) = node.filter(|&ix| self.tree[ix].item.start < at) {
+            if let ItemBody::MaybeCode(count, escaped) = self.tree[ix].item.body {
+                let count = count - usize::from(escaped && open.is_none());
+                let end = self.tree[ix].item.end;
+                // An opener needs a closer of its length later on, or it is text.
+                let closes = || {
+                    let bytes = self.text.as_bytes();
+                    let mut at = end;
+                    while let Some(next) = memchr::memchr(b'`', &bytes[at..]) {
+                        let run = scan_ch_repeat(&bytes[at + next..], b'`');
+                        if run == count {
+                            return true;
+                        }
+                        at += next + run;
+                    }
+                    false
+                };
+                match open {
+                    None if count > 0 && closes() => open = Some(count),
+                    Some(n) if n == count => open = None,
+                    _ => {}
+                }
+            }
+            node = self.tree[ix].next;
+        }
+        open
     }
 
     /// Whether a `[` or `![` before `at` in the current block is still open.
@@ -923,7 +1004,19 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     {
                         return LoopInstruction::ContinueAndSkip(count - 1);
                     }
-                    let next = string_suffix[count..].chars().next();
+                    let mut next = string_suffix[count..].chars().next();
+                    // rill: micromark tokenizes a table cell's content on its own, so a
+                    // divider beside the run is the content's edge (whitespace), not
+                    // punctuation.
+                    let (mut previous, mut two_previous) = (previous, two_previous);
+                    if let TableParseMode::Active = mode {
+                        if previous == Some('|') && scan_rev_while(&bytes[..ix - 1], |b| b == b'\\') % 2 == 0 {
+                            (previous, two_previous) = (None, None);
+                        }
+                        if next == Some('|') {
+                            next = None;
+                        }
+                    }
                     let flanking = if c == b'~' {
                         crate::attention::strikethrough(
                             self.syntax.flanking(),
@@ -1013,7 +1106,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                         LoopInstruction::ContinueAndSkip(0)
                     }
                 }
-                b'[' => {
+                // rill: brackets in a literal autolink's path are its text.
+                b'[' if !self.in_literal_path(start, ix) => {
                     self.tree.append_text(begin_text, ix, backslash_escaped);
                     backslash_escaped = false;
                     self.tree.append(Item {
@@ -1024,7 +1118,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     begin_text = ix + 1;
                     LoopInstruction::ContinueAndSkip(0)
                 }
-                b']' => {
+                b']' if !self.in_literal_path(start, ix) => {
                     self.tree.append_text(begin_text, ix, backslash_escaped);
                     backslash_escaped = false;
                     self.tree.append(Item {

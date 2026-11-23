@@ -7,10 +7,14 @@
 
 use serde_json::Value;
 
-const PIECES: [&str; 34] = [
+const PIECES: [&str; 56] = [
+    "www.", "https://", "a@b.co", ".", ")", 
+    "@",
+    "~", "~~", "[ ] ", "[x] ", 
     "a", "b", " ", "  ", "   ", "    ", "\n", "\n", "\n\n", "> ", ">", "- ", "* ", "1. ", "2) ", "# ", "---",
     "*", "**", "_", "`", "\\", "[x](/u)", "[", "]", "&amp;", "  \n", "x", "=", "+ ", "10. ", "é",
-    "\n> ", "\n  ",
+    "\n> ", "\n  ", "```", "\n```\n", "~~~", "```js", "| ", "  ```",
+    "|", "--", ":", "-|-", "\n|--|\n", "| a |",
 ];
 
 #[test]
@@ -42,10 +46,38 @@ fn same_structure_as_the_exact_pipeline() {
 fn ours(text: &str) -> Option<String> {
     let mut html = String::new();
     rill_stream::render(text, &mut html).ok()?;
+    // A table: the table alone, without its wrapper, controls and scroll container.
+    while let Some(start) = html.find(r#"<div class="my-4 flex flex-col gap-2 rounded-lg"#) {
+        let table = start + html[start..].find("<table").unwrap();
+        let end = table + html[table..].find("</table></div></div>").unwrap();
+        html = format!("{}{}</table>{}", &html[..start], &html[table..end], &html[end + 20..]);
+    }
     // Parse our own HTML back: tags by name, text unescaped.
     let mut out = String::new();
     let mut rest = html.as_str();
     while !rest.is_empty() {
+        // A code block: its language and lines, as `pre > code`.
+        if let Some(after) = rest.strip_prefix(r#"<div class="relative my-4"#) {
+            let language = &after[after.find("data-language=\"").unwrap() + 15..];
+            let language = &language[..language.find('"').unwrap()];
+            let body = &after[after.find("<code class=").unwrap()..];
+            let body = &body[body.find('>').unwrap() + 1..body.find("</code></pre></div></div>").unwrap()];
+            let lines: Vec<String> = body
+                .split(r#"<span class="block "#)
+                .skip(1)
+                .map(|line| {
+                    let line = &line[line.find('>').unwrap() + 1..];
+                    let text = match line.strip_prefix("<span") {
+                        Some(token) => &token[token.find('>').unwrap() + 1..token.find("</span>").unwrap()],
+                        None => &line[..line.find("</span>").unwrap()],
+                    };
+                    if text == "\n" { String::new() } else { text.to_owned() }
+                })
+                .collect();
+            out.push_str(&format!("<pre><code {}>{}</code></pre>", unescape(language).replace("&quot;", "\""), unescape(&lines.join("\n"))));
+            rest = &after[after.find("</code></pre></div></div>").unwrap() + 25..];
+            continue;
+        }
         if let Some(after) = rest.strip_prefix("</") {
             let end = after.find('>').unwrap();
             out.push_str(&format!("</{}>", hast_name(&after[..end])));
@@ -60,11 +92,15 @@ fn ours(text: &str) -> Option<String> {
             rest = &after[end + 1..];
         } else {
             let end = rest.find('<').unwrap_or(rest.len());
-            out.push_str(&rest[..end].replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"));
+            out.push_str(&unescape(&rest[..end]));
             rest = &rest[end..];
         }
     }
     Some(out)
+}
+
+fn unescape(html: &str) -> String {
+    html.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 }
 
 /// The HAST tag Streamdown's component for `name` renders from.
@@ -106,6 +142,13 @@ fn block(text: &str) -> Option<String> {
 fn write(node: &Value, out: &mut String) -> Option<()> {
     match node["type"].as_str()? {
         "text" => out.push_str(node["value"].as_str()?),
+        "element" if node["tagName"] == "pre" => {
+            // Streamdown's code block: the code without its trailing line endings.
+            let code = &node["children"][0];
+            let language = code["properties"]["className"].as_array().and_then(|names| names.first()).and_then(|name| name.as_str()).map_or("", |name| name.strip_prefix("language-").unwrap_or(name));
+            let text = code["children"].as_array()?.iter().map(|child| child["value"].as_str()).collect::<Option<String>>()?;
+            out.push_str(&format!("<pre><code {language}>{}</code></pre>", text.trim_end_matches('\n')));
+        }
         "element" => {
             let tag = node["tagName"].as_str()?;
             // `strong` renders as a span; the HTML parse above names it by tag.

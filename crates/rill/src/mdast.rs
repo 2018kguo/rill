@@ -643,12 +643,45 @@ enum Settle {
     Item { list: NodeId },
 }
 
-/// An open container's line prefix: a quote marker, or indentation to an item's content
-/// column.
+/// An open container's line prefix: a quote marker, or an item's indentation: its width
+/// past the prefixes outside it (micromark's `containerState.size`), and where its
+/// marker's line starts and its content column there.
 #[derive(Clone, Copy)]
 enum Prefix {
     Quote,
-    Item(usize),
+    Item { width: usize, line: usize, column: usize },
+}
+
+/// A footnote definition's prefix. ponytail: four columns, exact at the top level.
+const FOOTNOTE: Prefix = Prefix::Item { width: 4, line: usize::MAX, column: 4 };
+
+/// The prefix of the item starting at `start` inside the containers `outer`: its content
+/// column on its marker's line, less where `outer`'s prefixes end there (a quote's
+/// optional space counts as the quote's on that line only).
+fn item_prefix(source: &str, outer: &[Prefix], start: usize) -> Prefix {
+    let bytes = source.as_bytes();
+    let mut marker = start;
+    while matches!(bytes.get(marker), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+        marker += 1;
+    }
+    let line = start_of_line(source, marker);
+    let column = item_content_column(source, start);
+    let mut at = line;
+    for prefix in outer {
+        match *prefix {
+            Prefix::Quote => {
+                let indent = bytes[at..].iter().take(3).take_while(|b| **b == b' ').count();
+                if bytes.get(at + indent) == Some(&b'>') {
+                    at += indent + 1;
+                    if matches!(bytes.get(at), Some(b' ' | b'\t')) {
+                        at += 1;
+                    }
+                }
+            }
+            Prefix::Item { width, line: own, column } => at = if own == line { line + column } else { at + width },
+        }
+    }
+    Prefix::Item { width: (line + column).saturating_sub(at), line, column }
 }
 
 #[derive(Clone, Copy)]
@@ -1175,18 +1208,17 @@ impl<'s> Builder<'s> {
     /// The open containers' line prefixes, outermost first.
     fn prefixes(&self) -> Vec<Prefix> {
         let source = self.tree.source;
-        self.stack
-            .iter()
-            .filter_map(|frame| match self.tree.nodes[frame.node as usize].kind {
-                NodeKind::Blockquote => Some(Prefix::Quote),
-                // ponytail: four columns from the line start, exact at the top level.
-                NodeKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
-                NodeKind::ListItem { .. } => {
-                    Some(Prefix::Item(item_content_column(source, frame.start)))
-                }
-                _ => None,
-            })
-            .collect()
+        let mut prefixes = Vec::new();
+        for frame in &self.stack {
+            let prefix = match self.tree.nodes[frame.node as usize].kind {
+                NodeKind::Blockquote => Prefix::Quote,
+                NodeKind::FootnoteDefinition { .. } => FOOTNOTE,
+                NodeKind::ListItem { .. } => item_prefix(source, &prefixes, frame.start),
+                _ => continue,
+            };
+            prefixes.push(prefix);
+        }
+        prefixes
     }
 
     /// A label's source (`start..end`, inside its brackets) as micromark slices it: each
@@ -1797,8 +1829,8 @@ fn crossed_line_endings(
         NodeKind::Blockquote => Some(Prefix::Quote),
         NodeKind::ListItem { .. } => tree
             .bytes(ix)
-            .map(|(start, _)| Prefix::Item(item_content_column(source, start as usize))),
-        NodeKind::FootnoteDefinition { .. } => Some(Prefix::Item(4)),
+            .map(|(start, _)| item_prefix(source, prefixes, start as usize)),
+        NodeKind::FootnoteDefinition { .. } => Some(FOOTNOTE),
         _ => None,
     };
     prefixes.extend(prefix);
@@ -2242,8 +2274,8 @@ fn prefix_end(source: &str, prefixes: &[Prefix], line_start: usize) -> (usize, b
                     at += 1;
                 }
             }
-            Prefix::Item(column) => {
-                let column = line_start + column;
+            Prefix::Item { width, .. } => {
+                let column = at + width;
                 while at < column && bytes.get(at) == Some(&b' ') {
                     at += 1;
                 }
@@ -2269,7 +2301,7 @@ fn fence_at_eof(source: &str, prefixes: &[Prefix], start: usize) -> (usize, Stri
     for prefix in prefixes {
         match *prefix {
             Prefix::Quote => own = prefix_end(source, &[Prefix::Quote], own).0,
-            Prefix::Item(column) => own = own.max(fence_line + column),
+            Prefix::Item { width, line, column } => own = if line == fence_line { fence_line + column } else { own + width },
         }
     }
     let indent = start.saturating_sub(own);

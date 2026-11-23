@@ -7,7 +7,7 @@
 use rill_unicode::{in_table, PUNCTUATION_OR_SYMBOL, WHITESPACE};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LiteralKind {
+pub enum LiteralKind {
     Email,
     Http,
     Www,
@@ -266,7 +266,7 @@ fn www(text: &str, at: usize, previous: Option<char>) -> Option<usize> {
 }
 
 /// micromark's construct order for the character at `at`: email first, then protocol or www.
-pub(crate) fn scan(text: &str, at: usize, previous: Option<char>) -> Option<(usize, LiteralKind)> {
+pub fn scan(text: &str, at: usize, previous: Option<char>) -> Option<(usize, LiteralKind)> {
     if let Some(end) = email(text, at, previous) {
         return Some((end, LiteralKind::Email));
     }

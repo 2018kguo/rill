@@ -1,6 +1,6 @@
 {
   "name": "@2018kguo/rill",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "description": "A drop-in for Streamdown's <Streamdown>: the same DOM with a fraction of the main-thread work, rendered in Rust compiled to WebAssembly.",
   "license": "MIT",
   "repository": {
@@ -38,6 +38,10 @@
       "types": "./dist/conformance.d.ts",
       "default": "./dist/conformance.js"
     },
+    "./stream": {
+      "types": "./dist/stream-entry.d.ts",
+      "default": "./dist/stream-entry.js"
+    },
     "./streamdown": {
       "types": "./dist/streamdown.d.ts",
       "default": "./dist/streamdown.js"
@@ -58,7 +62,8 @@
       "types": "./dist/vite.d.ts",
       "default": "./dist/vite.js"
     },
-    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm"
+    "./wasm/rill_bg.wasm": "./wasm/rill_bg.wasm",
+    "./wasm/rill_stream_bg.wasm": "./wasm/rill_stream_bg.wasm"
   },
   "files": [
     "dist",

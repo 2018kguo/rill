@@ -43,6 +43,11 @@ pub struct Inline {
     runs: Vec<Run>,
     /// Indices into `runs` still able to match.
     delims: Vec<usize>,
+    /// Indices into `runs` of `~` runs still able to match.
+    tildes: Vec<usize>,
+    /// The first run's marker and place: micromark resolves strikethrough first when a
+    /// `~` run comes before every `*`/`_` run.
+    first: Option<(u8, u32)>,
     /// What the scan found, in source order; the text between them is copied as it is.
     events: Vec<Event>,
     /// Where the last scan left the first backtick run without a closer (a later one
@@ -69,6 +74,7 @@ pub struct Inline {
 struct Resume {
     start: usize,
     at: usize,
+    first: Option<(u8, u32)>,
     words: Vec<u32>,
     text: Vec<u16>,
     origins: Vec<u32>,
@@ -80,6 +86,7 @@ struct Bracket {
     event: usize,
     /// How many delimiter runs came before it.
     delims: usize,
+    tildes: usize,
     /// No link encloses another: a link closing deactivates the brackets before it.
     active: bool,
 }
@@ -137,6 +144,8 @@ struct Run {
     count: u32,
     can_open: bool,
     can_close: bool,
+    /// A `~` run that opens (1) or closes (2) a strikethrough.
+    del: u8,
     /// Tags opened after the remaining characters, outermost first (bit set: strong).
     opens: Tags,
     /// Tags closed before them, innermost first.
@@ -218,6 +227,8 @@ impl Inline {
     pub fn render(&mut self, text: &[u16], strip: usize, out: &mut Out, stable: usize) -> Result {
         self.runs.clear();
         self.delims.clear();
+        self.tildes.clear();
+        self.first = None;
         self.events.clear();
         self.pairs.clear();
         self.brackets.clear();
@@ -232,6 +243,7 @@ impl Inline {
         if start == Some(self.resume.start) && self.resume.at > 0 && self.resume.at + LOOKAHEAD <= unchanged.min(text.len()) {
             out.extend(&self.resume.words, &self.resume.text, &self.resume.origins);
             from = self.resume.at;
+            self.first = self.resume.first;
         }
         let base = (out.words.len() - self.resume.words.len() * usize::from(from > 0), out.text.len() - self.resume.text.len() * usize::from(from > 0));
         self.scan(text, from)?;
@@ -239,7 +251,7 @@ impl Inline {
         if let Some(first) = self.brackets.first() {
             self.ceiling = self.ceiling.min(self.events[first.event].at as usize);
         }
-        self.emphasis(0)?;
+        self.resolve(0, 0)?;
         // The next render's resume point: the latest one this render can vouch for.
         // (The next render checks that the text is the same through it and its lookahead.)
         let next = start.and_then(|_| self.checkpoint(text, from, text.len().saturating_sub(LOOKAHEAD)));
@@ -257,6 +269,7 @@ impl Inline {
         };
         // The token before the content: text the content joins (a list item's line
         // ending) is not the content's to replay, so no resume point then.
+        let first = self.first;
         let before = base.0.checked_sub(1).map(|at| (out.words[at], out.origins[at]));
         let record = |out: &Out, resume: &mut Resume, at: usize| {
             if before.is_some_and(|before| (out.words[base.0 - 1], out.origins[base.0 - 1]) != before) {
@@ -270,6 +283,7 @@ impl Inline {
             resume.text.extend_from_slice(&out.text[base.1..]);
             resume.start = start.expect("a source slice");
             resume.at = at;
+            resume.first = first.filter(|&(_, run)| (run as usize) < at);
         };
         for event in &self.events {
             if let Some(next) = next
@@ -297,6 +311,14 @@ impl Inline {
                     out.open(tag::CODE);
                     code_content(out, &text[start as usize..end as usize], trim, strip);
                     out.close();
+                }
+                Kind::Run { index } if self.runs[index as usize].del > 0 => {
+                    broke = false;
+                    if self.runs[index as usize].del == 1 {
+                        out.open(tag::DEL);
+                    } else {
+                        out.close();
+                    }
                 }
                 Kind::Run { index } => {
                     let run = &self.runs[index as usize];
@@ -346,6 +368,11 @@ impl Inline {
             let unit = text[at - 1];
             unit != 0x20
                 && !(unit < 0x80 && SPECIAL.contains(unit as u8))
+                // Inside a run of `gfmAtext`, only once it has ended (not in `@`/`:`).
+                && (!atext(unit) || {
+                    let end = at + text[at..].iter().take_while(|&&unit| atext(unit)).count();
+                    end < (at + LOOKAHEAD).min(text.len()) && !matches!(ascii(text[end]), b'@' | b':')
+                })
                 && !self.pairs.iter().any(|&(start, end)| (start as usize) < at && at < end as usize)
         };
         // The plain stretches between events, from the last.
@@ -363,6 +390,75 @@ impl Inline {
             end = event.at as usize;
         }
         None
+    }
+
+    /// The autolink literal around `trigger`, if any: micromark tries one at each place of
+    /// the run of `gfmAtext` before it, left to right. Returns where it ends.
+    fn literal(&mut self, text: &[u16], trigger: usize, from: usize) -> Result<Option<usize>> {
+        use rill_cmark::autolink_literal::{LiteralKind, scan};
+        let floor = self.events.last().map_or(from, |event| (event.resume as usize).max(from));
+        let mut start = trigger;
+        while start > 0 && atext(text[start - 1]) {
+            start -= 1;
+        }
+        // ponytail: a run across another construct (an `_` run, an escape), or inside an
+        // open `[` (micromark's `previousUnbalanced`), takes the exact path.
+        if start < floor || !self.brackets.is_empty() {
+            return Err(Fallback);
+        }
+        // ponytail: the rest of the content, per trigger (quadratic in triggers).
+        let s = String::from_utf16_lossy(&text[start..]);
+        let previous = text[..start].last().map(|&unit| {
+            let pair = if (0xDC00..0xE000).contains(&unit) && start >= 2 { &text[start - 2..start] } else { &text[start - 1..start] };
+            char::decode_utf16(pair.iter().copied()).last().and_then(|c| c.ok()).unwrap_or('\u{FFFD}')
+        });
+        // More text could still make or grow a literal unless whitespace follows.
+        let settled = |at: usize| text[at..].iter().any(|&unit| unit == 0x20 || unit == 0x0A);
+        for p in start..=trigger {
+            let before = if p == start { previous } else { Some(char::from(text[p - 1] as u8)) };
+            let Some((end, kind)) = scan(&s, p - start, before) else { continue };
+            let end = start + s[..end].encode_utf16().count();
+            // ponytail: backslashes in a literal (the exact path's resolution after it
+            // differs, rarely matters).
+            if text[p..end].contains(&u16::from(b'\\')) {
+                return Err(Fallback);
+            }
+            let literal = String::from_utf16_lossy(&text[p..end]);
+            let href = match kind {
+                LiteralKind::Email => format!("mailto:{literal}"),
+                LiteralKind::Www => format!("http://{literal}"),
+                LiteralKind::Http => literal,
+            };
+            if !settled(end) {
+                self.ceiling = self.ceiling.min(start);
+            }
+            let link = self.link(&href);
+            self.event(p, end, Kind::Autolink { link, start: p as u32, end: end as u32 });
+            return Ok(Some(end));
+        }
+        // mdast's autolink transform may still link what the tokenizer did not (after
+        // punctuation, a character reference): the exact path, unless its patterns cannot
+        // match yet (`https://` or `www.` with no domain, `a@` with no dotted one).
+        let word = |unit: Option<&u16>| unit.is_some_and(|&unit| atext(unit) && unit != u16::from(b'+'));
+        let may_link = match ascii(text[trigger]) {
+            // (An escape or a reference there may decode to one.)
+            b':' => word(text.get(trigger + 3)) || matches!(text.get(trigger + 3).map(|&unit| ascii(unit)), Some(b'\\' | b'&')),
+            // (Its `www(?=\.)[-.\w]+` takes `www.` alone.)
+            b'.' => true,
+            _ => {
+                let label = |at: usize| at + text[at..].iter().take_while(|&&unit| word(Some(&unit)) && unit != u16::from(b'.')).count();
+                let end = label(trigger + 1);
+                text[trigger + 1..].iter().take(64).any(|&unit| matches!(ascii(unit), b'\\' | b'&'))
+                    || end > trigger + 1 && text.get(end) == Some(&u16::from(b'.')) && label(end + 1) > end + 1
+            }
+        };
+        if may_link {
+            return Err(Fallback);
+        }
+        if !settled(trigger) {
+            self.ceiling = self.ceiling.min(start);
+        }
+        Ok(None)
     }
 
     fn event(&mut self, at: usize, resume: usize, kind: Kind) {
@@ -476,7 +572,7 @@ impl Inline {
                     if at > 0 && bytes[at - 1] == u16::from(b'!') && bytes[..at - 1].iter().rev().take_while(|&&u| u == u16::from(b'\\')).count() % 2 == 0 {
                         return Err(Fallback);
                     }
-                    self.brackets.push(Bracket { event: self.events.len(), delims: self.delims.len(), active: true });
+                    self.brackets.push(Bracket { event: self.events.len(), delims: self.delims.len(), tildes: self.tildes.len(), active: true });
                     self.event(at, at + 1, Kind::Open { link: NO_LINK });
                     at += 1;
                 }
@@ -496,9 +592,11 @@ impl Inline {
                     let link = self.link(&destination);
                     let open = self.events[bracket.event].at;
                     self.events[bracket.event].kind = Kind::Open { link };
-                    // Emphasis inside the link pairs inside it.
+                    // Emphasis inside the link pairs inside it (strikethrough first).
+                    self.tildes_first(bracket.tildes, bracket.delims)?;
                     self.emphasis(bracket.delims)?;
                     self.delims.truncate(bracket.delims);
+                    self.tildes.truncate(bracket.tildes);
                     self.pairs.push((open, end as u32));
                     self.event(at, end, Kind::Close { link });
                     for earlier in &mut self.brackets {
@@ -507,33 +605,53 @@ impl Inline {
                     at = end;
                 }
                 // GFM autolink literals (`www.`, `scheme://`, emails) take the exact path.
-                b'@' => return Err(Fallback),
-                b':' | b'.' => {
-                    let suspect = if byte == b':' {
-                        bytes.get(at + 1..at + 3) == Some(&[0x2F, 0x2F])
-                    } else {
-                        www_before(bytes, at)
+                // GFM autolink literals: `x@y.z`, `http(s)://`, `www.`.
+                b'@' | b':' | b'.' => {
+                    let suspect = match byte {
+                        b'@' => at > 0 && atext(bytes[at - 1]),
+                        b':' => bytes.get(at + 1..at + 3) == Some(&[0x2F, 0x2F]),
+                        _ => www_before(bytes, at),
                     };
-                    if suspect {
-                        return Err(Fallback);
+                    if suspect && let Some(end) = self.literal(bytes, at, from)? {
+                        at = end;
+                        plain = at;
+                        continue;
                     }
                     at += 1;
                     continue; // text
                 }
-                b'*' | b'_' => {
+                b'*' | b'_' | b'~' => {
                     let length = count(bytes, at, unit);
+                    if byte == b'~' && length > 2 {
+                        at += length;
+                        continue; // text
+                    }
+                    if self.first.is_none() {
+                        self.first = Some((byte, at as u32));
+                    }
                     let before = class(at.checked_sub(1).map(|at| text[at]));
                     let after = class(text.get(at + length).copied());
-                    let left = after != Class::Space && (after != Class::Punct || before != Class::Other);
-                    let right = before != Class::Space && (before != Class::Punct || after != Class::Other);
-                    let (can_open, can_close) = if byte == b'*' {
+                    let mut left = after != Class::Space && (after != Class::Punct || before != Class::Other);
+                    let mut right = before != Class::Space && (before != Class::Punct || after != Class::Other);
+                    // GFM strikethrough makes `~` an attention marker: `*` and `_` open
+                    // before it and close after it.
+                    if byte != b'~' {
+                        let tilde = u16::from(b'~');
+                        left |= text.get(at + length) == Some(&tilde);
+                        right |= at > 0 && text[at - 1] == tilde;
+                    }
+                    let (can_open, can_close) = if byte != b'_' {
                         (left, right)
                     } else {
                         (left && (!right || before == Class::Punct), right && (!left || after == Class::Punct))
                     };
                     if can_open || can_close {
                         let length32 = length as u32;
-                        self.delims.push(self.runs.len());
+                        if byte == b'~' {
+                            self.tildes.push(self.runs.len());
+                        } else {
+                            self.delims.push(self.runs.len());
+                        }
                         let index = self.runs.len() as u32;
                         self.runs.push(Run {
                             at: at as u32,
@@ -542,6 +660,7 @@ impl Inline {
                             count: length32,
                             can_open,
                             can_close,
+                            del: 0,
                             opens: Tags::default(),
                             closes: Tags::default(),
                         });
@@ -553,14 +672,76 @@ impl Inline {
                         continue;
                     }
                 }
-                // Strikethrough: the exact path.
-                _ => return Err(Fallback),
+                _ => unreachable!("in SPECIAL"),
             }
             plain = at;
         }
     }
 
     /// CommonMark's "process emphasis" over the delimiter runs from `bottom` on.
+    /// Resolves the runs from `tildes`/`delims` on, in micromark's resolver order.
+    fn resolve(&mut self, tildes: usize, delims: usize) -> Result {
+        if self.first.is_some_and(|(marker, _)| marker == b'~') {
+            self.tildes_first(tildes, delims)?;
+            return self.emphasis(delims);
+        }
+        let emphasis = self.pairs.len();
+        self.emphasis(delims)?;
+        let dels = self.pairs.len();
+        self.strikethrough(tildes, None)?;
+        // ponytail: a strikethrough crossing emphasis takes the exact path.
+        let (emphasis, dels) = (&self.pairs[emphasis..dels], &self.pairs[dels..]);
+        if dels.iter().any(|&(o, c)| emphasis.iter().any(|&(s, e)| (s < o && o < e && e < c) || (o < s && s < c && c < e))) {
+            return Err(Fallback);
+        }
+        Ok(())
+    }
+
+    /// Strikethrough resolved first: emphasis inside each pair pairs inside it.
+    fn tildes_first(&mut self, tildes: usize, delims: usize) -> Result {
+        self.strikethrough(tildes, Some(delims))
+    }
+
+    /// Pairs `~` runs from `tildes` on: each closer with the nearest opener of its length.
+    /// With `region`, emphasis runs (from that index) between the two are resolved then.
+    fn strikethrough(&mut self, tildes: usize, region: Option<usize>) -> Result {
+        let mut closer_at = tildes;
+        while closer_at < self.tildes.len() {
+            let c = &self.runs[self.tildes[closer_at]];
+            let (count, can_close) = (c.count, c.can_close);
+            let found = if can_close { (tildes..closer_at).rev().find(|&o| self.runs[self.tildes[o]].can_open && self.runs[self.tildes[o]].count == count) } else { None };
+            let Some(opener_at) = found else {
+                closer_at += 1;
+                continue;
+            };
+            // ponytail: micromark leaves the openers between them able to pair later
+            // (crossing); the exact path.
+            if self.tildes[opener_at + 1..closer_at].iter().any(|&run| self.runs[run].can_open) {
+                return Err(Fallback);
+            }
+            let (opener, closer) = (self.tildes[opener_at], self.tildes[closer_at]);
+            let (start, end) = (self.runs[opener].end, self.runs[closer].at);
+            if let Some(bottom) = region {
+                let lo = bottom + self.delims[bottom..].partition_point(|&run| self.runs[run].at < start);
+                let hi = lo + self.delims[lo..].partition_point(|&run| self.runs[run].at < end);
+                let rest = self.delims.split_off(hi);
+                let inner = self.delims.split_off(lo);
+                let outer = std::mem::replace(&mut self.delims, inner);
+                self.emphasis(0)?;
+                self.delims = outer;
+                self.delims.extend(rest);
+            }
+            for (run, del) in [(opener, 1), (closer, 2)] {
+                self.runs[run].count = 0;
+                self.runs[run].del = del;
+            }
+            self.pairs.push((self.runs[opener].at, self.runs[closer].end));
+            self.tildes.drain(opener_at..=closer_at);
+            closer_at = opener_at;
+        }
+        Ok(())
+    }
+
     fn emphasis(&mut self, bottom: usize) -> Result {
         // ponytail: quadratic opener search; add openers_bottom if adversarial input shows up.
         let mut closer_at = bottom;
@@ -579,8 +760,8 @@ impl Inline {
                     && o.count > 0
                     // micromark applies the rule of three to what is left of each run.
                     && !((o.can_close || closer_opens)
-                        && (o.count + close_count) % 3 == 0
-                        && !(o.count % 3 == 0 && close_count % 3 == 0))
+                        && (o.count + close_count).is_multiple_of(3)
+                        && !(o.count.is_multiple_of(3) && close_count % 3 == 0))
             });
             let Some(opener_at) = found else {
                 closer_at += 1;
@@ -855,6 +1036,11 @@ fn unescape(units: &[u16]) -> String {
 }
 
 /// Whether `www` (any case) ends at `at`.
+/// micromark's `gfmAtext`.
+fn atext(unit: u16) -> bool {
+    unit < 0x80 && matches!(unit as u8, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.' | b'_')
+}
+
 fn www_before(units: &[u16], at: usize) -> bool {
     at >= 3 && units[at - 3..at].iter().all(|&u| ascii(u) | 0x20 == b'w')
 }
