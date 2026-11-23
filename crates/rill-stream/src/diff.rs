@@ -24,6 +24,9 @@ pub mod op {
     /// `depth, path..., start, end, text`: build the new tokens `[start, end)`, their text
     /// from unit `text`, at the end of the element at the path (depth 0: the root).
     pub const BUILD: u32 = 2;
+    /// `depth, path..., tag`: the element at the path becomes tag `tag`'s, keeping its
+    /// children (an attribute changed: a closed fence, a caret that moved on).
+    pub const RETAG: u32 = 3;
 }
 
 /// The program, and the lowest text unit it refers to.
@@ -174,6 +177,15 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
                 }
                 old_text += old.units(old_word, old_text, old_units).1;
                 text += new.units(word, text, units).1;
+                step(&mut path, y);
+                old_word += 1;
+                word += 1;
+            }
+            // An element whose attributes changed: retag it, and go on into its children.
+            (Some(x), Some(y)) if x & 3 == kind::OPEN && y & 3 == kind::OPEN => {
+                first = false;
+                program.path(op::RETAG, &path);
+                program.ops.push(y >> 2);
                 step(&mut path, y);
                 old_word += 1;
                 word += 1;

@@ -16,7 +16,7 @@ import {
 import { twMerge } from "tailwind-merge";
 
 import { createStreamRenderer, type StreamRenderer } from "./stream-dom.ts";
-import { loadStream, loadedStream, subscribeStream, type StreamOptions } from "./stream.ts";
+import { loadStream, loadedStream, subscribeStream, type StreamOptions, type StreamSession } from "./stream.ts";
 
 /** Streamdown's root element's classes. */
 const ROOT_CLASS = "space-y-4 whitespace-normal [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
@@ -126,17 +126,27 @@ type StreamRootProps = {
  * the open tail and edits the DOM in place. */
 function StreamRoot({ text, options, className, attributes, onHandOff }: StreamRootProps) {
   const root = useRef<HTMLDivElement>(null);
-  const state = useRef<{ renderer: StreamRenderer; key: string } | null>(null);
-  const key = JSON.stringify(options);
+  const state = useRef<{ renderer: StreamRenderer; session: StreamSession; key: string; animating: boolean } | null>(null);
+  // (`isAnimating` only changes the open tail and the controls' `disabled`.)
+  const key = JSON.stringify({ ...options, animating: undefined });
   useLayoutEffect(() => {
     const module = loadedStream()!;
     let current = state.current;
-    // Other options (`isAnimating` ending, say): the text renders again from the start.
-    if (current?.key !== key) {
+    if (current?.key === key && current.animating && !options.animating) {
+      // The message finished: the same session, its tail rendered again.
+      current.session.setOptions(options.controls, false);
+      current.animating = false;
+      root.current!.querySelectorAll("button[disabled]").forEach((button) => button.removeAttribute("disabled"));
+      if (!current.renderer.update(text)) onHandOff(null);
+      return;
+    }
+    // Other options: the text renders again from the start.
+    if (current?.key !== key || current.animating !== options.animating) {
       current?.renderer.dispose();
       root.current!.textContent = "";
-      const renderer = createStreamRenderer(root.current!, module.newSession(options), module);
-      current = state.current = { renderer, key };
+      const session = module.newSession(options);
+      const renderer = createStreamRenderer(root.current!, session, module);
+      current = state.current = { renderer, session, key, animating: options.animating };
     }
     if (!current.renderer.update(text)) onHandOff(null);
   });

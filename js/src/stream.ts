@@ -1,20 +1,19 @@
 // rill-stream: the streaming renderer for messages in Streamdown's default setup. Its
 // own small WebAssembly build renders each update's open tail into DOM edits; React
 // owns only the root element.
-import { createStreamRenderer, type StreamModule, type StreamSession } from "./stream-dom.ts";
+import { type StreamModule, type StreamSession as Session } from "./stream-dom.ts";
 
 export { createStreamRenderer, type StreamRenderer } from "./stream-dom.ts";
 
 type StreamGlue = {
   default(options: { module_or_path: unknown }): Promise<unknown>;
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
-  Stream: new () => StreamSession & {
-    setOptions(controls: boolean, animating: boolean): void;
-    setLayout(lineNumbers: boolean, codeMaxHeight: number, dir: number): void;
-  };
+  Stream: new () => StreamSession & { setLayout(lineNumbers: boolean, codeMaxHeight: number, dir: number): void };
   streamMemory(): WebAssembly.Memory;
   streamTags(): string;
 };
+
+export type StreamSession = Session & { setOptions(controls: boolean, animating: boolean): void };
 
 /** Streamdown's props the streaming DOM depends on. */
 export type StreamOptions = {

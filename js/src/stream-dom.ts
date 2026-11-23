@@ -43,6 +43,7 @@ const PATCH = 0;
 const FALLBACK = 2;
 const APPEND = 0;
 const REMOVE = 1;
+const RETAG = 3;
 const OPEN = 0;
 const CLOSE = 1;
 const VOID = 2;
@@ -238,6 +239,18 @@ function apply(root: Root, ops: number, length: number, words: number) {
       const value = start >= SOURCE ? root.input.slice(start - SOURCE, u32[at + 1]!) : root.literal(start, u32[at + 1]!);
       last.parentNode!.insertBefore(document.createTextNode(value), last.nextSibling);
       at += 2;
+    } else if (opcode === RETAG) {
+      const element = node as Element;
+      const tag = clone(root, u32[at]!, false) as Element;
+      if (tag.tagName === element.tagName) {
+        // The attributes in the new tag's order.
+        while (element.attributes.length > 0) element.removeAttribute(element.attributes[0]!.name);
+        for (const { name, value } of Array.from(tag.attributes)) element.setAttribute(name, value);
+      } else {
+        while (element.firstChild) tag.appendChild(element.firstChild);
+        element.replaceWith(tag);
+      }
+      at += 1;
     } else {
       const added = build(root, node as Element, words + u32[at]!, words + u32[at + 1]!, u32[at + 2]!);
       if (depth === 0) root.count += added;
