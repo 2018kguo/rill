@@ -433,6 +433,16 @@ mod wasm {
         }
         /// Streamdown's `lineNumbers` and `codeBlockMaxHeight` (0: none), and `dir` (0:
         /// none, 1: `ltr`, 2: `rtl`), before the first update.
+        /// The tags a page's `components` override (`overrides::*` bits), before the
+        /// first update.
+        #[wasm_bindgen(js_name = setOverrides)]
+        pub fn set_overrides(&mut self, overrides: u8) {
+            let options = crate::tokens::Options {
+                overrides,
+                ..self.session.options()
+            };
+            self.session.set_options(options);
+        }
         #[wasm_bindgen(js_name = setLayout)]
         pub fn set_layout(&mut self, line_numbers: bool, code_max_height: u32, dir: u8) {
             let options = crate::tokens::Options {

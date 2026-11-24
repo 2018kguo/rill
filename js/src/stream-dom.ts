@@ -47,6 +47,7 @@ const RETAG = 3;
 const OPEN = 0;
 const CLOSE = 1;
 const VOID = 2;
+const TEXT_KIND = 3;
 /** Tag ids from here on: interned strings (an open tag, or a whole subtree as `VOID`). */
 const INTERNED = 64;
 /** An APPEND range in the text as given. */
@@ -57,12 +58,84 @@ const NOWHERE = 0xffffffff;
 export type StreamRenderer = {
   /** Shows `text`; `false` when it needs the exact path (the root is left as it was). */
   update(text: string): boolean;
+  /** The islands in the DOM now (see `Island`), in document order. */
+  islands(): Island[];
   dispose(): void;
 };
 
+/** An element of a tag the page's `components` override: rendered by React, from the
+ * tokens, in place of a comment that holds its position (see `holder`). */
+export type Island = {
+  /** Stable for the island's life (a React key). */
+  key: number;
+  anchor: Comment;
+  /** The island's element and subtree, as `IslandNode`s; `json` compares them. */
+  tree: IslandElement;
+  json: string;
+  /** The container React renders the island into: it puts nodes after `anchor`. */
+  holder: Element;
+};
+
+/** An element of an island's subtree: its open tag's HTML (attributes and all), and
+ * for a static subtree (`VOID`) its inner HTML. */
+export type IslandElement = {
+  html: string;
+  inner?: string;
+  island: boolean;
+  children: IslandNode[];
+};
+export type IslandNode = IslandElement | string;
+
+/** What an island's interned open tag starts with. */
+const ISLAND = "\u0001";
+
+/** Nodes React put in place for an island: not the stream's (positions skip them). */
+const owned = new WeakSet<Node>();
+
+/** Whether `node` is one an island's component rendered (at its top). */
+export const isIslandNode = (node: Node): boolean => owned.has(node);
+
+/** Each anchor's island. */
+const islandOf = new WeakMap<Comment, Island>();
+let islandKeys = 0;
+
+/** A container for React whose children go after `anchor` (in order), not into it. */
+function holder(document: Document, anchor: Comment): Element {
+  const box = document.createElement("div");
+  const nodes: Node[] = [];
+  const place = (node: Node, before: Node | null) => {
+    owned.add(node);
+    const at = nodes.indexOf(node);
+    if (at >= 0) nodes.splice(at, 1);
+    if (before === null) {
+      const last = nodes.findLast((n) => n.parentNode === anchor.parentNode) ?? anchor;
+      anchor.parentNode?.insertBefore(node, last.nextSibling);
+      nodes.push(node);
+    } else {
+      before.parentNode?.insertBefore(node, before);
+      nodes.splice(Math.max(0, nodes.indexOf(before)), 0, node);
+    }
+    return node;
+  };
+  Object.assign(box, {
+    appendChild: (node: Node) => place(node, null),
+    insertBefore: (node: Node, before: Node | null) => place(node, before),
+    removeChild: (node: Node) => {
+      const at = nodes.indexOf(node);
+      if (at >= 0) nodes.splice(at, 1);
+      node.parentNode?.removeChild(node);
+      return node;
+    },
+  });
+  return box;
+}
+
 /** Per document: the tags' elements (per module's list) and each parsed open tag or
  * subtree, by its HTML (they are the same across messages). */
-const parsed = new WeakMap<Document, { tags: Map<string, Element[]>; html: Map<string, Node>; template: HTMLTemplateElement }>();
+const parsed = new WeakMap<
+  Document,
+  { tags: Map<string, Element[]>; html: Map<string, Node>; template: HTMLTemplateElement }
+>();
 
 function parsedFor(document: Document) {
   let cache = parsed.get(document);
@@ -73,7 +146,12 @@ function parsedFor(document: Document) {
   return cache;
 }
 
-export function createStreamRenderer(root: Element, session: StreamSession, module: StreamModule): StreamRenderer {
+export function createStreamRenderer(
+  root: Element,
+  session: StreamSession,
+  module: StreamModule,
+  options: { islands?: boolean } = {},
+): StreamRenderer {
   const { memory } = module;
   const document = root.ownerDocument;
   const cache = parsedFor(document);
@@ -88,6 +166,7 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
   }
   const utf16 = new TextDecoder("utf-16le");
   const state: Root = {
+    islands: [],
     element: root,
     tags,
     finals: 0,
@@ -110,6 +189,104 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
     },
     strings: undefined,
     from: 0,
+  };
+  const withIslands = options.islands === true;
+  const tagHtml = module.tags.split("\n");
+  /** The islands of the rendering (`words`, `count` tokens: the open tail) read from its
+   * tokens, paired in order with the tail's anchors; an unchanged one is kept as it was. */
+  const rescan = (words: number, count: number) => {
+    const { u32 } = state;
+    const base = u32[header + 5]!;
+    let literal = 0;
+    const read = (at: number): [IslandElement, number] => {
+      const id = u32[at]! >>> 2;
+      const html = id < INTERNED ? tagHtml[id]! : state.interned[id - INTERNED]!;
+      const element: IslandElement = {
+        html: html.replace(ISLAND, ""),
+        island: html.startsWith(ISLAND),
+        children: [],
+      };
+      for (at += 1; ; at += 1) {
+        const word = u32[at]!;
+        const kind = word & 3;
+        if (kind === CLOSE) return [element, at];
+        if (kind === OPEN) {
+          const [inner, end] = read(at);
+          element.children.push(inner);
+          at = end;
+        } else if (kind === VOID) {
+          const id = word >>> 2;
+          const html = id < INTERNED ? tagHtml[id]! : state.interned[id - INTERNED]!;
+          element.children.push({ html, inner: "", island: false, children: [] });
+        } else {
+          const length = word >>> 2;
+          const origin = u32[state.origins + at]!;
+          if (origin !== NOWHERE) element.children.push(state.input.slice(origin, origin + length));
+          else {
+            element.children.push(
+              utf16.decode(u16.subarray(base + literal, base + literal + length)),
+            );
+            literal += length;
+          }
+        }
+      }
+    };
+    const trees: IslandElement[] = [];
+    for (let at = words; at < words + count; at += 1) {
+      const word = u32[at]!;
+      const kind = word & 3;
+      if (kind === TEXT_KIND) {
+        if (u32[state.origins + at]! === NOWHERE) literal += word >>> 2;
+      } else if (
+        kind === OPEN &&
+        word >>> 2 >= INTERNED &&
+        state.interned[(word >>> 2) - INTERNED]!.startsWith(ISLAND)
+      ) {
+        const [tree, end] = read(at);
+        trees.push(tree);
+        at = end;
+      }
+    }
+    // The tail's anchors, in document order (not inside islands' own nodes).
+    const anchors: Comment[] = [];
+    const walk = (node: ChildNode | null) => {
+      for (; node !== null; node = node.nextSibling) {
+        if (owned.has(node)) continue;
+        if (node.nodeType === 8) anchors.push(node as Comment);
+        else if (node.nodeType === 1) walk(node.firstChild);
+      }
+    };
+    walk(state.count > state.finals ? tailChild(state, 0) : null);
+    if (anchors.length === 0 && state.islands.length === 0) return;
+    const tail = new Set(anchors);
+    const islands = state.islands.filter(
+      (island) => island.anchor.isConnected && !tail.has(island.anchor),
+    );
+    anchors.forEach((anchor, index) => {
+      const tree = trees[index]!;
+      const json = JSON.stringify(tree);
+      let island = islandOf.get(anchor);
+      if (island === undefined) {
+        island = {
+          key: (islandKeys += 1),
+          anchor,
+          tree,
+          json,
+          holder: holder(root.ownerDocument, anchor),
+        };
+        islandOf.set(anchor, island);
+      } else if (island.json !== json) {
+        island = { ...island, tree, json };
+        islandOf.set(anchor, island);
+      }
+      islands.push(island);
+    });
+    if (
+      islands.length !== state.islands.length ||
+      islands.some((island, index) => island !== state.islands[index])
+    ) {
+      state.islands = islands;
+    }
   };
   let text = "";
   /** Views of all of memory, made again only when it grows (which detaches them). */
@@ -166,9 +343,11 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
         state.from = 0;
         state.count = build(state, root, words, words + u32[header + 4]!, 0);
       }
+      if (withIslands) rescan(words, u32[header + 4]!);
       state.finals += u32[header + 8]!;
       return true;
     },
+    islands: () => state.islands,
     dispose() {
       session.free();
     },
@@ -177,6 +356,8 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
 
 /** The DOM side's state. */
 type Root = {
+  /** The islands, in document order. */
+  islands: Island[];
   element: Element;
   /** An element of each tag id, to clone. */
   tags: Element[];
@@ -204,17 +385,28 @@ type Root = {
 
 /** The node `index` places into `parent`, counting a run of adjacent text nodes as one. */
 function child(parent: Node, index: number): ChildNode | null {
-  let node = parent.firstChild;
+  let node = skip(parent.firstChild);
   for (; node !== null && index > 0; index -= 1) {
-    if (node.nodeType === 3) while (node.nextSibling?.nodeType === 3) node = node.nextSibling;
-    node = node.nextSibling;
+    if (node.nodeType === 3)
+      while (node.nextSibling?.nodeType === 3 && !owned.has(node.nextSibling))
+        node = node.nextSibling;
+    node = skip(node.nextSibling);
   }
+  return node;
+}
+
+/** `node`, or the first node after it that is not an island's. */
+function skip(node: ChildNode | null): ChildNode | null {
+  while (node !== null && owned.has(node)) node = node.nextSibling;
   return node;
 }
 
 /** The first node of the run of text nodes `node` is in (or `node`). */
 function runStart(node: ChildNode | null): ChildNode | null {
-  if (node?.nodeType === 3) while (node.previousSibling?.nodeType === 3) node = node.previousSibling;
+  while (node !== null && owned.has(node)) node = node.previousSibling;
+  if (node?.nodeType === 3)
+    while (node.previousSibling?.nodeType === 3 && !owned.has(node.previousSibling))
+      node = node.previousSibling;
   return node;
 }
 
@@ -222,7 +414,8 @@ function runStart(node: ChildNode | null): ChildNode | null {
  * counting a run of adjacent text nodes as one (an append adds a text node). */
 function tailChild(root: Root, index: number): ChildNode | null {
   let node = runStart(root.element.lastChild);
-  for (let steps = root.count - root.finals - 1 - index; steps > 0 && node !== null; steps -= 1) node = runStart(node.previousSibling);
+  for (let steps = root.count - root.finals - 1 - index; steps > 0 && node !== null; steps -= 1)
+    node = runStart(node.previousSibling);
   return node;
 }
 
@@ -240,34 +433,45 @@ function apply(root: Root, ops: number, length: number, words: number) {
     // may end one past its parent's last child.
     let parent: Node = element;
     let node: Node | null = element;
+    // An edit inside an island (its anchor on the path, or the anchor itself retagged):
+    // the island is read from the tokens again after the edit.
+    let inside = false;
     for (let level = 0; level < depth; level += 1) {
       parent = node!;
+      if (parent.nodeType === 8) {
+        inside = true;
+        // A REMOVE in it also removes what follows the island: that part applies.
+        if (opcode === REMOVE) {
+          let after = parent.nextSibling;
+          while (after !== null && owned.has(after)) after = after.nextSibling;
+          remove(root, parent.parentNode!, after);
+        }
+        break;
+      }
       const index = u32[at + level]!;
-      node = level === 0 ? (index < root.count - root.finals ? tailChild(root, index) : null) : child(parent, index);
+      node =
+        level === 0
+          ? index < root.count - root.finals
+            ? tailChild(root, index)
+            : null
+          : child(parent, index);
     }
     at += depth;
+    if (inside || (node?.nodeType === 8 && opcode !== REMOVE)) {
+      at += opcode === APPEND ? 2 : opcode === RETAG ? 1 : opcode === REMOVE ? 0 : 3;
+      continue;
+    }
     if (opcode === REMOVE) {
-      // The node, its later siblings, and the later siblings of each ancestor.
-      let next = node as ChildNode | null;
-      for (;;) {
-        // (A run of text nodes is one root child.)
-        let text = false;
-        while (next !== null) {
-          const after: ChildNode | null = next.nextSibling;
-          if (parent === element && !(text && next.nodeType === 3)) root.count -= 1;
-          text = next.nodeType === 3;
-          parent.removeChild(next);
-          next = after;
-        }
-        if (parent === element) break;
-        next = (parent as ChildNode).nextSibling;
-        parent = parent.parentNode!;
-      }
+      remove(root, parent, node as ChildNode | null);
     } else if (opcode === APPEND) {
       let last = node as Node;
-      while (last.nextSibling?.nodeType === 3) last = last.nextSibling;
+      while (last.nextSibling?.nodeType === 3 && !owned.has(last.nextSibling))
+        last = last.nextSibling;
       const start = u32[at]!;
-      const value = start >= SOURCE ? root.input.slice(start - SOURCE, u32[at + 1]!) : root.literal(start, u32[at + 1]!);
+      const value =
+        start >= SOURCE
+          ? root.input.slice(start - SOURCE, u32[at + 1]!)
+          : root.literal(start, u32[at + 1]!);
       last.parentNode!.insertBefore(document.createTextNode(value), last.nextSibling);
       at += 2;
     } else if (opcode === RETAG) {
@@ -275,18 +479,48 @@ function apply(root: Root, ops: number, length: number, words: number) {
       const tag = clone(root, u32[at]!, false) as Element;
       if (tag.tagName === element.tagName) {
         // As React updates an element: values in place, removed ones gone, new ones last.
-        for (const { name } of Array.from(element.attributes)) if (!tag.hasAttribute(name)) element.removeAttribute(name);
-        for (const { name, value } of Array.from(tag.attributes)) if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+        for (const { name } of Array.from(element.attributes))
+          if (!tag.hasAttribute(name)) element.removeAttribute(name);
+        for (const { name, value } of Array.from(tag.attributes))
+          if (element.getAttribute(name) !== value) element.setAttribute(name, value);
       } else {
         while (element.firstChild) tag.appendChild(element.firstChild);
         element.replaceWith(tag);
       }
       at += 1;
     } else {
-      const added = build(root, node as Element, words + u32[at]!, words + u32[at + 1]!, u32[at + 2]!);
+      const added = build(
+        root,
+        node as Element,
+        words + u32[at]!,
+        words + u32[at + 1]!,
+        u32[at + 2]!,
+      );
       if (depth === 0) root.count += added;
       at += 3;
     }
+  }
+}
+
+/** Removes `next`, its later siblings, and the later siblings of each ancestor up to
+ * the root. */
+function remove(root: Root, parent: Node, next: ChildNode | null) {
+  const { element } = root;
+  for (;;) {
+    // (A run of text nodes is one root child.)
+    let text = false;
+    while (next !== null) {
+      const after: ChildNode | null = next.nextSibling;
+      if (!owned.has(next)) {
+        if (parent === element && !(text && next.nodeType === 3)) root.count -= 1;
+        text = next.nodeType === 3;
+      }
+      parent.removeChild(next);
+      next = after;
+    }
+    if (parent === element) break;
+    next = (parent as ChildNode).nextSibling;
+    parent = parent.parentNode!;
   }
 }
 
@@ -296,6 +530,7 @@ function apply(root: Root, ops: number, length: number, words: number) {
  */
 function build(root: Root, parent: Element, start: number, end: number, text: number) {
   const { u32, tags, origins, input } = root;
+  const document = parent.ownerDocument;
   let node: Node = parent;
   let added = 0;
   // A new element under `parent` is built detached and inserted once it is whole (one
@@ -306,6 +541,20 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
     const id = word >>> 2;
     const kind = word & 3;
     if (depth === 0 && kind !== CLOSE) added += 1;
+    if (kind === OPEN && id >= INTERNED && root.interned[id - INTERNED]!.startsWith(ISLAND)) {
+      // An island: a comment holds its place; its subtree is React's (see `islands`).
+      const anchor = document.createComment("");
+      (depth === 0 ? parent : node).appendChild(anchor);
+      let level = 1;
+      while (level > 0) {
+        at += 1;
+        const inner = u32[at]!;
+        if ((inner & 3) === OPEN) level += 1;
+        else if ((inner & 3) === CLOSE) level -= 1;
+        else if ((inner & 3) === TEXT_KIND && u32[origins + at]! === NOWHERE) text += inner >>> 2;
+      }
+      continue;
+    }
     if (kind === OPEN) {
       const element = clone(root, id, false);
       node = depth === 0 ? element : node.appendChild(element);

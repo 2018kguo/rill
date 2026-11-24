@@ -6,7 +6,7 @@
 //! (see `tokens`), the plain text between events copied as it is.
 
 use crate::simd::ByteSet;
-use crate::tokens::{Out, tag};
+use crate::tokens::{ISLAND, Out, overrides, tag};
 use crate::{Fallback, Result};
 use rill_unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
 
@@ -42,7 +42,8 @@ fn ascii(unit: u16) -> u8 {
 #[derive(Default)]
 pub(crate) struct Refs {
     /// Link definitions: normalized label, destination (the first definition wins).
-    pub links: Vec<(Vec<u16>, String)>,
+    /// Each definition's label, destination and title.
+    pub links: Vec<(Vec<u16>, String, Option<String>)>,
     /// Footnote definitions: lowercased label, node (the first definition wins).
     pub notes: Vec<(Vec<u16>, u32)>,
     /// Footnotes called so far, in first-call order: `notes` index, call count.
@@ -56,11 +57,11 @@ impl Refs {
         self.calls.clear();
     }
 
-    fn link(&self, label: &[u16]) -> Option<&str> {
+    fn link(&self, label: &[u16]) -> Option<(&str, Option<&str>)> {
         self.links
             .iter()
-            .find(|(name, _)| name == label)
-            .map(|(_, destination)| destination.as_str())
+            .find(|(name, ..)| name == label)
+            .map(|(_, destination, title)| (destination.as_str(), title.as_deref()))
     }
 
     fn note(&self, label: &[u16]) -> Option<u32> {
@@ -181,7 +182,8 @@ struct Bracket {
 /// How a link renders (Streamdown's link safety: a button, unless rehype-harden blocks
 /// its URL).
 enum Link {
-    Button,
+    /// Its `href` (hardened) and title, for a page's own `a`.
+    Button(String, Option<String>),
     Incomplete,
     /// A span titled `Blocked URL: ...`, the text followed by ` [blocked]`.
     Blocked(String),
@@ -463,6 +465,9 @@ impl Inline {
                     text_after(out, &self.decoded[start as usize..end as usize], &mut broke)
                 }
                 Kind::Note { note } => {
+                    if out.options.overrides & overrides::A != 0 {
+                        return Err(Fallback); // ponytail: footnote calls as a page's own `a`
+                    }
                     broke = false;
                     let number = self.refs.call(note);
                     out.open_html(SUP);
@@ -589,7 +594,7 @@ impl Inline {
             if !settled(end) {
                 self.ceiling = self.ceiling.min(start);
             }
-            let link = self.link(&href);
+            let link = self.link(&href, None);
             self.event(
                 p,
                 end,
@@ -757,7 +762,7 @@ impl Inline {
                         } else {
                             content
                         };
-                        let link = self.link(&href);
+                        let link = self.link(&href, None);
                         self.event(
                             at,
                             end,
@@ -853,7 +858,7 @@ impl Inline {
                             self.reference(bytes, self.events[bracket.event].at as usize, at)?;
                     }
                     // Not a link: the brackets are text.
-                    let Some((end, destination)) = resource else {
+                    let Some((end, destination, title)) = resource else {
                         let open = self.events[bracket.event].at as usize;
                         self.ceiling = self.ceiling.min(open);
                         at += 1;
@@ -862,7 +867,7 @@ impl Inline {
                     if destination.contains(UNKNOWN) {
                         return Err(Fallback);
                     }
-                    let link = self.link(&destination);
+                    let link = self.link(&destination, title);
                     let open = self.events[bracket.event].at;
                     self.events[bracket.event].kind = Kind::Open { link };
                     // Emphasis inside the link pairs inside it (strikethrough first).
@@ -1097,7 +1102,7 @@ impl Inline {
         bytes: &[u16],
         open: usize,
         close: usize,
-    ) -> Result<Option<(usize, String)>> {
+    ) -> Result<Option<(usize, String, Option<String>)>> {
         let text = &bytes[open + 1..close];
         let (label, end) = if bytes.get(close + 1) == Some(&u16::from(b'[')) {
             let Some(length) = bytes[close + 2..]
@@ -1133,14 +1138,18 @@ impl Inline {
             };
         };
         match self.refs.link(&label) {
-            Some(destination) => Ok(Some((end, destination.to_string()))),
+            Some((destination, title)) => Ok(Some((
+                end,
+                destination.to_string(),
+                title.map(str::to_owned),
+            ))),
             // An undefined full reference: micromark may still read a shortcut there.
             None if end > close + 1 => Err(Fallback),
             None => Ok(None),
         }
     }
 
-    fn link(&mut self, destination: &str) -> u32 {
+    fn link(&mut self, destination: &str, title: Option<String>) -> u32 {
         let link = if destination == "streamdown:incomplete-link" {
             Link::Incomplete
         } else {
@@ -1151,7 +1160,10 @@ impl Inline {
                 .as_deref()
                 .map(|href| rill_url::transform_url(href, rill_url::Resource::Link))
             {
-                Some(Ok(_)) => Link::Button,
+                Some(Ok(changed)) => Link::Button(
+                    changed.unwrap_or_else(|| href.unwrap_or_default().into_owned()),
+                    title,
+                ),
                 _ => Link::Blocked(format!(
                     "Blocked URL: {}",
                     href.as_deref().unwrap_or("undefined")
@@ -1180,11 +1192,22 @@ const HREF_PROTOCOLS: &[&str] = &[
 
 impl Link {
     fn open(&self, out: &mut Out) {
+        let island = out.options.overrides;
         match self {
-            Link::Button => out.open(tag::LINK),
+            Link::Button(href, title) if island & overrides::A != 0 => {
+                out.open_html(&a_island(href, title.as_deref()))
+            }
+            Link::Incomplete if island & overrides::A != 0 => {
+                out.open_html(&a_island("streamdown:incomplete-link", None))
+            }
+            Link::Button(..) => out.open(tag::LINK),
             Link::Incomplete => out.open(tag::LINK_INCOMPLETE),
             Link::Blocked(title) => {
-                let mut html = String::from("<span title=\"");
+                let mut html = String::new();
+                if island & overrides::SPAN != 0 {
+                    html.push(ISLAND);
+                }
+                html.push_str("<span title=\"");
                 escape_attribute(title, &mut html);
                 html.push_str("\" class=\"text-gray-500\">");
                 out.open_html(&html);
@@ -1199,6 +1222,19 @@ impl Link {
         }
         out.close();
     }
+}
+
+/// A page's own `a`: the island Streamdown's HAST gives it.
+fn a_island(href: &str, title: Option<&str>) -> String {
+    let mut html = String::from(ISLAND);
+    html.push_str("<a href=\"");
+    escape_attribute(href, &mut html);
+    if let Some(title) = title {
+        html.push_str("\" title=\"");
+        escape_attribute(title, &mut html);
+    }
+    html.push_str("\" target=\"_blank\" rel=\"noopener noreferrer\">");
+    html
 }
 
 fn escape_attribute(value: &str, out: &mut String) {
@@ -1426,9 +1462,9 @@ fn autolink(units: &[u16], at: usize) -> Option<(usize, usize, usize, bool)> {
 /// micromark's limit on nested parentheses in a destination.
 const MAX_PARENS: usize = 32;
 
-/// An inline link's `(destination "title")` at `at`: where it ends and the destination,
-/// unescaped and with character references decoded.
-fn inline_link(units: &[u16], at: usize) -> Option<(usize, String)> {
+/// An inline link's `(destination "title")` at `at`: where it ends, the destination and
+/// the title, unescaped and with character references decoded.
+fn inline_link(units: &[u16], at: usize) -> Option<(usize, String, Option<String>)> {
     let unit = |at: usize| units.get(at).copied();
     if unit(at) != Some(u16::from(b'(')) {
         return None;
@@ -1492,6 +1528,7 @@ fn inline_link(units: &[u16], at: usize) -> Option<(usize, String)> {
     }
     separator(&mut at);
     // A title: `"..."`, `'...'` or `(...)`.
+    let mut title = None;
     if let Some(open) = unit(at).filter(|&u| matches!(u, 0x22 | 0x27 | 0x28)) {
         let close = if open == 0x28 { 0x29 } else { open };
         let mut i = at + 1;
@@ -1508,17 +1545,19 @@ fn inline_link(units: &[u16], at: usize) -> Option<(usize, String)> {
             }
             i += 1;
         }
+        title = Some((at + 1, i));
         at = i + 1;
         separator(&mut at);
     }
     if unit(at) != Some(0x29) {
         return None;
     }
-    Some((at + 1, unescape(&units[raw_start..raw_end])))
+    let title = title.map(|(start, end)| unescape(&units[start..end]));
+    Some((at + 1, unescape(&units[raw_start..raw_end]), title))
 }
 
 /// Backslash escapes removed and character references decoded.
-fn unescape(units: &[u16]) -> String {
+pub(crate) fn unescape(units: &[u16]) -> String {
     let mut out = String::new();
     let mut at = 0;
     while at < units.len() {

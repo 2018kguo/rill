@@ -95,7 +95,7 @@ struct Parser<'s> {
     /// The text is one block with its definitions and footnotes (see `Options::whole`).
     whole: bool,
     /// Link definitions: normalized label, destination.
-    links: Vec<(Vec<u16>, String)>,
+    links: Vec<(Vec<u16>, String, Option<String>)>,
     /// The line before was a definition: micromark's content goes on, so this line
     /// continues it as a paragraph's would (an indented line is its text).
     def_open: bool,
@@ -663,7 +663,9 @@ impl<'s> Parser<'s> {
                 // A link definition (one line, in a text kept whole): recorded, not shown.
                 let at = line_start + pos + spaces;
                 // Not one (yet): a paragraph.
-                if let Some((label, destination)) = crate::marked::definition(&self.source[at..])? {
+                if let Some((label, destination, title)) =
+                    crate::marked::definition(&self.source[at..])?
+                {
                     if !self.whole {
                         return Err(Fallback); // a definition marked did not register
                     }
@@ -673,9 +675,12 @@ impl<'s> Parser<'s> {
                         return Err(Fallback); // ponytail: escapes and references
                     }
                     let label = crate::inline::normalize_label(label).ok_or(Fallback)?;
-                    if !self.links.iter().any(|(name, _)| *name == label) {
+                    if !self.links.iter().any(|(name, ..)| *name == label) {
+                        let title = title.map(|(start, end)| {
+                            crate::inline::unescape(&self.source[at + start..at + end])
+                        });
                         self.links
-                            .push((label, String::from_utf16_lossy(destination)));
+                            .push((label, String::from_utf16_lossy(destination), title));
                     }
                     self.lazy = false;
                     self.def_open = true;
@@ -1365,12 +1370,18 @@ impl Writer<'_, '_> {
             + if rows > 0 { rows + 1 } else { 0 }
             + (rows + 1) * (columns + 1);
         self.out.repeat(b'\n', whitespace as u32);
-        self.out.open(tag::TABLE_WRAPPER);
-        if self.out.options.controls {
-            self.controls(TABLE_CONTROLS);
+        // A page's own `table` gets the table alone (Streamdown's wrapper is its own).
+        let island = self.out.options.overrides & crate::tokens::overrides::TABLE != 0;
+        if island {
+            self.out.open_html("\u{1}<table>");
+        } else {
+            self.out.open(tag::TABLE_WRAPPER);
+            if self.out.options.controls {
+                self.controls(TABLE_CONTROLS);
+            }
+            self.out.open(tag::TABLE_SCROLL);
+            self.out.open(tag::TABLE);
         }
-        self.out.open(tag::TABLE_SCROLL);
-        self.out.open(tag::TABLE);
         self.out.open(tag::THEAD);
         self.row(lines[0], aligns, tag::TH)?;
         self.out.close();
@@ -1381,7 +1392,7 @@ impl Writer<'_, '_> {
             }
             self.out.close();
         }
-        for _ in 0..3 {
+        for _ in 0..if island { 1 } else { 3 } {
             self.out.close();
         }
         Ok(())

@@ -8,7 +8,10 @@ export { createStreamRenderer, type StreamRenderer } from "./stream-dom.ts";
 type StreamGlue = {
   default(options: { module_or_path: unknown }): Promise<unknown>;
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
-  Stream: new () => StreamSession & { setLayout(lineNumbers: boolean, codeMaxHeight: number, dir: number): void };
+  Stream: new () => StreamSession & {
+    setLayout(lineNumbers: boolean, codeMaxHeight: number, dir: number): void;
+    setOverrides(overrides: number): void;
+  };
   streamMemory(): WebAssembly.Memory;
   streamTags(): string;
 };
@@ -24,7 +27,12 @@ export type StreamOptions = {
   codeMaxHeight: number;
   /** 0: no `dir`, 1: `ltr`, 2: `rtl`. */
   dir: number;
+  /** The tags the page's `components` override (`OVERRIDES` bits): islands. */
+  overrides: number;
 };
+
+/** The `components` the stream renders as islands, and each one's bit. */
+export const OVERRIDES: Record<string, number> = { a: 1, table: 2, span: 4 };
 
 export type LoadedStream = StreamModule & { newSession(options: StreamOptions): StreamSession };
 
@@ -43,6 +51,25 @@ export const streamVersion = (): number => version;
 type Merge = (...classes: unknown[]) => string;
 let merge: Merge | null = null;
 let merging: Promise<void> | undefined;
+
+type Islands = typeof import("./stream-islands.ts");
+let islands: Islands | null = null;
+let loadingIslands: Promise<void> | undefined;
+
+/** The islands' renderer (for `components`) once loaded, else `null`. */
+export const loadedIslands = (): Islands | null => islands;
+
+export function loadIslands(): Promise<void> {
+  loadingIslands ??= import("./stream-islands.ts")
+    .then((module) => {
+      islands = module;
+      changed();
+    })
+    .catch(() => {
+      loadingIslands = undefined;
+    });
+  return loadingIslands;
+}
 
 /** Streamdown's class merge (`twMerge(clsx(...))`) once loaded, else `null`. */
 export const loadedMerge = (): Merge | null => merge;
@@ -67,6 +94,7 @@ const ready = (glue: StreamGlue) => {
       const session = new glue.Stream();
       session.setOptions(options.controls, options.animating);
       session.setLayout(options.lineNumbers, options.codeMaxHeight, options.dir);
+      session.setOverrides(options.overrides);
       return session;
     },
   };
@@ -85,7 +113,9 @@ export function subscribeStream(listener: () => void): () => void {
 export function loadStream(): Promise<void> {
   loading ??= import("../wasm/rill_stream.js")
     .then(async (glue: StreamGlue) => {
-      await glue.default({ module_or_path: new URL("../wasm/rill_stream_bg.wasm", import.meta.url) });
+      await glue.default({
+        module_or_path: new URL("../wasm/rill_stream_bg.wasm", import.meta.url),
+      });
       ready(glue);
     })
     .catch(() => {

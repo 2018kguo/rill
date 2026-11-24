@@ -147,7 +147,13 @@ impl Session {
                         origins: &self.next.origins,
                         source: self.remend.input(),
                     };
-                    diff(old, new, &mut self.program, &mut self.mark);
+                    let strings = self.shown.strings.borrow();
+                    let island = |id: u32| {
+                        id >= crate::tokens::tag::INTERNED
+                            && strings.list[(id - crate::tokens::tag::INTERNED) as usize]
+                                .starts_with(crate::tokens::ISLAND)
+                    };
+                    diff(old, new, &mut self.program, &mut self.mark, island);
                 }
                 // The mark is in `next`; the next diff starts from `next` after `split`.
                 if outcome != Outcome::Patch || self.split.words != 0 {

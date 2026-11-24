@@ -87,7 +87,7 @@ type Range = (usize, usize);
 /// label and destination (ranges of `s`) when it is one this is sure of (one line:
 /// `[label]: destination`, a title on the line), `None` when it is not one; the exact
 /// path for what may be one otherwise.
-pub(crate) fn definition(s: &[u16]) -> Result<Option<(Range, Range)>> {
+pub(crate) fn definition(s: &[u16]) -> Result<Option<(Range, Range, Option<Range>)>> {
     let first = line(s, 0);
     let spaces = run(first, SP);
     if spaces > 3 || !is(first.get(spaces), b'[') {
@@ -160,9 +160,11 @@ pub(crate) fn definition(s: &[u16]) -> Result<Option<(Range, Range)>> {
         return unsure(); // ponytail: titles past the line
     }
     let destination_at = at + 2 + lead;
+    let title_at = destination_at + destination + gap + 1;
     Ok(Some((
         (spaces + 1, at),
         (destination_at, destination_at + destination),
+        (!title.is_empty()).then(|| (title_at, title_at + title.len() - 2)),
     )))
 }
 

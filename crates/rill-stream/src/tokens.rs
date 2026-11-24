@@ -146,7 +146,21 @@ pub struct Options {
     pub dir: u8,
     /// The text is one block (Streamdown's, for a text with definitions or footnotes).
     pub whole: bool,
+    /// The page's own components (see [`overrides`]): those elements are islands.
+    pub overrides: u8,
 }
+
+/// Tags a page's `components` override. Such an element is written as an island: its
+/// open tag interned behind [`ISLAND`], with the attributes Streamdown's HAST gives the
+/// component; its children are written as without the override.
+pub mod overrides {
+    pub const A: u8 = 1;
+    pub const TABLE: u8 = 2;
+    pub const SPAN: u8 = 4;
+}
+
+/// What an island's interned open tag starts with.
+pub const ISLAND: char = '\u{1}';
 
 impl Default for Options {
     fn default() -> Self {
@@ -157,6 +171,7 @@ impl Default for Options {
             code_max_height: 400,
             dir: 0,
             whole: false,
+            overrides: 0,
         }
     }
 }

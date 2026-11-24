@@ -84,3 +84,31 @@ output, so a text with one renders in full on every update (`Reset`).
   pipeline's HAST, block by block (1M per seed).
 - `js/test/stream*.test.ts`: Streamdown itself in happy-dom, over small alphabets and
   after every streamed update.
+
+## Pages' own setups
+
+A chat app rarely uses Streamdown's defaults: it overrides components (links, tables,
+images, spans), highlights code, and adds its own plugins. Each must stream too, or the
+message takes the slow path.
+
+### Components: islands
+
+An overridden tag's element is an island. The session writes its subtree in its raw
+HAST form (`<a href>`, `<table>`, `<strong>`: what Streamdown's components receive)
+behind an interned open tag marked as an island. The DOM side holds the island's place
+with an empty comment (one position, like a text run) and renders the subtree as the
+full drop-in renders HAST: `toJsxRuntime` with Streamdown's components and the page's.
+React renders it through a portal whose container is a detached holder whose
+`appendChild`, `insertBefore` and `removeChild` act after the comment, so the component's
+nodes sit where the element belongs, inside the React root (events, context). An island
+whose tokens are unchanged keeps its element.
+
+### Code highlighting
+
+`plugins.code` highlights on the stream path through the same worker as the drop-in;
+finished lines are patched in place.
+
+### Plugins
+
+The session takes plugins the way `rill` does: a page's own build (its WebAssembly)
+links rill-stream with its plugins in Rust, and `engine` hands the drop-in that build.

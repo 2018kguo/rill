@@ -110,7 +110,15 @@ fn step(path: &mut Vec<u32>, word: u32) {
 /// The program that turns the DOM of `old` into that of `new` (positions in `program`
 /// are in `new`). `mark` is a boundary in `old` (from the diff that produced it, or
 /// cleared), and is left at the last boundary before the first difference in `new`.
-pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut Mark) {
+/// `island(id)`: whether a tag id is an island's (which a retag never turns into another
+/// kind of element: the DOM side has no children to move for it).
+pub fn diff(
+    old: Tokens<'_>,
+    new: Tokens<'_>,
+    program: &mut Program,
+    mark: &mut Mark,
+    island: impl Fn(u32) -> bool,
+) {
     let mut path = std::mem::take(&mut mark.spare);
     path.clear();
     let (mut word, mut text) = (mark.word, mark.text);
@@ -185,7 +193,11 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
                 word += 1;
             }
             // An element whose attributes changed: retag it, and go on into its children.
-            (Some(x), Some(y)) if x & 3 == kind::OPEN && y & 3 == kind::OPEN => {
+            (Some(x), Some(y))
+                if x & 3 == kind::OPEN
+                    && y & 3 == kind::OPEN
+                    && island(x >> 2) == island(y >> 2) =>
+            {
                 first = false;
                 program.path(op::RETAG, &path);
                 program.ops.push(y >> 2);
@@ -268,7 +280,13 @@ mod tests {
                 source: &[],
             }
         }
-        diff(view(old), view(new), &mut program, &mut Mark::default());
+        diff(
+            view(old),
+            view(new),
+            &mut program,
+            &mut Mark::default(),
+            |_| false,
+        );
         program.ops
     }
 
