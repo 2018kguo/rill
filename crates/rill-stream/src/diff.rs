@@ -130,7 +130,10 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
     let (mut old_word, mut old_text) = (word, text);
     let mut first = true;
     loop {
-        let (a, b) = (old.words.get(old_word).copied(), new.words.get(word).copied());
+        let (a, b) = (
+            old.words.get(old_word).copied(),
+            new.words.get(word).copied(),
+        );
         if first {
             mark.word = word;
             mark.text = text;
@@ -192,7 +195,9 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
             }
             (_, _) => {
                 // Nothing to remove when the old rendering only closes elements from here.
-                let remove = old.words[old_word..].iter().any(|&word| word & 3 != kind::CLOSE);
+                let remove = old.words[old_word..]
+                    .iter()
+                    .any(|&word| word & 3 != kind::CLOSE);
                 replace(remove, new, word, text, &mut path, program);
                 break;
             }
@@ -203,7 +208,14 @@ pub fn diff(old: Tokens<'_>, new: Tokens<'_>, program: &mut Program, mark: &mut 
 
 /// Removes the old nodes from `path` on (when there are any) and builds the new tokens
 /// from `word` (text from `text`) on, cut where each open level closes.
-fn replace(remove: bool, new: Tokens<'_>, word: usize, text: usize, path: &mut [u32], program: &mut Program) {
+fn replace(
+    remove: bool,
+    new: Tokens<'_>,
+    word: usize,
+    text: usize,
+    path: &mut [u32],
+    program: &mut Program,
+) {
     if remove {
         program.path(op::REMOVE, path);
     }
@@ -234,7 +246,9 @@ fn replace(remove: bool, new: Tokens<'_>, word: usize, text: usize, path: &mut [
 
 fn build(program: &mut Program, path: &[u32], start: usize, end: usize, text: usize) {
     program.path(op::BUILD, path);
-    program.ops.extend_from_slice(&[start as u32, end as u32, text as u32]);
+    program
+        .ops
+        .extend_from_slice(&[start as u32, end as u32, text as u32]);
     program.text(text);
 }
 
@@ -247,7 +261,12 @@ mod tests {
         let mut program = Program::default();
         program.clear();
         fn view(out: &Out) -> Tokens<'_> {
-            Tokens { words: &out.words, text: &out.text, origins: &out.origins, source: &[] }
+            Tokens {
+                words: &out.words,
+                text: &out.text,
+                origins: &out.origins,
+                source: &[],
+            }
         }
         diff(view(old), view(new), &mut program, &mut Mark::default());
         program.ops
@@ -271,13 +290,19 @@ mod tests {
 
     #[test]
     fn growing_text_is_one_append() {
-        let ops = run(&para(&[("ab ", false), ("c", true)]), &para(&[("ab ", false), ("cd", true)]));
+        let ops = run(
+            &para(&[("ab ", false), ("c", true)]),
+            &para(&[("ab ", false), ("cd", true)]),
+        );
         assert_eq!(ops, [op::APPEND, 3, 0, 1, 0, 4, 5]);
     }
 
     #[test]
     fn a_changed_element_is_replaced_from_there() {
-        let ops = run(&para(&[("a *b", false)]), &para(&[("a ", false), ("b", true)]));
+        let ops = run(
+            &para(&[("a *b", false)]),
+            &para(&[("a ", false), ("b", true)]),
+        );
         // The text differs: remove it, build `a `, `<em>b</em>` in the paragraph.
         assert_eq!(ops, [op::REMOVE, 2, 0, 0, op::BUILD, 1, 0, 1, 5, 0]);
     }
@@ -285,7 +310,10 @@ mod tests {
     #[test]
     fn growing_text_then_more_after_it() {
         let ops = run(&para(&[("a", true)]), &para(&[("ab", true), (" c", false)]));
-        assert_eq!(ops, [op::APPEND, 3, 0, 0, 0, 1, 2, op::BUILD, 1, 0, 4, 5, 2]);
+        assert_eq!(
+            ops,
+            [op::APPEND, 3, 0, 0, 0, 1, 2, op::BUILD, 1, 0, 4, 5, 2]
+        );
     }
 
     #[test]

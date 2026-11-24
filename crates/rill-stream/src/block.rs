@@ -8,7 +8,10 @@
 
 use crate::inline::Inline;
 use crate::tokens::{Out, TAGS, kind, tag};
-use crate::{Fallback, NL, Result, SP, Split, ascii, atx, list_marker, may_define, newline, run, setext, thematic};
+use crate::{
+    Fallback, NL, Result, SP, Split, ascii, atx, list_marker, may_define, newline, run, setext,
+    thematic,
+};
 
 const NONE: u32 = u32::MAX;
 
@@ -16,19 +19,37 @@ const NONE: u32 = u32::MAX;
 enum Kind {
     Root,
     Quote,
-    List { ordered: bool, marker: u8, start: u32 },
+    List {
+        ordered: bool,
+        marker: u8,
+        start: u32,
+    },
     /// `column`: where its content starts, from where the line's content within the
     /// item's container starts. `empty`: its marker line has no content.
-    Item { column: usize, empty: bool, task: u8 },
+    Item {
+        column: usize,
+        empty: bool,
+        task: u8,
+    },
     Para,
     Heading(u8),
     Rule,
     /// Fenced code: its language and meta (ranges of the source, empty when absent).
     /// Its content lines are `lines`.
-    Code { lang: (u32, u32), meta: (u32, u32) },
+    Code {
+        lang: (u32, u32),
+        meta: (u32, u32),
+    },
     /// A table: its header and body rows are `lines`; its columns' alignments a range
     /// of `aligns`.
-    Table { aligns: (u32, u32) },
+    Table {
+        aligns: (u32, u32),
+    },
+    /// A footnote definition (`[^label]:`, at the top level), its label a range of the
+    /// source. Its content continues on lines indented 4 columns.
+    Footnote {
+        label: (u32, u32),
+    },
 }
 
 struct Node {
@@ -71,12 +92,29 @@ struct Parser<'s> {
     /// more code follows).
     indented: Option<u32>,
     blanks: Vec<(usize, usize)>,
+    /// The text is one block with its definitions and footnotes (see `Options::whole`).
+    whole: bool,
+    /// Link definitions: normalized label, destination.
+    links: Vec<(Vec<u16>, String)>,
+    /// The line before was a definition: micromark's content goes on, so this line
+    /// continues it as a paragraph's would (an indented line is its text).
+    def_open: bool,
 }
 
 impl<'s> Parser<'s> {
     fn add(&mut self, parent: u32, kind: Kind, line: usize, start: usize) -> u32 {
         let id = self.nodes.len() as u32;
-        self.nodes.push(Node { kind, first: NONE, last: NONE, next: NONE, line, start, end: start, lines: (0, 0), exit: 0 });
+        self.nodes.push(Node {
+            kind,
+            first: NONE,
+            last: NONE,
+            next: NONE,
+            line,
+            start,
+            end: start,
+            lines: (0, 0),
+            exit: 0,
+        });
         let last = self.nodes[parent as usize].last;
         if last == NONE {
             self.nodes[parent as usize].first = id;
@@ -118,6 +156,7 @@ impl<'s> Parser<'s> {
     }
 
     fn line(&mut self, line_start: usize, line: &[u16]) -> Result {
+        let def_open = std::mem::take(&mut self.def_open);
         let mut pos = 0;
         // 1. The open containers this line continues.
         let mut matched = 1;
@@ -142,13 +181,26 @@ impl<'s> Parser<'s> {
                     let rest = &line[pos..];
                     if rest.iter().all(|&unit| unit == SP) {
                         // An item can start with at most one blank line.
-                        if empty && self.nodes[id].first == NONE && self.blank_after_marker(id, line_start) {
+                        if empty
+                            && self.nodes[id].first == NONE
+                            && self.blank_after_marker(id, line_start)
+                        {
                             break;
                         }
                         // Its indent, as far as the line has it (code shows the rest).
                         pos += rest.len().min(column);
                     } else if run(rest, SP) >= column {
                         pos += column;
+                    } else {
+                        break;
+                    }
+                }
+                Kind::Footnote { .. } => {
+                    let rest = &line[pos..];
+                    if rest.iter().all(|&unit| unit == SP) {
+                        pos += rest.len().min(4);
+                    } else if run(rest, SP) >= 4 {
+                        pos += 4;
                     } else {
                         break;
                     }
@@ -167,11 +219,15 @@ impl<'s> Parser<'s> {
                 let end = line_start + line.len();
                 let node = &mut self.nodes[code as usize];
                 node.end = end;
-                if spaces <= 3 && marks >= length && rest[spaces + marks..].iter().all(|&unit| unit == SP) {
+                if spaces <= 3
+                    && marks >= length
+                    && rest[spaces + marks..].iter().all(|&unit| unit == SP)
+                {
                     self.fence = None;
                 } else {
                     node.lines.1 += 1;
-                    self.lines.push((line_start + pos + spaces.min(indent), end));
+                    self.lines
+                        .push((line_start + pos + spaces.min(indent), end));
                 }
                 return Ok(());
             }
@@ -181,7 +237,10 @@ impl<'s> Parser<'s> {
         // when every open container continued (then for the whole line, even inside a
         // quote the line opens); a line that leaves a container may start any list.
         let all = matched == self.stack.len();
-        let interrupting = all && (self.para.is_some() || self.indented.is_some());
+        if def_open && !all && !line[pos..].iter().all(|&unit| unit == SP) {
+            return Err(Fallback); // ponytail: a lazy line after a definition
+        }
+        let interrupting = all && (self.para.is_some() || self.indented.is_some() || def_open);
         let mut closed = all;
         let mut opened = false;
         loop {
@@ -190,6 +249,55 @@ impl<'s> Parser<'s> {
             if rest.is_empty() || spaces >= 4 {
                 break;
             }
+            // A footnote definition: a container at the top level, interrupting a paragraph.
+            if self.whole
+                && rest.len() > 2
+                && rest[0] == u16::from(b'[')
+                && rest[1] == u16::from(b'^')
+            {
+                let label = rest[2..]
+                    .iter()
+                    .take_while(|&&unit| crate::inline::note_unit(unit))
+                    .count();
+                if rest.get(2 + label) == Some(&u16::from(b']'))
+                    && rest.get(3 + label) == Some(&u16::from(b':'))
+                {
+                    // (A list with no item continued ends here too.)
+                    let nested = self.stack[1..matched]
+                        .iter()
+                        .any(|&id| !matches!(self.nodes[id as usize].kind, Kind::List { .. }));
+                    if !(1..=200).contains(&label) || nested || opened {
+                        return Err(Fallback); // ponytail: nested, or a long label
+                    }
+                    self.close_to(1, line_start + pos);
+                    closed = true;
+                    let at = line_start + pos + spaces;
+                    let id = self.add(
+                        0,
+                        Kind::Footnote {
+                            label: ((at + 2) as u32, (at + 2 + label) as u32),
+                        },
+                        line_start,
+                        at,
+                    );
+                    self.stack.push(id);
+                    opened = true;
+                    // (The spaces after `]:` are the content's indent, as micromark counts it.)
+                    pos += spaces + label + 4;
+                    let after = run(&line[pos..], SP);
+                    if after >= 4 && pos + after < line.len() {
+                        return Err(Fallback); // ponytail: indented code on the marker line
+                    }
+                    continue;
+                }
+                if rest[2..].iter().any(|&unit| unit == u16::from(b']'))
+                    && rest
+                        .windows(2)
+                        .any(|pair| pair == [u16::from(b']'), u16::from(b':')])
+                {
+                    return Err(Fallback); // ponytail: other labels
+                }
+            }
             let quote = rest[0] == u16::from(b'>');
             let marker = if quote { None } else { list_marker(rest)? };
             if !quote {
@@ -197,9 +305,16 @@ impl<'s> Parser<'s> {
                 if matches!(ascii(rest[0]), b'*' | b'-' | b'_') && thematic(rest) {
                     break; // a thematic break wins over an item
                 }
+                // ponytail: in a text kept whole, an item that is also a delimiter row
+                // under a paragraph (micromark tries the table first).
+                if self.whole && self.para.is_some() && delimiter_row(rest).is_some() {
+                    return Err(Fallback);
+                }
                 // An empty item, or an ordered one not starting at 1, does not interrupt
                 // a paragraph.
-                if interrupting && !(marker.content.is_some() && (!marker.ordered || marker.start == 1)) {
+                if interrupting
+                    && !(marker.content.is_some() && (!marker.ordered || marker.start == 1))
+                {
                     break;
                 }
             }
@@ -211,6 +326,8 @@ impl<'s> Parser<'s> {
             }
             self.para = None;
             self.table = None;
+            self.indented = None;
+            self.blanks.clear();
             if quote {
                 self.close_lists_above(line_start);
                 let parent = self.deepest();
@@ -225,11 +342,17 @@ impl<'s> Parser<'s> {
                 continue;
             }
             let marker = marker.expect("an item");
-            let kind = Kind::List { ordered: marker.ordered, marker: marker.marker, start: marker.start };
+            let kind = Kind::List {
+                ordered: marker.ordered,
+                marker: marker.marker,
+                start: marker.start,
+            };
             // The item joins the open list of its kind, or starts a list.
             let deepest = self.deepest() as usize;
             let list = match self.nodes[deepest].kind {
-                Kind::List { ordered, marker: m, .. } if ordered == marker.ordered && m == marker.marker => deepest as u32,
+                Kind::List {
+                    ordered, marker: m, ..
+                } if ordered == marker.ordered && m == marker.marker => deepest as u32,
                 other => {
                     if let Kind::List { .. } = other {
                         self.close_to(self.stack.len() - 1, line_start);
@@ -241,7 +364,16 @@ impl<'s> Parser<'s> {
                 }
             };
             let empty = marker.content.is_none();
-            let item = self.add(list, Kind::Item { column: spaces + marker.width, empty, task: 0 }, line_start, line_start + pos + spaces);
+            let item = self.add(
+                list,
+                Kind::Item {
+                    column: spaces + marker.width,
+                    empty,
+                    task: 0,
+                },
+                line_start,
+                line_start + pos + spaces,
+            );
             self.stack.push(item);
             opened = true;
             match marker.content {
@@ -253,15 +385,24 @@ impl<'s> Parser<'s> {
                     let checkbox = line[pos] == u16::from(b'[')
                         && line.get(pos + 2) == Some(&u16::from(b']'))
                         && matches!(mark, Some(b' ' | b'x' | b'X'));
-                    if line[pos] == u16::from(b'[') && !checkbox && line.windows(2).any(|pair| pair == [u16::from(b']'), u16::from(b':')]) {
+                    if line[pos] == u16::from(b'[')
+                        && !checkbox
+                        && line
+                            .windows(2)
+                            .any(|pair| pair == [u16::from(b']'), u16::from(b':')])
+                    {
                         return Err(Fallback); // ponytail: maybe a definition
                     }
                     // `[x]` then content is a task; then nothing more in the block, or other
                     // text right after, it is text; then content on a later line (rare), a
                     // task too: the exact path.
                     let blank_rest = checkbox && line[pos + 3..].iter().all(|&unit| unit == SP);
-                    let block_rest = &self.source[(line_start + line.len()).min(self.source.len())..];
-                    if checkbox && blank_rest && !block_rest.iter().all(|&unit| unit == SP || unit == NL) {
+                    let block_rest =
+                        &self.source[(line_start + line.len()).min(self.source.len())..];
+                    if checkbox
+                        && blank_rest
+                        && !block_rest.iter().all(|&unit| unit == SP || unit == NL)
+                    {
                         return Err(Fallback);
                     }
                     if checkbox && !blank_rest && line.get(pos + 3) == Some(&SP) {
@@ -297,7 +438,10 @@ impl<'s> Parser<'s> {
                 let next = line_start + line.len() + 1;
                 if next <= self.source.len() {
                     let after = &self.source[next..newline(self.source, next)];
-                    let skip = after.iter().take_while(|&&unit| unit == SP || unit == u16::from(b'>')).count();
+                    let skip = after
+                        .iter()
+                        .take_while(|&&unit| unit == SP || unit == u16::from(b'>'))
+                        .count();
                     if delimiter_row(&after[skip..]).is_some() {
                         return Err(Fallback);
                     }
@@ -347,29 +491,47 @@ impl<'s> Parser<'s> {
                 let node = &mut self.nodes[table as usize];
                 node.lines.1 += 1;
                 node.end = line_start + line.len();
-                self.lines.push((line_start + pos + spaces, line_start + line.len()));
+                self.lines
+                    .push((line_start + pos + spaces, line_start + line.len()));
                 return Ok(());
             }
             self.table = None;
         }
         let content = line_start + pos + spaces;
         let end = line_start + line.len();
+        if def_open && !opened && setext(rest).is_some() {
+            return Err(Fallback); // ponytail: an underline after a definition
+        }
         if spaces >= 4 {
             match self.para {
                 Some(para) if !opened => self.para_line(para, line_start + pos, end),
+                None if def_open && !opened => return Err(Fallback), // ponytail: an indented line after a definition
                 _ => {
-                    // Indented code.
+                    if self.whole {
+                        return Err(Fallback); // ponytail: indented code in a text kept whole
+                    }
+                    // Indented code (a list with no item open ends on this line).
+                    let ends_list =
+                        matches!(self.nodes[self.deepest() as usize].kind, Kind::List { .. });
                     self.close_lists_above(line_start);
                     self.para = None;
                     let parent = self.deepest();
-                    let code = self.add(parent, Kind::Code { lang: (0, 0), meta: (0, 0) }, line_start, line_start + pos + 4);
+                    let code = self.add(
+                        parent,
+                        Kind::Code {
+                            lang: (0, 0),
+                            meta: (0, 0),
+                        },
+                        line_start,
+                        line_start + pos + 4,
+                    );
                     let n = self.lines.len() as u32;
                     self.nodes[code as usize].lines = (n, n + 1);
                     self.nodes[code as usize].end = end;
                     self.lines.push((line_start + pos + 4, end));
                     // micromark: code on a line that closed containers is that line alone
                     // (and interrupts nothing).
-                    self.indented = all.then_some(code);
+                    self.indented = (all && !ends_list).then_some(code);
                 }
             }
             self.blank = false;
@@ -388,6 +550,9 @@ impl<'s> Parser<'s> {
             if header.contains(&u16::from(b'\\')) || rest.contains(&u16::from(b'\\')) {
                 return Err(Fallback); // ponytail: escaped pipes
             }
+            if self.whole && split_cells(header).len() != aligns.len() {
+                return Err(Fallback); // ponytail: micromark ends the paragraph there
+            }
             if split_cells(header).len() == aligns.len() {
                 if run(header, SP) >= 4 {
                     // micromark: the table ends the paragraph there, then fails, and the
@@ -396,7 +561,9 @@ impl<'s> Parser<'s> {
                 }
                 let from = self.aligns.len() as u32;
                 self.aligns.extend_from_slice(&aligns);
-                let kind = Kind::Table { aligns: (from, self.aligns.len() as u32) };
+                let kind = Kind::Table {
+                    aligns: (from, self.aligns.len() as u32),
+                };
                 let n = self.lines.len() as u32;
                 let node = &self.nodes[para as usize];
                 let table = if node.lines.1 - node.lines.0 == 1 {
@@ -408,7 +575,10 @@ impl<'s> Parser<'s> {
                     let node = &mut self.nodes[para as usize];
                     node.lines.1 -= 1;
                     node.end = previous;
-                    let header_line = self.source[..start].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+                    let header_line = self.source[..start]
+                        .iter()
+                        .rposition(|&unit| unit == NL)
+                        .map_or(0, |at| at + 1);
                     let table = self.add(parent_of_para(&self.stack), kind, header_line, start);
                     self.nodes[table as usize].lines = (n - 1, n);
                     table
@@ -438,7 +608,11 @@ impl<'s> Parser<'s> {
                     self.para = None;
                     let heading = self.add(parent, Kind::Heading(level), line_start, content);
                     // Empty content may not point into the source.
-                    let at = if text.is_empty() { content } else { (text.as_ptr() as usize - self.source.as_ptr() as usize) / 2 };
+                    let at = if text.is_empty() {
+                        content
+                    } else {
+                        (text.as_ptr() as usize - self.source.as_ptr() as usize) / 2
+                    };
                     self.lines.push((at, at + text.len()));
                     let n = self.lines.len() as u32;
                     self.nodes[heading as usize].lines = (n - 1, n);
@@ -460,14 +634,23 @@ impl<'s> Parser<'s> {
                 }
                 let at = content + length;
                 let lead = run(info, SP);
-                let word = info[lead..].iter().position(|&unit| unit == SP).map_or(info.len(), |end| lead + end);
-                let trail = info.iter().rposition(|&unit| unit != SP).map_or(word, |last| (last + 1).max(word));
+                let word = info[lead..]
+                    .iter()
+                    .position(|&unit| unit == SP)
+                    .map_or(info.len(), |end| lead + end);
+                let trail = info
+                    .iter()
+                    .rposition(|&unit| unit != SP)
+                    .map_or(word, |last| (last + 1).max(word));
                 let meta_lead = word + run(&info[word..trail], SP);
                 let range = |from: usize, to: usize| ((at + from) as u32, (at + to) as u32);
                 self.para = None;
                 // micromark's meta keeps its trailing spaces.
                 let meta_end = if meta_lead < trail { info.len() } else { trail };
-                let kind = Kind::Code { lang: range(lead, word), meta: range(meta_lead, meta_end) };
+                let kind = Kind::Code {
+                    lang: range(lead, word),
+                    meta: range(meta_lead, meta_end),
+                };
                 let code = self.add(parent, kind, line_start, content);
                 let n = self.lines.len() as u32;
                 self.nodes[code as usize].lines = (n, n);
@@ -476,7 +659,29 @@ impl<'s> Parser<'s> {
                 return Ok(());
             }
             b'<' => return Err(Fallback), // HTML
-            b'[' if self.para.is_none() && may_define(rest) => return Err(Fallback),
+            b'[' if self.para.is_none() && may_define(rest) => {
+                // A link definition (one line, in a text kept whole): recorded, not shown.
+                let at = line_start + pos + spaces;
+                // Not one (yet): a paragraph.
+                if let Some((label, destination)) = crate::marked::definition(&self.source[at..])? {
+                    if !self.whole {
+                        return Err(Fallback); // a definition marked did not register
+                    }
+                    let label = &self.source[at + label.0..at + label.1];
+                    let destination = &self.source[at + destination.0..at + destination.1];
+                    if destination.iter().any(|&unit| matches!(unit, 0x5C | 0x26)) {
+                        return Err(Fallback); // ponytail: escapes and references
+                    }
+                    let label = crate::inline::normalize_label(label).ok_or(Fallback)?;
+                    if !self.links.iter().any(|(name, _)| *name == label) {
+                        self.links
+                            .push((label, String::from_utf16_lossy(destination)));
+                    }
+                    self.lazy = false;
+                    self.def_open = true;
+                    return Ok(());
+                }
+            }
             _ => {}
         }
         // A continuation line keeps its own indent (code spans show it).
@@ -525,7 +730,9 @@ impl<'s> Parser<'s> {
             b'`' | b'~' => fence_open(rest).is_some(),
             b'<' => return Err(Fallback),
             b'*' | b'-' | b'_' if thematic(rest) => true,
-            _ => list_marker(rest)?.is_some_and(|marker| marker.content.is_some() && (!marker.ordered || marker.start == 1)),
+            _ => list_marker(rest)?.is_some_and(|marker| {
+                marker.content.is_some() && (!marker.ordered || marker.start == 1)
+            }),
         })
     }
 
@@ -545,8 +752,14 @@ impl<'s> Parser<'s> {
 /// `\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)*\|?` throughout.
 fn table_rule(block: &[u16]) -> bool {
     block.split(|&unit| unit == NL).any(|line| {
-        let start = line.iter().position(|&unit| unit != SP).unwrap_or(line.len());
-        let end = line.iter().rposition(|&unit| unit != SP).map_or(start, |at| at + 1);
+        let start = line
+            .iter()
+            .position(|&unit| unit != SP)
+            .unwrap_or(line.len());
+        let end = line
+            .iter()
+            .rposition(|&unit| unit != SP)
+            .map_or(start, |at| at + 1);
         let line = &line[start..end];
         if !line.contains(&u16::from(b'|')) {
             return false;
@@ -588,7 +801,12 @@ fn unclosed_fence(block: &[u16]) -> bool {
     let mut open: Option<(u16, usize)> = None;
     for line in block.split(|&unit| unit == NL) {
         let spaces = run(line, SP);
-        let Some(&fence) = line.get(spaces).filter(|&&unit| unit == 0x60 || unit == 0x7E) else { continue };
+        let Some(&fence) = line
+            .get(spaces)
+            .filter(|&&unit| unit == 0x60 || unit == 0x7E)
+        else {
+            continue;
+        };
         let length = run(&line[spaces..], fence);
         if spaces > 3 || length < 3 {
             continue;
@@ -607,7 +825,10 @@ fn unclosed_fence(block: &[u16]) -> bool {
 pub(crate) fn fence_open(rest: &[u16]) -> Option<(u16, usize)> {
     let &fence = rest.first()?;
     let length = run(rest, fence);
-    (matches!(fence, 0x60 | 0x7E) && length >= 3 && (fence == 0x7E || !rest[length..].contains(&0x60))).then_some((fence, length))
+    (matches!(fence, 0x60 | 0x7E)
+        && length >= 3
+        && (fence == 0x7E || !rest[length..].contains(&0x60)))
+    .then_some((fence, length))
 }
 
 fn parent_of_para(stack: &[u32]) -> u32 {
@@ -692,11 +913,12 @@ fn split_cells(line: &[u16]) -> Vec<(usize, usize)> {
     }
     let mut cells = Vec::new();
     let mut from = start;
-    for at in start..=end {
-        if at == end || line[at] == u16::from(b'|') {
-            cells.push(trim((from, at)));
-            from = at + 1;
-        }
+    for at in (start..end)
+        .filter(|&at| line[at] == u16::from(b'|'))
+        .chain([end])
+    {
+        cells.push(trim((from, at)));
+        from = at + 1;
     }
     cells
 }
@@ -707,7 +929,10 @@ fn container_exit(source: &[u16], point: usize, content_end: usize) -> usize {
     let mut end = point;
     let mut at = point;
     loop {
-        let line_start = source[..at].iter().rposition(|&unit| unit == NL).map_or(0, |nl| nl + 1);
+        let line_start = source[..at]
+            .iter()
+            .rposition(|&unit| unit == NL)
+            .map_or(0, |nl| nl + 1);
         if line_start == 0 || !source[line_start..at].iter().all(|&unit| unit == SP) {
             return end;
         }
@@ -731,20 +956,74 @@ fn end_of(source: &[u16], node: &Node) -> usize {
 
 /// Whether two line endings or more separate `end` from `start`.
 fn blank_between(source: &[u16], end: usize, start: usize) -> bool {
-    end < start && source[end..start].iter().filter(|&&unit| unit == NL).count() >= 2
+    end < start
+        && source[end..start]
+            .iter()
+            .filter(|&&unit| unit == NL)
+            .count()
+            >= 2
 }
 
 /// Renders `source` as blocks into `out`, each of Streamdown's blocks (see
 /// [`crate::marked`]) parsed on its own; each block's split, in order.
-pub(crate) fn render(source: &[u16], out: &mut Out, inline: &mut Inline, stable: usize, splits: &mut Vec<Split>) -> Result {
-    let cuts = crate::marked::cuts(source)?;
+pub(crate) fn render(
+    source: &[u16],
+    out: &mut Out,
+    inline: &mut Inline,
+    stable: usize,
+    splits: &mut Vec<Split>,
+) -> Result {
+    // A text with footnotes or link definitions is one block (Streamdown's), rendered
+    // whole on each update: its calls number themselves across it.
+    let footnotes = crate::marked::footnotes(source);
+    let mut whole = out.options.whole || footnotes;
+    let cuts = if whole {
+        Vec::new()
+    } else if let Some(cuts) = crate::marked::cuts(source)? {
+        cuts
+    } else {
+        whole = true;
+        Vec::new()
+    };
+    if whole && !out.options.whole {
+        out.flipped = true;
+        return Ok(());
+    }
+    let stable = if whole { 0 } else { stable };
+    inline.refs.clear();
     let mut from = 0;
     // Root DOM nodes written so far.
     let mut index = 0;
     for to in cuts.into_iter().chain([source.len()]) {
         let block = &source[from..to];
-        let mut parser = Parser { source: block, nodes: Vec::new(), lines: Vec::new(), stack: Vec::new(), para: None, blank: false, fence: None, table: None, aligns: Vec::new(), lazy: false, indented: None, blanks: Vec::new() };
-        parser.nodes.push(Node { kind: Kind::Root, first: NONE, last: NONE, next: NONE, line: 0, start: 0, end: 0, lines: (0, 0), exit: 0 });
+        let mut parser = Parser {
+            source: block,
+            nodes: Vec::new(),
+            lines: Vec::new(),
+            stack: Vec::new(),
+            para: None,
+            blank: false,
+            fence: None,
+            table: None,
+            aligns: Vec::new(),
+            lazy: false,
+            indented: None,
+            blanks: Vec::new(),
+            whole,
+            links: Vec::new(),
+            def_open: false,
+        };
+        parser.nodes.push(Node {
+            kind: Kind::Root,
+            first: NONE,
+            last: NONE,
+            next: NONE,
+            line: 0,
+            start: 0,
+            end: 0,
+            lines: (0, 0),
+            exit: 0,
+        });
         parser.stack.push(0);
         let mut start = 0;
         while start <= block.len() {
@@ -753,38 +1032,94 @@ pub(crate) fn render(source: &[u16], out: &mut Out, inline: &mut Inline, stable:
             start = end + 1;
         }
         parser.close_to(1, block.len());
+        if whole && !footnotes && parser.links.is_empty() {
+            // No longer one block (a definition on the last line grew into text).
+            out.flipped = true;
+            return Ok(());
+        }
+        if whole {
+            inline.refs.links = std::mem::take(&mut parser.links);
+            for (id, node) in parser.nodes.iter().enumerate() {
+                if let Kind::Footnote { label } = node.kind {
+                    // ponytail: footnotes of paragraphs only (micromark's indents for code
+                    // and lazy lines in them are their own).
+                    let mut child = node.first;
+                    while child != NONE {
+                        if parser.nodes[child as usize].kind != Kind::Para {
+                            return Err(Fallback);
+                        }
+                        child = parser.nodes[child as usize].next;
+                    }
+                    let label: Vec<u16> = block[label.0 as usize..label.1 as usize]
+                        .iter()
+                        .map(|&unit| crate::inline::lower(unit))
+                        .collect();
+                    if !inline.refs.notes.iter().any(|(name, _)| *name == label) {
+                        inline.refs.notes.push((label, id as u32));
+                    }
+                }
+            }
+        }
         // Streamdown's `isIncomplete`: the last block while animating, with an unclosed
         // fence by its own test.
         let incomplete = out.options.animating && to == source.len() && unclosed_fence(block);
-        let mut writer = Writer { source: block, nodes: &parser.nodes, lines: &parser.lines, aligns: &parser.aligns, out, inline, stable, scratch: Vec::new(), incomplete, checkbox: None };
-        let mut child = parser.nodes[0].first;
+        let mut writer = Writer {
+            source: block,
+            nodes: &parser.nodes,
+            lines: &parser.lines,
+            aligns: &parser.aligns,
+            out,
+            inline,
+            stable,
+            scratch: Vec::new(),
+            incomplete,
+            checkbox: None,
+        };
+        // The root's children (footnote definitions render after them).
+        let roots: Vec<u32> = writer
+            .children(0)
+            .filter(|&id| !matches!(parser.nodes[id as usize].kind, Kind::Footnote { .. }))
+            .collect();
         // With `dir`, every block (an empty one too) is one root element.
         let wrap = writer.out.options.dir;
-        if child != NONE || wrap > 0 {
-            let mut list = false;
-            let mut node = child;
-            while node != NONE {
-                list |= matches!(parser.nodes[node as usize].kind, Kind::List { .. });
-                node = parser.nodes[node as usize].next;
-            }
-            splits.push(Split { source: from, words: writer.out.words.len(), text: writer.out.text.len(), nodes: index, list, decides: 0 });
+        if !roots.is_empty() || wrap > 0 {
+            let list = roots
+                .iter()
+                .any(|&id| matches!(parser.nodes[id as usize].kind, Kind::List { .. }));
+            splits.push(Split {
+                source: from,
+                words: writer.out.words.len(),
+                text: writer.out.text.len(),
+                nodes: index,
+                list,
+                decides: 0,
+            });
         }
         // The last root element's word.
         let mut last_element = None;
         let wrapper = writer.out.words.len();
         let mut depth = 0u32;
         if wrap > 0 {
-            writer.out.open_html(if wrap == 1 { r#"<div dir="ltr" style="display: contents;">"# } else { r#"<div dir="rtl" style="display: contents;">"# });
+            writer.out.open_html(if wrap == 1 {
+                r#"<div dir="ltr" style="display: contents;">"#
+            } else {
+                r#"<div dir="rtl" style="display: contents;">"#
+            });
         }
-        while child != NONE {
-            if child != parser.nodes[0].first {
+        for (index, &child) in roots.iter().enumerate() {
+            if index > 0 {
                 // remark's root puts a line ending between its children.
                 writer.out.ascii("\n");
             }
             let at = writer.out.words.len();
             writer.block(child, false)?;
-            last_element = writer.out.words[at..].iter().position(|&word| word & 3 == kind::OPEN || word & 3 == kind::VOID).map(|offset| at + offset);
-            child = parser.nodes[child as usize].next;
+            last_element = writer.out.words[at..]
+                .iter()
+                .position(|&word| word & 3 == kind::OPEN || word & 3 == kind::VOID)
+                .map(|offset| at + offset);
+        }
+        if whole && let Some(at) = writer.footnotes(!roots.is_empty())? {
+            last_element = Some(at);
         }
         if wrap > 0 {
             writer.out.close();
@@ -822,11 +1157,95 @@ const CODE_ACTIONS: &str = r#"<div class="pointer-events-none absolute top-2 rig
 const TABLE_CONTROLS: &str = r#"<div class="flex items-center justify-end gap-1"><div class="relative"><button class="cursor-pointer p-1 text-muted-foreground transition-all hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50" title="Copy table" type="button"><svg aria-hidden="true" color="currentColor" height="14" stroke-linejoin="round" viewBox="0 0 16 16" width="14"><path clip-rule="evenodd" d="M2.75 0.5C1.7835 0.5 1 1.2835 1 2.25V9.75C1 10.7165 1.7835 11.5 2.75 11.5H3.75H4.5V10H3.75H2.75C2.61193 10 2.5 9.88807 2.5 9.75V2.25C2.5 2.11193 2.61193 2 2.75 2H8.25C8.38807 2 8.5 2.11193 8.5 2.25V3H10V2.25C10 1.2835 9.2165 0.5 8.25 0.5H2.75ZM7.75 4.5C6.7835 4.5 6 5.2835 6 6.25V13.75C6 14.7165 6.7835 15.5 7.75 15.5H13.25C14.2165 15.5 15 14.7165 15 13.75V6.25C15 5.2835 14.2165 4.5 13.25 4.5H7.75ZM7.5 6.25C7.5 6.11193 7.61193 6 7.75 6H13.25C13.3881 6 13.5 6.11193 13.5 6.25V13.75C13.5 13.8881 13.3881 14 13.25 14H7.75C7.61193 14 7.5 13.8881 7.5 13.75V6.25Z" fill="currentColor" fill-rule="evenodd"></path></svg></button></div><div class="relative"><button class="cursor-pointer p-1 text-muted-foreground transition-all hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50" title="Download table" type="button"><svg aria-hidden="true" color="currentColor" height="16" stroke-linejoin="round" viewBox="0 0 16 16" width="16" size="14"><path clip-rule="evenodd" d="M8.75 1V1.75V8.68934L10.7197 6.71967L11.25 6.18934L12.3107 7.25L11.7803 7.78033L8.70711 10.8536C8.31658 11.2441 7.68342 11.2441 7.29289 10.8536L4.21967 7.78033L3.68934 7.25L4.75 6.18934L5.28033 6.71967L7.25 8.68934V1.75V1H8.75ZM13.5 9.25V13.5H2.5V9.25V8.5H1V9.25V14C1 14.5523 1.44771 15 2 15H14C14.5523 15 15 14.5523 15 14V9.25V8.5H13.5V9.25Z" fill="currentColor" fill-rule="evenodd"></path></svg></button></div><button class="cursor-pointer p-1 text-muted-foreground transition-all hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50" title="View fullscreen" type="button"><svg aria-hidden="true" color="currentColor" height="16" stroke-linejoin="round" viewBox="0 0 16 16" width="16" size="14"><path clip-rule="evenodd" d="M1 5.25V6H2.5V5.25V2.5H5.25H6V1H5.25H2C1.44772 1 1 1.44772 1 2V5.25ZM5.25 14.9994H6V13.4994H5.25H2.5V10.7494V9.99939H1V10.7494V13.9994C1 14.5517 1.44772 14.9994 2 14.9994H5.25ZM15 10V10.75V14C15 14.5523 14.5523 15 14 15H10.75H10V13.5H10.75H13.5V10.75V10H15ZM10.75 1H10V2.5H10.75H13.5V5.25V6H15V5.25V2C15 1.44772 14.5523 1 14 1H10.75Z" fill="currentColor" fill-rule="evenodd"></path></svg></button></div>"#;
 
 impl Writer<'_, '_> {
+    /// mdast-util-to-hast's footnote section through Streamdown's components (its list
+    /// item shows a lone paragraph's content; its section drops an item with nothing
+    /// but the back reference): where it opens, if any footnote was called.
+    fn footnotes(&mut self, after: bool) -> Result<Option<usize>> {
+        if self.inline.refs.calls.is_empty() {
+            return Ok(None);
+        }
+        if after {
+            self.out.ascii("\n");
+        }
+        let at = self.out.words.len();
+        self.out
+            .open_html(r#"<section class="footnotes" data-footnotes="">"#);
+        self.out.open_html(r#"<h2 class="mt-6 mb-2 font-semibold text-2xl sr-only" data-streamdown="heading-2" id="footnote-label">"#);
+        self.out.ascii("Footnotes");
+        self.out.close();
+        self.out.ascii("\n");
+        self.out.open(tag::OL);
+        self.out.ascii("\n");
+        for index in 0..self.inline.refs.calls.len() {
+            let calls = self.inline.refs.calls.clone();
+            let (note, count) = calls[index];
+            let (label, node) = &self.inline.refs.notes[note as usize];
+            let node = *node;
+            let children: Vec<u32> = self.children(node).collect();
+            if let Some(&last) = children.last() {
+                let id = String::from_utf16_lossy(label);
+                self.out.open_html(&format!(r#"<li class="py-1 [&amp;&gt;p]:inline" data-streamdown="list-item" id="user-content-fn-{id}">"#));
+                let para_last = self.nodes[last as usize].kind == Kind::Para;
+                if children.len() == 1 && para_last {
+                    self.inline_content(last, true)?;
+                    self.out.ascii(" ");
+                    self.backrefs(count, " ");
+                } else {
+                    self.out.ascii("\n");
+                    for &child in &children {
+                        if child == last && para_last {
+                            self.out.open(tag::P);
+                            self.inline_content(child, true)?;
+                            self.out.ascii(" ");
+                            self.backrefs(count, " ");
+                            self.out.close();
+                        } else {
+                            self.block(child, false)?;
+                        }
+                        self.out.ascii("\n");
+                    }
+                    if !para_last {
+                        // (Each one a child of the item, line endings around.)
+                        self.backrefs(count, "\n \n");
+                        self.out.ascii("\n");
+                    }
+                }
+                self.out.close();
+                if self.inline.refs.calls != calls {
+                    return Err(Fallback); // ponytail: a call inside a footnote
+                }
+            }
+            self.out.ascii("\n");
+        }
+        self.out.close();
+        self.out.ascii("\n");
+        self.out.close();
+        Ok(Some(at))
+    }
+
+    /// A footnote's back references, one per call, `between` them.
+    fn backrefs(&mut self, count: u32, between: &str) {
+        for call in 1..=count {
+            if call > 1 {
+                self.out.ascii(between);
+            }
+            self.out.open_html(r#"<button class="wrap-anywhere appearance-none text-left font-medium text-primary underline data-footnote-backref" data-incomplete="false" data-streamdown="link" type="button">"#);
+            self.out.text(&[0x21A9]);
+            if call > 1 {
+                self.out.open_html(crate::inline::SUP);
+                self.out.ascii(&call.to_string());
+                self.out.close();
+            }
+            self.out.close();
+        }
+    }
+
     /// Controls (Streamdown disables every one of them while the text animates).
     fn controls(&mut self, html: &str) {
         if self.out.options.animating {
             // ponytail: rewritten on each render; cache it if it shows in profiles.
-            self.out.subtree(&html.replace(" title=", r#" disabled="" title="#));
+            self.out
+                .subtree(&html.replace(" title=", r#" disabled="" title="#));
         } else {
             self.out.subtree(html);
         }
@@ -834,7 +1253,11 @@ impl Writer<'_, '_> {
 }
 
 fn escape_attribute(value: &str) -> String {
-    value.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 struct Writer<'a, 'o> {
@@ -869,21 +1292,30 @@ impl Writer<'_, '_> {
     fn block(&mut self, id: u32, inline_para: bool) -> Result {
         let node = &self.nodes[id as usize];
         match node.kind {
-            Kind::Root | Kind::Item { .. } => unreachable!("written by their parents"),
+            Kind::Root | Kind::Item { .. } | Kind::Footnote { .. } => {
+                unreachable!("written by their parents")
+            }
             Kind::Quote => {
                 self.out.open(tag::BLOCKQUOTE);
                 self.wrap(id)?;
                 self.out.close();
             }
             Kind::List { ordered, start, .. } => {
-                let tasks = self.children(id).any(|item| matches!(self.nodes[item as usize].kind, Kind::Item { task: 1.., .. }));
-                let (ul, ol) = if tasks { (tag::UL_TASKS, tag::OL_TASKS) } else { (tag::UL, tag::OL) };
+                let tasks = self.children(id).any(|item| {
+                    matches!(self.nodes[item as usize].kind, Kind::Item { task: 1.., .. })
+                });
+                let (ul, ol) = if tasks {
+                    (tag::UL_TASKS, tag::OL_TASKS)
+                } else {
+                    (tag::UL, tag::OL)
+                };
                 match (ordered, start) {
                     (false, _) => self.out.open(ul),
                     (true, 1) => self.out.open(ol),
                     (true, start) => {
                         let ol = TAGS[ol as usize];
-                        self.out.open_html(&format!("{} start=\"{start}\">", &ol[..ol.len() - 1]));
+                        self.out
+                            .open_html(&format!("{} start=\"{start}\">", &ol[..ol.len() - 1]));
                     }
                 }
                 let loose = self.loose(id);
@@ -927,7 +1359,11 @@ impl Writer<'_, '_> {
         let aligns = &self.aligns[aligns.0 as usize..aligns.1 as usize];
         let (columns, rows) = (aligns.len(), lines.len() - 1);
         // mdast-util-to-hast wraps the sections, each section's rows and each row's cells.
-        let whitespace = 2 + usize::from(rows > 0) + 2 + if rows > 0 { rows + 1 } else { 0 } + (rows + 1) * (columns + 1);
+        let whitespace = 2
+            + usize::from(rows > 0)
+            + 2
+            + if rows > 0 { rows + 1 } else { 0 }
+            + (rows + 1) * (columns + 1);
         self.out.repeat(b'\n', whitespace as u32);
         self.out.open(tag::TABLE_WRAPPER);
         if self.out.options.controls {
@@ -960,7 +1396,8 @@ impl Writer<'_, '_> {
             if let Some(&(from, to)) = cells.get(column)
                 && from < to
             {
-                self.inline.render(&line[from..to], 0, self.out, self.stable)?;
+                self.inline
+                    .render(&line[from..to], 0, self.out, self.stable)?;
             }
             self.out.close();
         }
@@ -974,25 +1411,42 @@ impl Writer<'_, '_> {
     fn code(&mut self, id: u32, lang: (u32, u32), meta: (u32, u32)) {
         let source = self.source;
         let text = |range: (u32, u32)| &source[range.0 as usize..range.1 as usize];
-        let attribute = |range: (u32, u32)| escape_attribute(&String::from_utf16_lossy(text(range)));
+        let attribute =
+            |range: (u32, u32)| escape_attribute(&String::from_utf16_lossy(text(range)));
         let language = attribute(lang);
-        let prefix = if language.is_empty() { String::new() } else { format!("language-{language} ") };
-        let incomplete = if self.incomplete { r#" data-incomplete="true""# } else { "" };
+        let prefix = if language.is_empty() {
+            String::new()
+        } else {
+            format!("language-{language} ")
+        };
+        let incomplete = if self.incomplete {
+            r#" data-incomplete="true""#
+        } else {
+            ""
+        };
         self.out.open_html(&format!(
             r#"<div class="relative my-4 flex w-full flex-col gap-2 rounded-xl border border-border bg-sidebar p-2"{incomplete} data-language="{language}" data-streamdown="code-block" style="content-visibility: auto; contain-intrinsic-size: auto 200px;" dir="ltr">"#
         ));
         self.out.open_html(&format!(r#"<div class="flex h-8 items-center text-muted-foreground text-xs" data-language="{language}" data-streamdown="code-block-header">"#));
-        self.out.open_html(r#"<span class="ml-1 font-mono lowercase">"#);
+        self.out
+            .open_html(r#"<span class="ml-1 font-mono lowercase">"#);
         self.out.text(text(lang));
         self.out.close();
         self.out.close();
         if self.out.options.controls {
             self.controls(CODE_ACTIONS);
         }
-        let meta = if meta.0 == meta.1 { String::new() } else { format!(r#" metastring="{}""#, attribute(meta)) };
+        let meta = if meta.0 == meta.1 {
+            String::new()
+        } else {
+            format!(r#" metastring="{}""#, attribute(meta))
+        };
         let (scroll, height) = match self.out.options.code_max_height {
             0 => ("", String::new()),
-            pixels => ("overflow-y-auto ", format!(r#" style="max-height: {pixels}px;""#)),
+            pixels => (
+                "overflow-y-auto ",
+                format!(r#" style="max-height: {pixels}px;""#),
+            ),
         };
         self.out.open_html(&format!(
             r#"<div class="{prefix}{scroll}overflow-x-auto rounded-md border border-border bg-background p-4 text-sm" data-language="{language}" data-streamdown="code-block-body"{height}{meta}>"#
@@ -1009,9 +1463,14 @@ impl Writer<'_, '_> {
         let (first, last) = self.nodes[id as usize].lines;
         let lines = &self.lines[first as usize..last as usize];
         // Trailing empty lines are trailing line endings; the code has one line at least.
-        let count = lines.iter().rposition(|&(start, end)| start < end).map_or(1, |last| last + 1);
+        let count = lines
+            .iter()
+            .rposition(|&(start, end)| start < end)
+            .map_or(1, |last| last + 1);
         for index in 0..count {
-            let line = lines.get(index).map_or(&[][..], |&(start, end)| &source[start..end]);
+            let line = lines
+                .get(index)
+                .map_or(&[][..], |&(start, end)| &source[start..end]);
             if numbered {
                 self.out.open(tag::CODE_LINE);
             } else {
@@ -1050,7 +1509,9 @@ impl Writer<'_, '_> {
     /// An item: mdast-util-to-hast's `listItem`, then Streamdown's `MemoLi` (an item
     /// holding only a paragraph renders the paragraph's content).
     fn item(&mut self, id: u32, loose: bool) -> Result {
-        let Kind::Item { task, .. } = self.nodes[id as usize].kind else { unreachable!("an item") };
+        let Kind::Item { task, .. } = self.nodes[id as usize].kind else {
+            unreachable!("an item")
+        };
         // ponytail: a task whose paragraph became a heading or table (no checkbox): the
         // exact path.
         if task > 0 && self.nodes[self.nodes[id as usize].first as usize].kind != Kind::Para {
@@ -1085,7 +1546,11 @@ impl Writer<'_, '_> {
     fn loose(&self, list: u32) -> bool {
         let node = &self.nodes[list as usize];
         // Line endings between the content and the list's exit count toward its spread.
-        if blank_between(self.source, node.end, container_exit(self.source, node.exit, node.end)) {
+        if blank_between(
+            self.source,
+            node.end,
+            container_exit(self.source, node.exit, node.end),
+        ) {
             return true;
         }
         let items: Vec<u32> = self.children(list).collect();
@@ -1128,11 +1593,22 @@ impl Writer<'_, '_> {
                 && *indent.get_or_insert(gap.len() - 1) == gap.len() - 1
         });
         let trim = |text: &[u16]| -> usize {
-            if trim_end { text.iter().rposition(|&unit| unit != SP).map_or(0, |at| at + 1) } else { text.len() }
+            if trim_end {
+                text.iter()
+                    .rposition(|&unit| unit != SP)
+                    .map_or(0, |at| at + 1)
+            } else {
+                text.len()
+            }
         };
         if contiguous {
             let text = &self.source[start..end];
-            return self.inline.render(&text[..trim(text)], indent.unwrap_or(0), self.out, self.stable);
+            return self.inline.render(
+                &text[..trim(text)],
+                indent.unwrap_or(0),
+                self.out,
+                self.stable,
+            );
         }
         self.scratch.clear();
         for (index, &(start, end)) in lines.iter().enumerate() {
@@ -1143,7 +1619,9 @@ impl Writer<'_, '_> {
         }
         let length = trim(&self.scratch);
         let scratch = std::mem::take(&mut self.scratch);
-        let result = self.inline.render(&scratch[..length], 0, self.out, self.stable);
+        let result = self
+            .inline
+            .render(&scratch[..length], 0, self.out, self.stable);
         self.scratch = scratch;
         result
     }

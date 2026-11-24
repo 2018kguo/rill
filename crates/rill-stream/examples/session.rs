@@ -31,12 +31,18 @@ fn main() {
     let mut end = 0;
     while end < source.len() {
         end = (end + chunk).min(source.len());
-        while !source.is_char_boundary(end) { end += 1; }
+        while !source.is_char_boundary(end) {
+            end += 1;
+        }
         ends.push(end);
     }
     let mut best = vec![f64::MAX; ends.len()];
     // COLD=1: evict the caches between updates, as a page's 40 ms between chunks does.
-    let mut thrash = if std::env::var("COLD").is_ok() { vec![0u8; 32 << 20] } else { Vec::new() };
+    let mut thrash = if std::env::var("COLD").is_ok() {
+        vec![0u8; 32 << 20]
+    } else {
+        Vec::new()
+    };
     for _ in 0..std::env::var("N").map_or(20, |n| n.parse().unwrap()) {
         let mut session = rill_stream::Session::default();
         let mut start = 0;
@@ -47,7 +53,11 @@ fn main() {
             let t = Instant::now();
             let outcome = session.update(&source[start..end], start == 0);
             best[index] = best[index].min(t.elapsed().as_secs_f64() * 1e6);
-            assert_ne!(outcome, rill_stream::Outcome::Fallback, "fell back at {end}");
+            assert_ne!(
+                outcome,
+                rill_stream::Outcome::Fallback,
+                "fell back at {end}"
+            );
             start = end;
         }
     }
@@ -62,8 +72,18 @@ fn main() {
     let allocations = ALLOCATIONS.load(Relaxed) - before;
     let tenth = ends.len().div_ceil(10);
     for (part, times) in best.chunks(tenth).enumerate() {
-        println!("part {part}: {:.1} µs/update", times.iter().sum::<f64>() / times.len() as f64);
+        println!(
+            "part {part}: {:.1} µs/update",
+            times.iter().sum::<f64>() / times.len() as f64
+        );
     }
-    println!("total {:.0} µs for {} updates", best.iter().sum::<f64>(), ends.len());
-    println!("{:.1} allocations per update", allocations as f64 / ends.len() as f64);
+    println!(
+        "total {:.0} µs for {} updates",
+        best.iter().sum::<f64>(),
+        ends.len()
+    );
+    println!(
+        "{:.1} allocations per update",
+        allocations as f64 / ends.len() as f64
+    );
 }

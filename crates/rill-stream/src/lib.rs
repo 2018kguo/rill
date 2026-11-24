@@ -6,9 +6,9 @@
 //! exactly returns [`Fallback`], and the caller renders the text the exact way.
 
 mod block;
-mod marked;
 mod diff;
 mod inline;
+mod marked;
 mod session;
 mod simd;
 pub mod tokens;
@@ -30,7 +30,14 @@ pub fn render(source: &str, out: &mut String) -> Result {
     let mut tokens = Out::default();
     let units: Vec<u16> = source.encode_utf16().collect();
     render_split(&units, &mut tokens, &mut Inline::default())?;
-    tokens::to_html(&tokens.words, &tokens.text, &tokens.origins, &units, &tokens.strings.borrow(), out);
+    tokens::to_html(
+        &tokens.words,
+        &tokens.text,
+        &tokens.origins,
+        &units,
+        &tokens.strings.borrow(),
+        out,
+    );
     Ok(())
 }
 
@@ -38,9 +45,15 @@ pub fn render(source: &str, out: &mut String) -> Result {
 #[doc(hidden)]
 pub fn block_cuts(source: &str) -> Vec<usize> {
     let units: Vec<u16> = source.encode_utf16().collect();
-    let cuts = marked::cuts(&units).unwrap_or_default();
+    let cuts = if marked::footnotes(&units) {
+        Vec::new()
+    } else {
+        marked::cuts(&units).ok().flatten().unwrap_or_default()
+    };
     // UTF-16 offsets of line starts to byte offsets.
-    cuts.iter().map(|&cut| String::from_utf16_lossy(&units[..cut]).len()).collect()
+    cuts.iter()
+        .map(|&cut| String::from_utf16_lossy(&units[..cut]).len())
+        .collect()
 }
 
 /// Where the last open block starts (text appended to the source can change only that
@@ -80,15 +93,47 @@ pub(crate) fn render_split_at(
     inline: &mut Inline,
 ) -> Result<Split> {
     out.set_source(source, at, agree);
-    if source.iter().fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0)) {
+    if source
+        .iter()
+        .fold(false, |any, &unit| any | matches!(unit, 0x0D | 0x09 | 0))
+    {
         // ponytail: CR, tabs (column math) and NUL take the exact path for now.
         return Err(Fallback);
     }
-    let base = Split { source: 0, words: out.words.len(), text: out.text.len(), nodes: 0, list: false, decides: 0 };
+    let base = Split {
+        source: 0,
+        words: out.words.len(),
+        text: out.text.len(),
+        nodes: 0,
+        list: false,
+        decides: 0,
+    };
     let mut splits = Vec::new();
+    out.flipped = false;
     block::render(source, out, inline, stable, &mut splits)?;
+    if out.flipped {
+        // The text is one block now, or no longer (the caller starts over if it rendered
+        // from later than its start).
+        out.words.truncate(base.words);
+        out.origins.truncate(base.words);
+        out.text.truncate(base.text);
+        out.options.whole = !out.options.whole;
+        splits.clear();
+        out.flipped = false;
+        block::render(source, out, inline, stable, &mut splits)?;
+        if out.flipped {
+            return Err(Fallback); // marked and micromark disagree on a definition
+        }
+        out.flipped = true;
+    }
     // The block `back` blocks before the last (`base` past the last four).
-    let back_of = |back: usize| if back >= splits.len().min(4) { base } else { splits[splits.len() - 1 - back] };
+    let back_of = |back: usize| {
+        if back >= splits.len().min(4) {
+            base
+        } else {
+            splits[splits.len() - 1 - back]
+        }
+    };
     // A block opened on the unfinished last line may still turn into a continuation of
     // the block before it (`***` growing into `***a`, a lazy line): that one stays open
     // too, unless a blank line parts them and it is not a list (which takes items after
@@ -96,13 +141,18 @@ pub(crate) fn render_split_at(
     let last = back_of(0).source;
     let last_parted = parted(source, last);
     let mut back = usize::from(
-        source.last() != Some(&NL) && !source[last..].contains(&NL) && !(last_parted && !back_of(1).list),
+        source.last() != Some(&NL)
+            && !source[last..].contains(&NL)
+            && (!last_parted || back_of(1).list),
     );
     // Lines from the one holding the repair's first unit on may still change what they
     // are: blocks opened on them keep the block before open.
     let repaired = agree.saturating_sub(at);
     if repaired < source.len() {
-        let limit = source[..repaired].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+        let limit = source[..repaired]
+            .iter()
+            .rposition(|&unit| unit == NL)
+            .map_or(0, |at| at + 1);
         while back < 4 && back_of(back).source >= limit && back_of(back).source > 0 {
             back += 1;
         }
@@ -111,10 +161,19 @@ pub(crate) fn render_split_at(
     // lookahead), so a line that may still change into or out of one (the unfinished
     // last line, if it could be a delimiter row so far; a repaired one) may move the cut
     // on the line before it: blocks from there keep the block before open.
-    let line_start = |at: usize| source[..at].iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+    let line_start = |at: usize| {
+        source[..at]
+            .iter()
+            .rposition(|&unit| unit == NL)
+            .map_or(0, |at| at + 1)
+    };
     let last_line = line_start(source.len());
     let mut changing = usize::MAX;
-    if source.last() != Some(&NL) && source[last_line..].iter().all(|&unit| matches!(ascii(unit), b' ' | b':' | b'-' | b'|')) {
+    if source.last() != Some(&NL)
+        && source[last_line..]
+            .iter()
+            .all(|&unit| matches!(ascii(unit), b' ' | b':' | b'-' | b'|'))
+    {
         changing = last_line;
     }
     if repaired < source.len() {
@@ -144,7 +203,11 @@ pub(crate) fn render_split_at(
         // The block's first line decides the cut, and the line after it too when that
         // makes the first a table's header.
         let first = newline(source, split.source);
-        split.decides = if first < source.len() { newline(source, first + 1) + 1 } else { first + 1 };
+        split.decides = if first < source.len() {
+            newline(source, first + 1) + 1
+        } else {
+            first + 1
+        };
     }
     Ok(split)
 }
@@ -153,7 +216,10 @@ pub(crate) fn render_split_at(
 fn parted(source: &[u16], at: usize) -> bool {
     at >= 2 && source[at - 1] == NL && {
         let line = &source[..at - 1];
-        let start = line.iter().rposition(|&unit| unit == NL).map_or(0, |at| at + 1);
+        let start = line
+            .iter()
+            .rposition(|&unit| unit == NL)
+            .map_or(0, |at| at + 1);
         line[start..].iter().all(|&unit| unit == SP)
     }
 }
@@ -173,10 +239,15 @@ pub(crate) fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
     let (ordered, marker, start, after) = match ascii(rest[0]) {
         first @ (b'-' | b'*' | b'+') => (false, first, 0, 1),
         b'0'..=b'9' => {
-            let digits = rest.iter().take_while(|&&unit| ascii(unit).is_ascii_digit()).count();
+            let digits = rest
+                .iter()
+                .take_while(|&&unit| ascii(unit).is_ascii_digit())
+                .count();
             match rest.get(digits).map(|&unit| ascii(unit)) {
                 Some(delimiter @ (b'.' | b')')) if digits <= 9 => {
-                    let start = rest[..digits].iter().fold(0, |value, &unit| value * 10 + u32::from(unit - 0x30));
+                    let start = rest[..digits]
+                        .iter()
+                        .fold(0, |value, &unit| value * 10 + u32::from(unit - 0x30));
                     (true, delimiter, start, digits + 1)
                 }
                 _ => return Ok(None),
@@ -186,7 +257,13 @@ pub(crate) fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
     };
     let spaces = rest[after..].iter().take_while(|&&unit| unit == SP).count();
     if after + spaces == rest.len() {
-        return Ok(Some(Marker { ordered, marker, start, content: None, width: after + 1 }));
+        return Ok(Some(Marker {
+            ordered,
+            marker,
+            start,
+            content: None,
+            width: after + 1,
+        }));
     }
     if spaces == 0 {
         return Ok(None);
@@ -194,7 +271,13 @@ pub(crate) fn list_marker(rest: &[u16]) -> Result<Option<Marker>> {
     if spaces > 4 {
         return Err(Fallback); // indented code in the item
     }
-    Ok(Some(Marker { ordered, marker, start, content: Some(after + spaces), width: after + spaces }))
+    Ok(Some(Marker {
+        ordered,
+        marker,
+        start,
+        content: Some(after + spaces),
+        width: after + spaces,
+    }))
 }
 
 /// Whether a line starting with `[` may start a link definition (`[label]:`): its
@@ -232,7 +315,10 @@ pub(crate) fn newline(text: &[u16], from: usize) -> usize {
 }
 
 fn trim_end_spaces(text: &[u16]) -> &[u16] {
-    let end = text.iter().rposition(|&unit| unit != SP).map_or(0, |at| at + 1);
+    let end = text
+        .iter()
+        .rposition(|&unit| unit != SP)
+        .map_or(0, |at| at + 1);
     &text[..end]
 }
 
@@ -248,7 +334,11 @@ pub(crate) fn atx(rest: &[u16]) -> Option<(u8, &[u16])> {
     }
     let mut content = trim_end_spaces(&after[run(after, SP)..]);
     // A closing sequence: `#`s alone, or after a space.
-    let hashes = content.iter().rev().take_while(|&&unit| unit == u16::from(b'#')).count();
+    let hashes = content
+        .iter()
+        .rev()
+        .take_while(|&&unit| unit == u16::from(b'#'))
+        .count();
     if hashes == content.len() {
         content = &[];
     } else if hashes > 0 && content[content.len() - hashes - 1] == SP {
@@ -264,7 +354,10 @@ pub(crate) fn setext(rest: &[u16]) -> Option<u8> {
         b'-' => 2,
         _ => return None,
     };
-    trim_end_spaces(rest).iter().all(|&unit| unit == rest[0]).then_some(level)
+    trim_end_spaces(rest)
+        .iter()
+        .all(|&unit| unit == rest[0])
+        .then_some(level)
 }
 
 /// Three or more of one of `*-_`, with only spaces between.
@@ -322,19 +415,32 @@ mod wasm {
     impl Stream {
         #[wasm_bindgen(constructor)]
         pub fn new() -> Self {
-            Self { session: crate::Session::default(), input: Vec::new(), header: [0; 12] }
+            Self {
+                session: crate::Session::default(),
+                input: Vec::new(),
+                header: [0; 12],
+            }
         }
         /// Streamdown's `controls` and `isAnimating` (before the first update).
         #[wasm_bindgen(js_name = setOptions)]
         pub fn set_options(&mut self, controls: bool, animating: bool) {
-            let options = crate::tokens::Options { controls, animating, ..self.session.options() };
+            let options = crate::tokens::Options {
+                controls,
+                animating,
+                ..self.session.options()
+            };
             self.session.set_options(options);
         }
         /// Streamdown's `lineNumbers` and `codeBlockMaxHeight` (0: none), and `dir` (0:
         /// none, 1: `ltr`, 2: `rtl`), before the first update.
         #[wasm_bindgen(js_name = setLayout)]
         pub fn set_layout(&mut self, line_numbers: bool, code_max_height: u32, dir: u8) {
-            let options = crate::tokens::Options { line_numbers, code_max_height, dir, ..self.session.options() };
+            let options = crate::tokens::Options {
+                line_numbers,
+                code_max_height,
+                dir,
+                ..self.session.options()
+            };
             self.session.set_options(options);
         }
         #[cfg(feature = "probe")]

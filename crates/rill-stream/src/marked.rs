@@ -30,32 +30,152 @@ struct Token {
     raw: Vec<u16>,
 }
 
-/// The UTF-16 offsets where Streamdown's blocks of `text` start, the first excepted.
-pub(crate) fn cuts(text: &[u16]) -> Result<Vec<usize>> {
+/// Streamdown's footnote test: `[^` then 1 to 200 of `[\w-]` then `]`.
+pub(crate) fn footnotes(text: &[u16]) -> bool {
+    let mut at = 0;
+    while let Some(offset) = text[at..].windows(2).position(|pair| pair == [0x5B, 0x5E]) {
+        let start = at + offset + 2;
+        let label = text[start..]
+            .iter()
+            .take(201)
+            .take_while(|&&unit| crate::inline::note_unit(unit))
+            .count();
+        if (1..=200).contains(&label) && text.get(start + label) == Some(&0x5D) {
+            return true;
+        }
+        at = start;
+    }
+    false
+}
+
+/// The UTF-16 offsets where Streamdown's blocks of `text` start, the first excepted;
+/// `None` when marked registers a link definition (Streamdown keeps the text whole).
+pub(crate) fn cuts(text: &[u16]) -> Result<Option<Vec<usize>>> {
     let mut tokens = Vec::new();
-    lex(text, &mut tokens, false)?;
+    if lex(text, &mut tokens, false)? {
+        return Ok(None);
+    }
     // A block with an odd count of `$$` takes the next (math): blocks other than code.
-    let mut ends = tokens.iter().skip(1).map(|token| token.start).chain([text.len()]);
+    let mut ends = tokens
+        .iter()
+        .skip(1)
+        .map(|token| token.start)
+        .chain([text.len()]);
     for token in &tokens {
         let end = ends.next().expect("one end a token");
-        if token.kind != Kind::Code && text[token.start..end].windows(2).any(|pair| pair == [0x24, 0x24]) {
+        if token.kind != Kind::Code
+            && text[token.start..end]
+                .windows(2)
+                .any(|pair| pair == [0x24, 0x24])
+        {
             return Err(Fallback);
         }
     }
-    Ok(tokens.iter().filter(|token| token.kind != Kind::Space && token.start > 0).map(|token| token.start).collect())
+    Ok(Some(
+        tokens
+            .iter()
+            .filter(|token| token.kind != Kind::Space && token.start > 0)
+            .map(|token| token.start)
+            .collect(),
+    ))
+}
+
+/// A range of units.
+type Range = (usize, usize);
+
+/// A link definition at the start of `s` (marked's `def`, micromark's definition): its
+/// label and destination (ranges of `s`) when it is one this is sure of (one line:
+/// `[label]: destination`, a title on the line), `None` when it is not one; the exact
+/// path for what may be one otherwise.
+pub(crate) fn definition(s: &[u16]) -> Result<Option<(Range, Range)>> {
+    let first = line(s, 0);
+    let spaces = run(first, SP);
+    if spaces > 3 || !is(first.get(spaces), b'[') {
+        return Ok(None);
+    }
+    // On the text's last line, what is not a definition yet is a paragraph so far.
+    let unsure = || {
+        if first.len() >= s.len() {
+            Ok(None)
+        } else {
+            Err(Fallback)
+        }
+    };
+    let mut at = spaces + 1;
+    while at < first.len() && !matches!(first[at], 0x5B | 0x5D) {
+        at += if first[at] == 0x5C { 2 } else { 1 };
+    }
+    if !is(first.get(at), b']') || !is(first.get(at + 1), b':') {
+        // A label going on past the line may close later.
+        return if at >= first.len() {
+            unsure()
+        } else {
+            Ok(None)
+        };
+    }
+    let label = &first[spaces + 1..at];
+    if label.iter().all(|&unit| js_space(unit)) {
+        return Ok(None);
+    }
+    let rest = &first[at + 2..];
+    let lead = run(rest, SP);
+    let destination = rest[lead..]
+        .iter()
+        .take_while(|&&unit| !js_space(unit))
+        .count();
+    if destination == 0 {
+        return unsure(); // ponytail: the destination on the next line
+    }
+    // ponytail: `<...>`, and parentheses (micromark balances them, marked does not).
+    if rest[lead..lead + destination]
+        .iter()
+        .any(|&unit| matches!(unit, 0x3C | 0x28 | 0x29))
+    {
+        return Err(Fallback);
+    }
+    let after = &rest[lead + destination..];
+    let gap = run(after, SP);
+    let title = &after[gap..];
+    let simple_title = title.is_empty()
+        || (gap > 0
+            && title.len() >= 2
+            && matches!(
+                (title[0], title[title.len() - 1]),
+                (0x22, 0x22) | (0x27, 0x27) | (0x28, 0x29)
+            )
+            && !title[1..title.len() - 1]
+                .iter()
+                .any(|&unit| matches!(unit, 0x22 | 0x27 | 0x28 | 0x29 | 0x5C)));
+    if !simple_title
+        || (title.is_empty()
+            && first.len() < s.len()
+            && matches!(
+                line(s, first.len() + 1)
+                    .iter()
+                    .find(|&&unit| unit != SP)
+                    .copied(),
+                Some(0x22 | 0x27 | 0x28)
+            ))
+    {
+        return unsure(); // ponytail: titles past the line
+    }
+    let destination_at = at + 2 + lead;
+    Ok(Some((
+        (spaces + 1, at),
+        (destination_at, destination_at + destination),
+    )))
 }
 
 /// Fallback for what may make a paragraph, heading or rule's text a token this does
-/// not lex: a definition (`]:`), HTML at a line's start (after indents and quote
-/// markers). 16 units at a time, looking closer only at those characters.
+/// not lex: HTML at a line's start (after indents and quote markers). 16 units at a time, looking closer only at those characters.
 fn precheck(text: &[u16]) -> Result {
-    const SET: ByteSet = ByteSet::new(b"]<");
+    const SET: ByteSet = ByteSet::new(b"<");
     let fails = |at: usize| {
-        let unit = text[at];
-        match unit {
-            0x5D => text.get(at + 1) == Some(&u16::from(b':')),
-            _ => text[..at].iter().rev().find(|&&u| u != SP && u != u16::from(b'>')).is_none_or(|&u| u == NL),
-        }
+        text[..at]
+            .iter()
+            .rev()
+            .find(|&&u| u != SP && u != u16::from(b'>'))
+            .is_none_or(|&u| u == NL)
     };
     let mut chunks = text.chunks_exact(16);
     for (index, chunk) in chunks.by_ref().enumerate() {
@@ -76,7 +196,8 @@ fn precheck(text: &[u16]) -> Result {
     Ok(())
 }
 
-fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result {
+/// Lexes `src` into `tokens`: whether it holds a link definition (marked's `links`).
+fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result<bool> {
     let mut pos = 0;
     while pos < src.len() {
         let s = &src[pos..];
@@ -84,7 +205,11 @@ fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result {
         if spaces > 0 {
             match tokens.last_mut() {
                 Some(last) if spaces == 1 => last.raw.push(NL),
-                _ => tokens.push(Token { kind: Kind::Space, start: pos, raw: Vec::new() }),
+                _ => tokens.push(Token {
+                    kind: Kind::Space,
+                    start: pos,
+                    raw: Vec::new(),
+                }),
             }
             pos += spaces;
             continue;
@@ -102,6 +227,8 @@ fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result {
             (Kind::Blockquote, length)
         } else if let Some(length) = list(s)? {
             (Kind::List, length)
+        } else if definition(s)?.is_some() {
+            return Ok(true);
         } else if let Some(length) = table(s)? {
             (Kind::Table, length)
         } else if let Some(length) = lheading(s) {
@@ -109,22 +236,43 @@ fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result {
         } else {
             let length = paragraph(s, 0, true);
             precheck(&s[..length])?;
-            let merge = clipped && tokens.last().is_some_and(|last| last.kind == Kind::Paragraph);
+            let merge = clipped
+                && tokens
+                    .last()
+                    .is_some_and(|last| last.kind == Kind::Paragraph);
             clipped = false;
             pos += length;
             if !merge {
-                tokens.push(Token { kind: Kind::Paragraph, start: pos - length, raw: Vec::new() });
+                tokens.push(Token {
+                    kind: Kind::Paragraph,
+                    start: pos - length,
+                    raw: Vec::new(),
+                });
             }
             continue;
         };
         if kind == Kind::Heading || kind == Kind::Hr {
             precheck(&s[..length])?;
         }
-        let raw = if matches!(kind, Kind::Blockquote | Kind::List) { s[..length].to_vec() } else { Vec::new() };
-        tokens.push(Token { kind, start: pos, raw });
+        // ponytail: a definition inside a quote or a list (marked registers those too).
+        if matches!(kind, Kind::Blockquote | Kind::List)
+            && s[..length].windows(2).any(|pair| pair == [0x5D, 0x3A])
+        {
+            return Err(Fallback);
+        }
+        let raw = if matches!(kind, Kind::Blockquote | Kind::List) {
+            s[..length].to_vec()
+        } else {
+            Vec::new()
+        };
+        tokens.push(Token {
+            kind,
+            start: pos,
+            raw,
+        });
         pos += length;
     }
-    Ok(())
+    Ok(false)
 }
 
 fn line(s: &[u16], at: usize) -> &[u16] {
@@ -172,14 +320,17 @@ fn hr(line: &[u16], max: usize) -> bool {
     if spaces > max || !matches!(c, 0x2D | 0x5F | 0x2A) {
         return false;
     }
-    rest.iter().all(|&u| u == c || u == SP || u == TAB) && rest.iter().filter(|&&u| u == c).count() >= 3
+    rest.iter().all(|&u| u == c || u == SP || u == TAB)
+        && rest.iter().filter(|&&u| u == c).count() >= 3
 }
 
 /// ` {0,max}#{1,6}(?:\s|$)`.
 fn heading(line: &[u16], max: usize) -> bool {
     let spaces = run(line, SP);
     let hashes = run(&line[spaces..], u16::from(b'#'));
-    spaces <= max && (1..=6).contains(&hashes) && line.get(spaces + hashes).is_none_or(|&u| js_space(u))
+    spaces <= max
+        && (1..=6).contains(&hashes)
+        && line.get(spaces + hashes).is_none_or(|&u| js_space(u))
 }
 
 /// ` {0,max}>`.
@@ -199,9 +350,16 @@ fn marker(line: &[u16], max: usize) -> Option<(usize, u16, usize)> {
     if matches!(c, 0x2A | 0x2B | 0x2D) {
         return Some((spaces + 1, c, 0));
     }
-    let digits = line[spaces..].iter().take_while(|&&u| (0x30..=0x39).contains(&u)).count();
+    let digits = line[spaces..]
+        .iter()
+        .take_while(|&&u| (0x30..=0x39).contains(&u))
+        .count();
     let &delimiter = line.get(spaces + digits)?;
-    ((1..=9).contains(&digits) && matches!(delimiter, 0x2E | 0x29)).then_some((spaces + digits + 1, delimiter, digits))
+    ((1..=9).contains(&digits) && matches!(delimiter, 0x2E | 0x29)).then_some((
+        spaces + digits + 1,
+        delimiter,
+        digits,
+    ))
 }
 
 /// A marker followed by a space or tab, or ending the line (`(?:[ \t]|$)`).
@@ -212,15 +370,22 @@ fn bullet(line: &[u16], max: usize) -> Option<(usize, u16, usize)> {
 /// A root paragraph's list interruption: ` {0,3}(?:[*+-]|1[.)])[ \t]+[^ \t\n]`.
 fn list_interrupts(line: &[u16]) -> bool {
     marker(line, 3).is_some_and(|(end, _, digits)| {
-        let spaces = line[end..].iter().take_while(|&&u| u == SP || u == TAB).count();
-        (digits == 0 || (digits == 1 && is(line.get(end - 2), b'1'))) && spaces > 0 && end + spaces < line.len()
+        let spaces = line[end..]
+            .iter()
+            .take_while(|&&u| u == SP || u == TAB)
+            .count();
+        (digits == 0 || (digits == 1 && is(line.get(end - 2), b'1')))
+            && spaces > 0
+            && end + spaces < line.len()
     })
 }
 
 /// ` {0,3}(?:=+|-+) *` to the line's end.
 fn underline(line: &[u16]) -> bool {
     let spaces = run(line, SP);
-    let Some(&c) = line.get(spaces) else { return false };
+    let Some(&c) = line.get(spaces) else {
+        return false;
+    };
     let marks = run(&line[spaces..], c);
     spaces <= 3 && matches!(c, 0x3D | 0x2D) && line[spaces + marks..].iter().all(|&u| u == SP)
 }
@@ -231,7 +396,10 @@ fn underline(line: &[u16]) -> bool {
 fn fences(s: &[u16]) -> Result<Option<usize>> {
     let first = line(s, 0);
     let spaces = run(first, SP);
-    let Some((fence, length)) = (spaces <= 3).then(|| crate::block::fence_open(&first[spaces..])).flatten() else {
+    let Some((fence, length)) = (spaces <= 3)
+        .then(|| crate::block::fence_open(&first[spaces..]))
+        .flatten()
+    else {
         return Ok(None);
     };
     let mut end = first.len();
@@ -276,7 +444,9 @@ fn indented(s: &[u16]) -> usize {
 /// ` {0,max}(?:```|~~~)`.
 fn fence_begins(line: &[u16], max: usize) -> bool {
     let spaces = run(line, SP);
-    spaces <= max && matches!(line.get(spaces), Some(&(0x60 | 0x7E))) && run(&line[spaces..], line[spaces]) >= 3
+    spaces <= max
+        && matches!(line.get(spaces), Some(&(0x60 | 0x7E)))
+        && run(&line[spaces..], line[spaces]) >= 3
 }
 
 /// `gfmTable`'s delimiter row (` {0,3}((?:\| *)?:?-+:? *(?:\| *:?-+:? *)*(?:\| *)?)`
@@ -375,7 +545,8 @@ fn table(s: &[u16]) -> Result<Option<usize>> {
             return Err(Fallback);
         }
         let list = marker(l, 3).is_some_and(|(at, _, digits)| {
-            (digits == 0 || (digits == 1 && is(l.get(at - 2), b'1'))) && matches!(l.get(at), Some(&(SP | TAB)))
+            (digits == 0 || (digits == 1 && is(l.get(at - 2), b'1')))
+                && matches!(l.get(at), Some(&(SP | TAB)))
         });
         let stops = (blank(l) && next + l.len() < s.len())
             || hr(l, 3)
@@ -405,7 +576,11 @@ fn paragraph(s: &[u16], from: usize, root: bool) -> usize {
             || quote(l, 3)
             || (run(l, SP) <= 3 && crate::block::fence_open(&l[run(l, SP)..]).is_some())
             || (blank(l) && next + l.len() < s.len())
-            || if root { list_interrupts(l) || table_at(s, next) } else { bullet(l, 3).is_some() };
+            || if root {
+                list_interrupts(l) || table_at(s, next)
+            } else {
+                bullet(l, 3).is_some()
+            };
         if stops {
             break;
         }
@@ -417,8 +592,15 @@ fn paragraph(s: &[u16], from: usize, root: bool) -> usize {
 /// A line (followed by more) that `lheading` does not run across.
 pub(crate) fn setext_stop(l: &[u16]) -> bool {
     let bull = marker(l, 3).is_some_and(|(end, ..)| is(l.get(end), b' '));
-    let pipes = l.contains(&u16::from(b'|')) && l.iter().all(|&u| matches!(u, 0x20 | 0x2D | 0x3A | 0x7C));
-    trims_empty(l) || bull || quote(l, 3) || heading(l, 3) || hr(l, 3) || fence_begins(l, 3) || pipes
+    let pipes =
+        l.contains(&u16::from(b'|')) && l.iter().all(|&u| matches!(u, 0x20 | 0x2D | 0x3A | 0x7C));
+    trims_empty(l)
+        || bull
+        || quote(l, 3)
+        || heading(l, 3)
+        || hr(l, 3)
+        || fence_begins(l, 3)
+        || pipes
 }
 
 /// `lheading`: lines up to a setext underline.
@@ -427,10 +609,17 @@ fn lheading(s: &[u16]) -> Option<usize> {
     let bull = |l: &[u16]| marker(l, 3).is_some_and(|(end, ..)| is(l.get(end), b' '));
     // ` {0,3}\|?(?:[:\- ]*\|)+[\:\- ]*\n`: a row of pipes, colons, dashes, spaces.
     let pipes = |l: &[u16], at: usize| {
-        at + l.len() < s.len() && l.contains(&u16::from(b'|')) && l.iter().all(|&u| matches!(u, 0x20 | 0x2D | 0x3A | 0x7C))
+        at + l.len() < s.len()
+            && l.contains(&u16::from(b'|'))
+            && l.iter().all(|&u| matches!(u, 0x20 | 0x2D | 0x3A | 0x7C))
     };
     let first = line(s, 0);
-    if bull(first) || quote(first, 3) || heading(first, 3) || fence_begins(first, 3) || pipes(first, 0) {
+    if bull(first)
+        || quote(first, 3)
+        || heading(first, 3)
+        || fence_begins(first, 3)
+        || pipes(first, 0)
+    {
         return None;
     }
     let mut end = first.len();
@@ -439,9 +628,17 @@ fn lheading(s: &[u16]) -> Option<usize> {
         let l = line(s, next);
         if underline(l) {
             // JavaScript's `.` stops at line separators: no heading then (rare).
-            return (!s[..end].iter().any(|&u| matches!(u, 0x2028 | 0x2029))).then_some(next + l.len());
+            return (!s[..end].iter().any(|&u| matches!(u, 0x2028 | 0x2029)))
+                .then_some(next + l.len());
         }
-        if trims_empty(l) || bull(l) || quote(l, 3) || heading(l, 3) || hr(l, 3) || fence_begins(l, 3) || pipes(l, next) {
+        if trims_empty(l)
+            || bull(l)
+            || quote(l, 3)
+            || heading(l, 3)
+            || hr(l, 3)
+            || fence_begins(l, 3)
+            || pipes(l, next)
+        {
             return None;
         }
         end = next + l.len();
@@ -459,7 +656,11 @@ fn quote_capture(s: &[u16]) -> usize {
             break;
         }
         let content = spaces + 1 + usize::from(is(l.get(spaces + 1), b' '));
-        let end = if blank(&l[content..]) { pos + l.len() } else { paragraph(s, pos + content, false) };
+        let end = if blank(&l[content..]) {
+            pos + l.len()
+        } else {
+            paragraph(s, pos + content, false)
+        };
         pos = (end + 1).min(s.len());
     }
     pos
@@ -525,11 +726,15 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
             text.extend_from_slice(unquote(l));
         }
         at = end;
-        lex(&text, &mut tokens, true)?;
+        if lex(&text, &mut tokens, true)? {
+            return Err(Fallback);
+        }
         if at == count {
             break;
         }
-        let Some(last) = tokens.last_mut() else { continue };
+        let Some(last) = tokens.last_mut() else {
+            continue;
+        };
         match last.kind {
             Kind::Heading | Kind::Hr | Kind::Code => break,
             Kind::Blockquote => {
@@ -541,8 +746,16 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
                 let length = blockquote(&text)?.ok_or(Fallback)?;
                 let leftover = &text[length..];
                 let leftover = leftover.strip_prefix(&[NL]).unwrap_or(leftover);
-                let left = if leftover.is_empty() { 0 } else { leftover.iter().filter(|&&u| u == NL).count() + 1 };
-                at += if left > 0 { (count - at).saturating_sub(left) } else { count - at };
+                let left = if leftover.is_empty() {
+                    0
+                } else {
+                    leftover.iter().filter(|&&u| u == NL).count() + 1
+                };
+                at += if left > 0 {
+                    (count - at).saturating_sub(left)
+                } else {
+                    count - at
+                };
                 last.raw = text[..length].to_vec();
                 break;
             }
@@ -561,19 +774,25 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
             _ => {}
         }
     }
-    Ok(Some(lines[..at].iter().map(|l| l.len()).sum::<usize>() + at.saturating_sub(1)))
+    Ok(Some(
+        lines[..at].iter().map(|l| l.len()).sum::<usize>() + at.saturating_sub(1),
+    ))
 }
 
 /// `Tokenizer.list`: its `raw`'s length.
 fn list(s: &[u16]) -> Result<Option<usize>> {
-    let Some((_, kind, digits)) = bullet(line(s, 0), 3) else { return Ok(None) };
+    let Some((_, kind, digits)) = bullet(line(s, 0), 3) else {
+        return Ok(None);
+    };
     let ordered = digits > 0;
     let mut pos = 0;
     let mut items = 0;
     while pos < s.len() {
         let first = line(&s[pos..], 0);
         // The same bullet (or delimiter), then a space, a tab or the line's end.
-        let Some((marker_end, other, digits)) = bullet(first, 3) else { break };
+        let Some((marker_end, other, digits)) = bullet(first, 3) else {
+            break;
+        };
         if other != kind || (digits > 0) != ordered || hr(first, 3) {
             break;
         }
@@ -586,7 +805,10 @@ fn list(s: &[u16]) -> Result<Option<usize>> {
         let indent = if blank_line {
             marker_end + 1
         } else {
-            let at = item_line.iter().position(|&u| u != SP).unwrap_or(usize::MAX);
+            let at = item_line
+                .iter()
+                .position(|&u| u != SP)
+                .unwrap_or(usize::MAX);
             marker_end + if at > 4 { 1 } else { at }
         };
         if blank_line && blank(next) {
@@ -600,14 +822,25 @@ fn list(s: &[u16]) -> Result<Option<usize>> {
             if run(l, SP) <= max && is(l.get(run(l, SP)), b'<') {
                 return Err(Fallback); // an HTML block may start
             }
-            if fence_begins(l, max) || heading(l, max) || quote(l, max) || bullet(l, max).is_some() || hr(l, max) {
+            if fence_begins(l, max)
+                || heading(l, max)
+                || quote(l, max)
+                || bullet(l, max).is_some()
+                || hr(l, max)
+            {
                 break;
             }
-            let deep = l.iter().position(|&u| u != SP).is_some_and(|at| at >= indent);
+            let deep = l
+                .iter()
+                .position(|&u| u != SP)
+                .is_some_and(|at| at >= indent);
             if !deep
                 && !trims_empty(l)
                 && (blank_line
-                    || item_line.iter().position(|&u| u != SP).is_some_and(|at| at >= 4)
+                    || item_line
+                        .iter()
+                        .position(|&u| u != SP)
+                        .is_some_and(|at| at >= 4)
                     || fence_begins(item_line, max)
                     || heading(item_line, max)
                     || hr(item_line, max))
@@ -633,7 +866,7 @@ fn list(s: &[u16]) -> Result<Option<usize>> {
 mod tests {
     fn cuts(text: &str) -> Vec<usize> {
         let units: Vec<u16> = text.encode_utf16().collect();
-        super::cuts(&units).unwrap_or_default()
+        super::cuts(&units).ok().flatten().unwrap_or_default()
     }
 
     #[test]

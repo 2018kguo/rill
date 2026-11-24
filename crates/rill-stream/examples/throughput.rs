@@ -14,5 +14,10 @@ fn main() {
         rill_stream::render(&source, &mut out).unwrap();
         best = best.min(t.elapsed().as_secs_f64());
     }
-    println!("{} bytes: {:.1} µs, {:.0} MiB/s", source.len(), best * 1e6, source.len() as f64 / best / 1048576.0);
+    println!(
+        "{} bytes: {:.1} µs, {:.0} MiB/s",
+        source.len(),
+        best * 1e6,
+        source.len() as f64 / best / 1048576.0
+    );
 }

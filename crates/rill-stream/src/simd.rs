@@ -14,7 +14,11 @@ pub fn find_unit(text: &[u16], unit: u16) -> Option<usize> {
     let mut at = 0;
     while let Some(offset) = memchr::memchr(unit as u8, &bytes[at..]) {
         let index = at + offset;
-        let (low, high) = if cfg!(target_endian = "little") { (0, 1) } else { (1, 0) };
+        let (low, high) = if cfg!(target_endian = "little") {
+            (0, 1)
+        } else {
+            (1, 0)
+        };
         if index % 2 == low && bytes[index - low + high] == 0 {
             return Some(index / 2);
         }
@@ -107,7 +111,10 @@ mod imp {
             let low = vminq_u16(vld1q_u16(chunk.as_ptr()), vdupq_n_u16(0x80));
             let high = vminq_u16(vld1q_u16(chunk.as_ptr().add(8)), vdupq_n_u16(0x80));
             let mut out = [0u8; 16];
-            vst1q_u8(out.as_mut_ptr(), vcombine_u8(vmovn_u16(low), vmovn_u16(high)));
+            vst1q_u8(
+                out.as_mut_ptr(),
+                vcombine_u8(vmovn_u16(low), vmovn_u16(high)),
+            );
             out
         }
     }
@@ -141,7 +148,10 @@ mod imp {
     }
 }
 
-#[cfg(not(any(all(target_arch = "wasm32", target_feature = "simd128"), target_arch = "aarch64")))]
+#[cfg(not(any(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    target_arch = "aarch64"
+)))]
 mod imp {
     #[inline(always)]
     pub fn narrow(chunk: &[u16; 16]) -> [u8; 16] {
@@ -168,22 +178,39 @@ mod tests {
         let mut chunk = [0u8; 16];
         for seed in 0u32..20_000 {
             for (index, byte) in chunk.iter_mut().enumerate() {
-                *byte = (seed.wrapping_mul(2_654_435_761).rotate_left(index as u32 * 3) >> 7) as u8;
+                *byte = (seed
+                    .wrapping_mul(2_654_435_761)
+                    .rotate_left(index as u32 * 3)
+                    >> 7) as u8;
             }
-            let want: u32 = (0..16).map(|i| u32::from(SET.contains(chunk[i])) << i).sum();
+            let want: u32 = (0..16)
+                .map(|i| u32::from(SET.contains(chunk[i])) << i)
+                .sum();
             assert_eq!(super::imp::mask16(&SET, &chunk), want, "{chunk:?}");
         }
         let mut units = [0u16; 16];
         for seed in 0u32..20_000 {
             for (index, unit) in units.iter_mut().enumerate() {
-                let value = seed.wrapping_mul(2_654_435_761).rotate_left(index as u32 * 5);
-                *unit = if value & 1 == 0 { (value >> 9) as u16 & 0x7F } else { (value >> 7) as u16 };
+                let value = seed
+                    .wrapping_mul(2_654_435_761)
+                    .rotate_left(index as u32 * 5);
+                *unit = if value & 1 == 0 {
+                    (value >> 9) as u16 & 0x7F
+                } else {
+                    (value >> 7) as u16
+                };
             }
-            let want: u32 = (0..16).map(|i| u32::from(units[i] < 0x80 && SET.contains(units[i] as u8)) << i).sum();
+            let want: u32 = (0..16)
+                .map(|i| u32::from(units[i] < 0x80 && SET.contains(units[i] as u8)) << i)
+                .sum();
             assert_eq!(SET.mask16_units(&units), want, "{units:?}");
         }
         for byte in 0..=255u8 {
-            assert_eq!(SET.contains(byte), b"*_`\\\n&<>[]~".contains(&byte), "{byte}");
+            assert_eq!(
+                SET.contains(byte),
+                b"*_`\\\n&<>[]~".contains(&byte),
+                "{byte}"
+            );
         }
     }
 }

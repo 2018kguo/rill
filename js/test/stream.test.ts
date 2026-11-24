@@ -30,6 +30,7 @@ function ours(text: string): string | undefined {
   const renderer = createStreamRenderer(scratch.firstChild as Element, session, module);
   const shown = renderer.update(text);
   renderer.dispose();
+  scratch.normalize();
   return shown ? `${scratch.innerHTML}\n${textNodes(scratch)}` : undefined;
 }
 
@@ -73,7 +74,12 @@ for (const [name, pieces, depth, fast = 0.5] of ALPHABETS) {
         const got = ours(text);
         if (got !== undefined) {
           rendered += 1;
-          const want = await theirs.render(text, { controls: false });
+          await theirs.render(text, { controls: false });
+          // Text nodes compared settled: a blocked link's ` [blocked]` is its own text
+          // node in Streamdown, one run with the text here (the same DOM to read).
+          const settled = theirs.host.cloneNode(true) as Element;
+          settled.normalize();
+          const want = `${theirs.host.innerHTML}\n${textNodes(settled)}`;
           if (got !== want) {
             let at = 0;
             while (got[at] === want[at]) at += 1;

@@ -60,14 +60,32 @@ export type StreamRenderer = {
   dispose(): void;
 };
 
+/** Per document: the tags' elements (per module's list) and each parsed open tag or
+ * subtree, by its HTML (they are the same across messages). */
+const parsed = new WeakMap<Document, { tags: Map<string, Element[]>; html: Map<string, Node>; template: HTMLTemplateElement }>();
+
+function parsedFor(document: Document) {
+  let cache = parsed.get(document);
+  if (cache === undefined) {
+    cache = { tags: new Map(), html: new Map(), template: document.createElement("template") };
+    parsed.set(document, cache);
+  }
+  return cache;
+}
+
 export function createStreamRenderer(root: Element, session: StreamSession, module: StreamModule): StreamRenderer {
   const { memory } = module;
   const document = root.ownerDocument;
-  const template = document.createElement("template");
-  const tags = module.tags.split("\n").map((tag) => {
-    template.innerHTML = tag;
-    return template.content.firstChild as Element;
-  });
+  const cache = parsedFor(document);
+  const { template } = cache;
+  let tags = cache.tags.get(module.tags);
+  if (tags === undefined) {
+    tags = module.tags.split("\n").map((tag) => {
+      template.innerHTML = tag;
+      return template.content.firstChild as Element;
+    });
+    cache.tags.set(module.tags, tags);
+  }
   const utf16 = new TextDecoder("utf-16le");
   const state: Root = {
     element: root,
@@ -80,6 +98,7 @@ export function createStreamRenderer(root: Element, session: StreamSession, modu
     interned: [],
     nodes: [],
     template,
+    parsed: cache.html,
     literal: (start, end) => {
       // Decoded once an update, on first use.
       if (state.strings === undefined) {
@@ -172,6 +191,8 @@ type Root = {
   interned: string[];
   nodes: (Node | undefined)[];
   template: HTMLTemplateElement;
+  /** Parsed open tags and subtrees by their HTML (shared across the document's roots). */
+  parsed: Map<string, Node>;
   /** From a token's index to its origin's. */
   origins: number;
   /** The rendering's text `[start, end)`. */
@@ -191,10 +212,17 @@ function child(parent: Node, index: number): ChildNode | null {
   return node;
 }
 
-/** The tail's root child `index` (from the end: the tail is the last block or two). */
+/** The first node of the run of text nodes `node` is in (or `node`). */
+function runStart(node: ChildNode | null): ChildNode | null {
+  if (node?.nodeType === 3) while (node.previousSibling?.nodeType === 3) node = node.previousSibling;
+  return node;
+}
+
+/** The tail's root child `index` (from the end: the tail is the last block or two),
+ * counting a run of adjacent text nodes as one (an append adds a text node). */
 function tailChild(root: Root, index: number): ChildNode | null {
-  let node = root.element.lastChild;
-  for (let steps = root.count - root.finals - 1 - index; steps > 0 && node !== null; steps -= 1) node = node.previousSibling;
+  let node = runStart(root.element.lastChild);
+  for (let steps = root.count - root.finals - 1 - index; steps > 0 && node !== null; steps -= 1) node = runStart(node.previousSibling);
   return node;
 }
 
@@ -222,10 +250,13 @@ function apply(root: Root, ops: number, length: number, words: number) {
       // The node, its later siblings, and the later siblings of each ancestor.
       let next = node as ChildNode | null;
       for (;;) {
+        // (A run of text nodes is one root child.)
+        let text = false;
         while (next !== null) {
           const after: ChildNode | null = next.nextSibling;
+          if (parent === element && !(text && next.nodeType === 3)) root.count -= 1;
+          text = next.nodeType === 3;
           parent.removeChild(next);
-          if (parent === element) root.count -= 1;
           next = after;
         }
         if (parent === element) break;
@@ -243,9 +274,9 @@ function apply(root: Root, ops: number, length: number, words: number) {
       const element = node as Element;
       const tag = clone(root, u32[at]!, false) as Element;
       if (tag.tagName === element.tagName) {
-        // The attributes in the new tag's order.
-        while (element.attributes.length > 0) element.removeAttribute(element.attributes[0]!.name);
-        for (const { name, value } of Array.from(tag.attributes)) element.setAttribute(name, value);
+        // As React updates an element: values in place, removed ones gone, new ones last.
+        for (const { name } of Array.from(element.attributes)) if (!tag.hasAttribute(name)) element.removeAttribute(name);
+        for (const { name, value } of Array.from(tag.attributes)) if (element.getAttribute(name) !== value) element.setAttribute(name, value);
       } else {
         while (element.firstChild) tag.appendChild(element.firstChild);
         element.replaceWith(tag);
@@ -295,8 +326,14 @@ function clone(root: Root, id: number, whole: boolean): Node {
   if (node === undefined) {
     // Parsed once: an open tag with its end tag, or the subtree as it is.
     const html = root.interned[at]!;
-    root.template.innerHTML = whole ? html : `${html}</${html.slice(1, html.search(/[\s>]/))}>`;
-    node = root.nodes[at] = root.template.content.firstChild!;
+    const key = whole ? html : `${html}</${html.slice(1, html.search(/[\s>]/))}>`;
+    node = root.parsed.get(key);
+    if (node === undefined) {
+      root.template.innerHTML = key;
+      node = root.template.content.firstChild!;
+      root.parsed.set(key, node);
+    }
+    root.nodes[at] = node;
   }
   return node.cloneNode(whole);
 }

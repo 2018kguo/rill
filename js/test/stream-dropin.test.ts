@@ -40,6 +40,29 @@ test("streams Streamdown's DOM at every update, without React per block", async 
   await theirs.unmount();
 });
 
+test("a text with footnotes and link definitions streams as one block", async () => {
+  const text = [
+    "# Notes\n\nRetries[^jitter] follow [the guide][guide] and [policy].\n\n",
+    "- [x] Done[^jitter]\n\n[^jitter]: Full jitter, see [policy].\n\n    Second paragraph.\n\n",
+    "[guide]: https://example.com/guide \"Guide\"\n[policy]: https://example.com/policy\n\n",
+    "```ts\nconst a = 1;\n```\n\nDone.\n",
+  ].join("");
+  const ours = mount(RillStreamdown);
+  const theirs = mount(Streamdown);
+  const before = blockRenders.rill + blockRenders.streamdown;
+  for (let end = 1; end <= text.length; end += 3) {
+    await ours.render(text.slice(0, end), { isAnimating: true });
+    await theirs.render(text.slice(0, end), { isAnimating: true });
+    assert.equal(ours.host.innerHTML, theirs.host.innerHTML, JSON.stringify(text.slice(0, end)));
+  }
+  await ours.render(text, { isAnimating: false });
+  await theirs.render(text, { isAnimating: false });
+  assert.equal(ours.host.innerHTML, theirs.host.innerHTML);
+  assert.equal(blockRenders.rill + blockRenders.streamdown, before);
+  await ours.unmount();
+  await theirs.unmount();
+});
+
 test("the benchmark's props (dir, no line numbers, no code height) stream too", async () => {
   const props = { mode: "streaming", dir: "ltr", controls: false, lineNumbers: false, codeBlockMaxHeight: 0 };
   const ours = mount(RillStreamdown);

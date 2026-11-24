@@ -32,7 +32,16 @@ const ALPHABETS: [name: string, pieces: string[], depth: number, controls?: bool
   ["unicode", ["*", "`", "é", "😀", "“", " ", "\n\n", "~"], 5],
   ["mixed", ["**", "*", "_", "`", "a", " ", "\n", "# ", "\\", "é"], 5],
   ["controls", ["```js\n", "a", "\n", "```", "| a |\n|--|\n", "| b |", "\n\n"], 5, true],
+  ["footnotes", ["[^a]", "[^a]: ", "[c]", "[c]: /u", "x", "\n", "\n\n", "    ", "- "], 5],
 ];
+
+/** Each tag's attributes in name order: an element updated in place (as React updates
+ * one, new attributes last) and one built fresh are the same element. The drop-in test
+ * checks the order, streaming as Streamdown does. */
+const sortAttributes = (html: string) =>
+  html.replace(/<([a-z][\w-]*)((?:\s[\w:-]+(?:="[^"]*")?)*)(\s*\/?)>/g, (_, tag: string, attributes: string, end: string) =>
+    `<${tag}${(attributes.match(/\s[\w:-]+(?:="[^"]*")?/g) ?? []).sort().join("")}${end}>`
+  );
 
 for (const [name, pieces, depth, controls = false] of ALPHABETS) {
 /** A session rendering for Streamdown's `controls` and `isAnimating`. */
@@ -66,12 +75,17 @@ const streamWith = (controls: boolean, animating: boolean) => {
           // (With controls, a fresh Streamdown: its memoized code blocks keep the
           // `data-incomplete` of a longer text the walk cut back from.)
           const fresh = controls ? mount(Streamdown) : theirs;
-          const want = await fresh.render(text, { isAnimating: true, controls });
+          await fresh.render(text, { isAnimating: true, controls });
+          // (Streamdown's own text nodes normalized too: a dropped footnote item leaves
+          // two line endings apart.)
+          const theirsSettled = fresh.host.cloneNode(true) as Element;
+          theirsSettled.normalize();
+          const want = `${fresh.host.innerHTML}\n${textNodes(theirsSettled)}`;
           if (controls) await fresh.unmount();
-          if (got !== want) {
+          if (sortAttributes(got) !== sortAttributes(want)) {
             let at = 0;
             while (got[at] === want[at]) at += 1;
-            assert.fail(`${JSON.stringify(text)}\n  ours:       …${got.slice(at - 60, at + 80)}\n  Streamdown: …${want.slice(at - 60, at + 80)}`);
+            assert.fail(`${JSON.stringify(text)}\n  ours:       …${JSON.stringify(got.slice(at - 60, at + 80))}\n  Streamdown: …${JSON.stringify(want.slice(at - 60, at + 80))}`);
           }
         }
         if (left > 1) await walk(text, left - 1);

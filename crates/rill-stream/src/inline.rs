@@ -5,10 +5,10 @@
 //! The scan records what is not plain text as events; the emit pass writes the tokens
 //! (see `tokens`), the plain text between events copied as it is.
 
-use rill_unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
 use crate::simd::ByteSet;
 use crate::tokens::{Out, tag};
 use crate::{Fallback, Result};
+use rill_unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
 
 /// Units past a resume point that scanning before it may read.
 const LOOKAHEAD: usize = 3;
@@ -38,8 +38,95 @@ fn ascii(unit: u16) -> u8 {
     if unit < 0x80 { unit as u8 } else { 0x80 }
 }
 
+/// A text's definitions and footnotes (Streamdown keeps a text with any in one block).
+#[derive(Default)]
+pub(crate) struct Refs {
+    /// Link definitions: normalized label, destination (the first definition wins).
+    pub links: Vec<(Vec<u16>, String)>,
+    /// Footnote definitions: lowercased label, node (the first definition wins).
+    pub notes: Vec<(Vec<u16>, u32)>,
+    /// Footnotes called so far, in first-call order: `notes` index, call count.
+    pub calls: Vec<(u32, u32)>,
+}
+
+impl Refs {
+    pub fn clear(&mut self) {
+        self.links.clear();
+        self.notes.clear();
+        self.calls.clear();
+    }
+
+    fn link(&self, label: &[u16]) -> Option<&str> {
+        self.links
+            .iter()
+            .find(|(name, _)| name == label)
+            .map(|(_, destination)| destination.as_str())
+    }
+
+    fn note(&self, label: &[u16]) -> Option<u32> {
+        self.notes
+            .iter()
+            .position(|(name, _)| {
+                name.len() == label.len() && name.iter().zip(label).all(|(&a, &b)| a == lower(b))
+            })
+            .map(|at| at as u32)
+    }
+
+    /// A call of footnote `note`: its number.
+    fn call(&mut self, note: u32) -> u32 {
+        match self.calls.iter().position(|&(called, _)| called == note) {
+            Some(at) => {
+                self.calls[at].1 += 1;
+                at as u32 + 1
+            }
+            None => {
+                self.calls.push((note, 1));
+                self.calls.len() as u32
+            }
+        }
+    }
+}
+
+pub(crate) fn lower(unit: u16) -> u16 {
+    if (0x41..=0x5A).contains(&unit) {
+        unit + 32
+    } else {
+        unit
+    }
+}
+
+/// A footnote label's units: `[A-Za-z0-9_-]` (Streamdown's test; others take the exact path).
+pub(crate) fn note_unit(unit: u16) -> bool {
+    unit < 0x80
+        && (unit as u8 == b'_' || unit as u8 == b'-' || (unit as u8).is_ascii_alphanumeric())
+}
+
+/// micromark's `normalizeIdentifier` for an ASCII label (whitespace collapsed, case
+/// folded); `None` for one this does not fold (non-ASCII, escapes, brackets).
+pub(crate) fn normalize_label(label: &[u16]) -> Option<Vec<u16>> {
+    let mut out = Vec::with_capacity(label.len());
+    for &unit in label {
+        match unit {
+            0x20 | 0x09 | 0x0A | 0x0D => {
+                if out.last().is_some_and(|&last| last != 0x20) {
+                    out.push(0x20);
+                }
+            }
+            0x5B..=0x5D => return None,
+            0x80.. => return None,
+            _ => out.push(lower(unit)),
+        }
+    }
+    if out.last() == Some(&0x20) {
+        out.pop();
+    }
+    (!out.is_empty() && label.len() <= 999).then_some(out)
+}
+
 #[derive(Default)]
 pub struct Inline {
+    /// The text's definitions and footnotes (empty outside a text Streamdown keeps whole).
+    pub(crate) refs: Refs,
     runs: Vec<Run>,
     /// Indices into `runs` still able to match.
     delims: Vec<usize>,
@@ -133,6 +220,8 @@ enum Kind {
     Autolink { link: u32, start: u32, end: u32 },
     /// A character reference: `decoded[start..end]`.
     Decoded { start: u32, end: u32 },
+    /// A footnote call of `refs.notes[note]`.
+    Note { note: u32 },
 }
 
 /// A run of `*` or `_`.
@@ -179,7 +268,11 @@ impl Tags {
     fn write(self, out: &mut Out, open: bool) {
         for bit in 0..self.len {
             if open {
-                out.open(if self.bits >> bit & 1 == 1 { tag::STRONG } else { tag::EM });
+                out.open(if self.bits >> bit & 1 == 1 {
+                    tag::STRONG
+                } else {
+                    tag::EM
+                });
             } else {
                 out.close();
             }
@@ -240,12 +333,18 @@ impl Inline {
         let start = out.offset_of(text);
         let unchanged = stable.saturating_sub(start.unwrap_or(usize::MAX));
         let mut from = 0;
-        if start == Some(self.resume.start) && self.resume.at > 0 && self.resume.at + LOOKAHEAD <= unchanged.min(text.len()) {
+        if start == Some(self.resume.start)
+            && self.resume.at > 0
+            && self.resume.at + LOOKAHEAD <= unchanged.min(text.len())
+        {
             out.extend(&self.resume.words, &self.resume.text, &self.resume.origins);
             from = self.resume.at;
             self.first = self.resume.first;
         }
-        let base = (out.words.len() - self.resume.words.len() * usize::from(from > 0), out.text.len() - self.resume.text.len() * usize::from(from > 0));
+        let base = (
+            out.words.len() - self.resume.words.len() * usize::from(from > 0),
+            out.text.len() - self.resume.text.len() * usize::from(from > 0),
+        );
         self.scan(text, from)?;
         // Brackets still open may close later.
         if let Some(first) = self.brackets.first() {
@@ -254,14 +353,22 @@ impl Inline {
         self.resolve(0, 0)?;
         // The next render's resume point: the latest one this render can vouch for.
         // (The next render checks that the text is the same through it and its lookahead.)
-        let next = start.and_then(|_| self.checkpoint(text, from, text.len().saturating_sub(LOOKAHEAD)));
+        let next =
+            start.and_then(|_| self.checkpoint(text, from, text.len().saturating_sub(LOOKAHEAD)));
         self.resume.at = 0;
         let mut cursor = from;
         // mdast-util-to-hast trims the start of the first text after a hard break, wherever
         // it lands (inside a link, say).
         let mut broke = false;
         let text_after = |out: &mut Out, units: &[u16], broke: &mut bool| {
-            let units = if *broke { &units[units.iter().take_while(|&&u| u == 0x20 || u == 0x09).count()..] } else { units };
+            let units = if *broke {
+                &units[units
+                    .iter()
+                    .take_while(|&&u| u == 0x20 || u == 0x09)
+                    .count()..]
+            } else {
+                units
+            };
             if !units.is_empty() {
                 *broke = false;
                 out.text(units);
@@ -270,9 +377,14 @@ impl Inline {
         // The token before the content: text the content joins (a list item's line
         // ending) is not the content's to replay, so no resume point then.
         let first = self.first;
-        let before = base.0.checked_sub(1).map(|at| (out.words[at], out.origins[at]));
+        let before = base
+            .0
+            .checked_sub(1)
+            .map(|at| (out.words[at], out.origins[at]));
         let record = |out: &Out, resume: &mut Resume, at: usize| {
-            if before.is_some_and(|before| (out.words[base.0 - 1], out.origins[base.0 - 1]) != before) {
+            if before
+                .is_some_and(|before| (out.words[base.0 - 1], out.origins[base.0 - 1]) != before)
+            {
                 return;
             }
             resume.words.clear();
@@ -329,7 +441,11 @@ impl Inline {
                     out.repeat(run.marker, run.count);
                     run.opens.write(out, true);
                 }
-                Kind::Open { link: NO_LINK } => text_after(out, &text[event.at as usize..event.resume as usize], &mut broke),
+                Kind::Open { link: NO_LINK } => text_after(
+                    out,
+                    &text[event.at as usize..event.resume as usize],
+                    &mut broke,
+                ),
                 Kind::Open { link } => self.links[link as usize].open(out),
                 Kind::Close { link } => self.links[link as usize].close(out),
                 Kind::Autolink { link, start, end } => {
@@ -337,7 +453,18 @@ impl Inline {
                     text_after(out, &text[start as usize..end as usize], &mut broke);
                     self.links[link as usize].close(out);
                 }
-                Kind::Decoded { start, end } => text_after(out, &self.decoded[start as usize..end as usize], &mut broke),
+                Kind::Decoded { start, end } => {
+                    text_after(out, &self.decoded[start as usize..end as usize], &mut broke)
+                }
+                Kind::Note { note } => {
+                    broke = false;
+                    let number = self.refs.call(note);
+                    out.open_html(SUP);
+                    out.open(tag::LINK);
+                    out.ascii(&number.to_string());
+                    out.close();
+                    out.close();
+                }
             }
             cursor = event.resume as usize;
         }
@@ -357,7 +484,9 @@ impl Inline {
     /// inside no matched emphasis, in plain text after a unit that starts nothing (so
     /// the scan from there is the scan through there).
     fn checkpoint(&self, text: &[u16], from: usize, limit: usize) -> Option<usize> {
-        let mut ceiling = limit.min(self.open_ticks.unwrap_or(usize::MAX)).min(self.ceiling);
+        let mut ceiling = limit
+            .min(self.open_ticks.unwrap_or(usize::MAX))
+            .min(self.ceiling);
         for run in &self.runs {
             if run.can_open && run.count > 0 {
                 ceiling = ceiling.min(run.at as usize);
@@ -396,7 +525,10 @@ impl Inline {
     /// the run of `gfmAtext` before it, left to right. Returns where it ends.
     fn literal(&mut self, text: &[u16], trigger: usize, from: usize) -> Result<Option<usize>> {
         use rill_cmark::autolink_literal::{LiteralKind, scan};
-        let floor = self.events.last().map_or(from, |event| (event.resume as usize).max(from));
+        let floor = self
+            .events
+            .last()
+            .map_or(from, |event| (event.resume as usize).max(from));
         let mut start = trigger;
         while start > 0 && atext(text[start - 1]) {
             start -= 1;
@@ -409,14 +541,30 @@ impl Inline {
         // ponytail: the rest of the content, per trigger (quadratic in triggers).
         let s = String::from_utf16_lossy(&text[start..]);
         let previous = text[..start].last().map(|&unit| {
-            let pair = if (0xDC00..0xE000).contains(&unit) && start >= 2 { &text[start - 2..start] } else { &text[start - 1..start] };
-            char::decode_utf16(pair.iter().copied()).last().and_then(|c| c.ok()).unwrap_or('\u{FFFD}')
+            let pair = if (0xDC00..0xE000).contains(&unit) && start >= 2 {
+                &text[start - 2..start]
+            } else {
+                &text[start - 1..start]
+            };
+            char::decode_utf16(pair.iter().copied())
+                .last()
+                .and_then(|c| c.ok())
+                .unwrap_or('\u{FFFD}')
         });
         // More text could still make or grow a literal unless whitespace follows.
         let settled = |at: usize| text[at..].iter().any(|&unit| unit == 0x20 || unit == 0x0A);
         for p in start..=trigger {
-            let before = if p == start { previous } else { Some(char::from(text[p - 1] as u8)) };
-            let Some((end, kind)) = scan(&s, p - start, before) else { continue };
+            let before = if p == start {
+                previous
+            } else {
+                Some(char::from(text[p - 1] as u8))
+            };
+            let Some((end, kind)) = scan(&s, p - start, before) else {
+                continue;
+            };
+            if text[p] == u16::from(b'_') {
+                return Err(Fallback); // ponytail: whether attention takes the `_` first
+            }
             let end = start + s[..end].encode_utf16().count();
             // ponytail: backslashes in a literal (the exact path's resolution after it
             // differs, rarely matters).
@@ -433,23 +581,48 @@ impl Inline {
                 self.ceiling = self.ceiling.min(start);
             }
             let link = self.link(&href);
-            self.event(p, end, Kind::Autolink { link, start: p as u32, end: end as u32 });
+            self.event(
+                p,
+                end,
+                Kind::Autolink {
+                    link,
+                    start: p as u32,
+                    end: end as u32,
+                },
+            );
             return Ok(Some(end));
         }
         // mdast's autolink transform may still link what the tokenizer did not (after
         // punctuation, a character reference): the exact path, unless its patterns cannot
         // match yet (`https://` or `www.` with no domain, `a@` with no dotted one).
-        let word = |unit: Option<&u16>| unit.is_some_and(|&unit| atext(unit) && unit != u16::from(b'+'));
+        let word =
+            |unit: Option<&u16>| unit.is_some_and(|&unit| atext(unit) && unit != u16::from(b'+'));
         let may_link = match ascii(text[trigger]) {
             // (An escape or a reference there may decode to one.)
-            b':' => word(text.get(trigger + 3)) || matches!(text.get(trigger + 3).map(|&unit| ascii(unit)), Some(b'\\' | b'&')),
+            b':' => {
+                word(text.get(trigger + 3))
+                    || matches!(
+                        text.get(trigger + 3).map(|&unit| ascii(unit)),
+                        Some(b'\\' | b'&')
+                    )
+            }
             // (Its `www(?=\.)[-.\w]+` takes `www.` alone.)
             b'.' => true,
             _ => {
-                let label = |at: usize| at + text[at..].iter().take_while(|&&unit| word(Some(&unit)) && unit != u16::from(b'.')).count();
+                let label = |at: usize| {
+                    at + text[at..]
+                        .iter()
+                        .take_while(|&&unit| word(Some(&unit)) && unit != u16::from(b'.'))
+                        .count()
+                };
                 let end = label(trigger + 1);
-                text[trigger + 1..].iter().take(64).any(|&unit| matches!(ascii(unit), b'\\' | b'&'))
-                    || end > trigger + 1 && text.get(end) == Some(&u16::from(b'.')) && label(end + 1) > end + 1
+                text[trigger + 1..]
+                    .iter()
+                    .take(64)
+                    .any(|&unit| matches!(ascii(unit), b'\\' | b'&'))
+                    || end > trigger + 1
+                        && text.get(end) == Some(&u16::from(b'.'))
+                        && label(end + 1) > end + 1
             }
         };
         if may_link {
@@ -462,7 +635,11 @@ impl Inline {
     }
 
     fn event(&mut self, at: usize, resume: usize, kind: Kind) {
-        self.events.push(Event { at: at as u32, resume: resume as u32, kind });
+        self.events.push(Event {
+            at: at as u32,
+            resume: resume as u32,
+            kind,
+        });
     }
 
     fn scan(&mut self, text: &[u16], from: usize) -> Result {
@@ -506,7 +683,9 @@ impl Inline {
                     }
                     // As before the escape, for the autolink literals below.
                     Some(b'@') => return Err(Fallback),
-                    Some(b':') if bytes.get(at + 2..at + 4) == Some(&[0x2F, 0x2F]) => return Err(Fallback),
+                    Some(b':') if bytes.get(at + 2..at + 4) == Some(&[0x2F, 0x2F]) => {
+                        return Err(Fallback);
+                    }
                     Some(b'.') if www_before(bytes, at) => return Err(Fallback),
                     Some(next) if next.is_ascii_punctuation() => {
                         self.event(at, at + 2, Kind::Literal(escaped(next)));
@@ -522,7 +701,15 @@ impl Inline {
                     match closing_backticks(bytes, at + run, run) {
                         Some(end) => {
                             let trim = broke_at == at;
-                            self.event(at, end + run, Kind::Code { start: (at + run) as u32, end: end as u32, trim });
+                            self.event(
+                                at,
+                                end + run,
+                                Kind::Code {
+                                    start: (at + run) as u32,
+                                    end: end as u32,
+                                    trim,
+                                },
+                            );
                             at = end + run;
                         }
                         None => {
@@ -533,10 +720,14 @@ impl Inline {
                     }
                 }
                 b'&' => match entity(bytes, at) {
+                    Some((_, decoded)) if decoded == UNKNOWN => return Err(Fallback),
                     Some((end, decoded)) => {
                         let start = self.decoded.len() as u32;
                         self.decoded.extend(decoded.encode_utf16());
-                        let kind = Kind::Decoded { start, end: self.decoded.len() as u32 };
+                        let kind = Kind::Decoded {
+                            start,
+                            end: self.decoded.len() as u32,
+                        };
                         self.event(at, end, kind);
                         at = end;
                     }
@@ -552,9 +743,21 @@ impl Inline {
                 b'<' => {
                     if let Some((end, start, close, email)) = autolink(bytes, at) {
                         let content = String::from_utf16_lossy(&bytes[start..close]);
-                        let href = if email { format!("mailto:{content}") } else { content };
+                        let href = if email {
+                            format!("mailto:{content}")
+                        } else {
+                            content
+                        };
                         let link = self.link(&href);
-                        self.event(at, end, Kind::Autolink { link, start: start as u32, end: close as u32 });
+                        self.event(
+                            at,
+                            end,
+                            Kind::Autolink {
+                                link,
+                                start: start as u32,
+                                end: close as u32,
+                            },
+                        );
                         at = end;
                     } else if bytes
                         .get(at + 1)
@@ -569,10 +772,48 @@ impl Inline {
                 }
                 b'[' => {
                     // An image (`![`, the `!` not escaped): the exact path.
-                    if at > 0 && bytes[at - 1] == u16::from(b'!') && bytes[..at - 1].iter().rev().take_while(|&&u| u == u16::from(b'\\')).count() % 2 == 0 {
+                    if at > 0
+                        && bytes[at - 1] == u16::from(b'!')
+                        && bytes[..at - 1]
+                            .iter()
+                            .rev()
+                            .take_while(|&&u| u == u16::from(b'\\'))
+                            .count()
+                            % 2
+                            == 0
+                    {
                         return Err(Fallback);
                     }
-                    self.brackets.push(Bracket { event: self.events.len(), delims: self.delims.len(), tildes: self.tildes.len(), active: true });
+                    // A footnote call (`[^label]`, the footnote defined).
+                    if !self.refs.notes.is_empty() && bytes.get(at + 1) == Some(&u16::from(b'^')) {
+                        let label = bytes[at + 2..]
+                            .iter()
+                            .take_while(|&&unit| note_unit(unit))
+                            .count();
+                        let close = at + 2 + label;
+                        if bytes.get(close) == Some(&u16::from(b']')) && (1..=200).contains(&label)
+                        {
+                            if let Some(note) = self.refs.note(&bytes[at + 2..close]) {
+                                if !self.brackets.is_empty() {
+                                    return Err(Fallback); // ponytail: a call in a link's text
+                                }
+                                self.event(at, close + 1, Kind::Note { note });
+                                at = close + 1;
+                                continue;
+                            }
+                        } else if bytes
+                            .get(close)
+                            .is_some_and(|&unit| unit != u16::from(b']'))
+                        {
+                            return Err(Fallback); // ponytail: other labels
+                        }
+                    }
+                    self.brackets.push(Bracket {
+                        event: self.events.len(),
+                        delims: self.delims.len(),
+                        tildes: self.tildes.len(),
+                        active: true,
+                    });
                     self.event(at, at + 1, Kind::Open { link: NO_LINK });
                     at += 1;
                 }
@@ -581,14 +822,25 @@ impl Inline {
                         at += 1;
                         continue; // text
                     };
-                    let resource = if bracket.active { inline_link(bytes, at + 1) } else { None };
-                    // Not a link (no definitions: a reference is text): the brackets are text.
+                    let mut resource = if bracket.active {
+                        inline_link(bytes, at + 1)
+                    } else {
+                        None
+                    };
+                    if resource.is_none() && bracket.active && !self.refs.links.is_empty() {
+                        resource =
+                            self.reference(bytes, self.events[bracket.event].at as usize, at)?;
+                    }
+                    // Not a link: the brackets are text.
                     let Some((end, destination)) = resource else {
                         let open = self.events[bracket.event].at as usize;
                         self.ceiling = self.ceiling.min(open);
                         at += 1;
                         continue;
                     };
+                    if destination.contains(UNKNOWN) {
+                        return Err(Fallback);
+                    }
                     let link = self.link(&destination);
                     let open = self.events[bracket.event].at;
                     self.events[bracket.event].kind = Kind::Open { link };
@@ -631,8 +883,10 @@ impl Inline {
                     }
                     let before = class(at.checked_sub(1).map(|at| text[at]));
                     let after = class(text.get(at + length).copied());
-                    let mut left = after != Class::Space && (after != Class::Punct || before != Class::Other);
-                    let mut right = before != Class::Space && (before != Class::Punct || after != Class::Other);
+                    let mut left =
+                        after != Class::Space && (after != Class::Punct || before != Class::Other);
+                    let mut right =
+                        before != Class::Space && (before != Class::Punct || after != Class::Other);
                     // GFM strikethrough makes `~` an attention marker: `*` and `_` open
                     // before it and close after it.
                     if byte != b'~' {
@@ -643,7 +897,10 @@ impl Inline {
                     let (can_open, can_close) = if byte != b'_' {
                         (left, right)
                     } else {
-                        (left && (!right || before == Class::Punct), right && (!left || after == Class::Punct))
+                        (
+                            left && (!right || before == Class::Punct),
+                            right && (!left || after == Class::Punct),
+                        )
                     };
                     if can_open || can_close {
                         let length32 = length as u32;
@@ -691,7 +948,11 @@ impl Inline {
         self.strikethrough(tildes, None)?;
         // ponytail: a strikethrough crossing emphasis takes the exact path.
         let (emphasis, dels) = (&self.pairs[emphasis..dels], &self.pairs[dels..]);
-        if dels.iter().any(|&(o, c)| emphasis.iter().any(|&(s, e)| (s < o && o < e && e < c) || (o < s && s < c && c < e))) {
+        if dels.iter().any(|&(o, c)| {
+            emphasis
+                .iter()
+                .any(|&(s, e)| (s < o && o < e && e < c) || (o < s && s < c && c < e))
+        }) {
             return Err(Fallback);
         }
         Ok(())
@@ -709,20 +970,30 @@ impl Inline {
         while closer_at < self.tildes.len() {
             let c = &self.runs[self.tildes[closer_at]];
             let (count, can_close) = (c.count, c.can_close);
-            let found = if can_close { (tildes..closer_at).rev().find(|&o| self.runs[self.tildes[o]].can_open && self.runs[self.tildes[o]].count == count) } else { None };
+            let found = if can_close {
+                (tildes..closer_at).rev().find(|&o| {
+                    self.runs[self.tildes[o]].can_open && self.runs[self.tildes[o]].count == count
+                })
+            } else {
+                None
+            };
             let Some(opener_at) = found else {
                 closer_at += 1;
                 continue;
             };
             // ponytail: micromark leaves the openers between them able to pair later
             // (crossing); the exact path.
-            if self.tildes[opener_at + 1..closer_at].iter().any(|&run| self.runs[run].can_open) {
+            if self.tildes[opener_at + 1..closer_at]
+                .iter()
+                .any(|&run| self.runs[run].can_open)
+            {
                 return Err(Fallback);
             }
             let (opener, closer) = (self.tildes[opener_at], self.tildes[closer_at]);
             let (start, end) = (self.runs[opener].end, self.runs[closer].at);
             if let Some(bottom) = region {
-                let lo = bottom + self.delims[bottom..].partition_point(|&run| self.runs[run].at < start);
+                let lo = bottom
+                    + self.delims[bottom..].partition_point(|&run| self.runs[run].at < start);
                 let hi = lo + self.delims[lo..].partition_point(|&run| self.runs[run].at < end);
                 let rest = self.delims.split_off(hi);
                 let inner = self.delims.split_off(lo);
@@ -735,7 +1006,8 @@ impl Inline {
                 self.runs[run].count = 0;
                 self.runs[run].del = del;
             }
-            self.pairs.push((self.runs[opener].at, self.runs[closer].end));
+            self.pairs
+                .push((self.runs[opener].at, self.runs[closer].end));
             self.tildes.drain(opener_at..=closer_at);
             closer_at = opener_at;
         }
@@ -769,12 +1041,17 @@ impl Inline {
             };
             let opener = self.delims[opener_at];
             let open_count = self.runs[opener].count;
-            let used = if open_count >= 2 && close_count >= 2 { 2 } else { 1 };
+            let used = if open_count >= 2 && close_count >= 2 {
+                2
+            } else {
+                1
+            };
             self.runs[opener].count -= used;
             self.runs[opener].opens.push_front(used == 2)?;
             self.runs[closer].count -= used;
             self.runs[closer].closes.push_back(used == 2)?;
-            self.pairs.push((self.runs[opener].at, self.runs[closer].end));
+            self.pairs
+                .push((self.runs[opener].at, self.runs[closer].end));
             // Runs between them can no longer match.
             self.delims.drain(opener_at + 1..closer_at);
             closer_at = opener_at + 1;
@@ -792,6 +1069,56 @@ impl Inline {
 
 impl Inline {
     /// A link to `destination` (decoded): how Streamdown renders it.
+    /// A reference link closing at `close` (`[text][label]`, `[text][]`, `[text]`) whose
+    /// label is defined: where it ends, and the destination.
+    fn reference(
+        &self,
+        bytes: &[u16],
+        open: usize,
+        close: usize,
+    ) -> Result<Option<(usize, String)>> {
+        let text = &bytes[open + 1..close];
+        let (label, end) = if bytes.get(close + 1) == Some(&u16::from(b'[')) {
+            let Some(length) = bytes[close + 2..]
+                .iter()
+                .position(|&unit| unit == u16::from(b']') || unit == u16::from(b'['))
+            else {
+                return Err(Fallback); // ponytail: a label still open
+            };
+            let end = close + 2 + length;
+            if bytes[end] == u16::from(b'[') {
+                return Err(Fallback);
+            }
+            if length == 0 {
+                (text, end + 1)
+            } else {
+                (&bytes[close + 2..end], end + 1)
+            }
+        } else if bytes.get(close + 1) == Some(&u16::from(b'\\')) {
+            return Err(Fallback); // ponytail: an escape right after a shortcut reference
+        } else {
+            (text, close + 1)
+        };
+        let Some(label) = normalize_label(label) else {
+            // A label this does not fold may name a definition; text with brackets inside
+            // (no label) is text.
+            return if text
+                .iter()
+                .any(|&unit| unit >= 0x80 || unit == u16::from(b'\\'))
+            {
+                Err(Fallback)
+            } else {
+                Ok(None)
+            };
+        };
+        match self.refs.link(&label) {
+            Some(destination) => Ok(Some((end, destination.to_string()))),
+            // An undefined full reference: micromark may still read a shortcut there.
+            None if end > close + 1 => Err(Fallback),
+            None => Ok(None),
+        }
+    }
+
     fn link(&mut self, destination: &str) -> u32 {
         let link = if destination == "streamdown:incomplete-link" {
             Link::Incomplete
@@ -799,9 +1126,15 @@ impl Inline {
             // micromark's normalizeUri, the sanitize schema's protocols, rehype-harden.
             let href = rill_url::normalize_uri(destination.into());
             let href = rill_url::protocol_allowed(&href, HREF_PROTOCOLS).then_some(href);
-            match href.as_deref().map(|href| rill_url::transform_url(href, rill_url::Resource::Link)) {
+            match href
+                .as_deref()
+                .map(|href| rill_url::transform_url(href, rill_url::Resource::Link))
+            {
                 Some(Ok(_)) => Link::Button,
-                _ => Link::Blocked(format!("Blocked URL: {}", href.as_deref().unwrap_or("undefined"))),
+                _ => Link::Blocked(format!(
+                    "Blocked URL: {}",
+                    href.as_deref().unwrap_or("undefined")
+                )),
             }
         };
         self.links.push(link);
@@ -809,8 +1142,20 @@ impl Inline {
     }
 }
 
+/// Streamdown's `sup`.
+pub(crate) const SUP: &str = r#"<sup class="text-sm" data-streamdown="superscript">"#;
+
 /// The protocols Streamdown's sanitize schema allows in `href`.
-const HREF_PROTOCOLS: &[&str] = &["http", "https", "irc", "ircs", "mailto", "xmpp", "tel", "streamdown"];
+const HREF_PROTOCOLS: &[&str] = &[
+    "http",
+    "https",
+    "irc",
+    "ircs",
+    "mailto",
+    "xmpp",
+    "tel",
+    "streamdown",
+];
 
 impl Link {
     fn open(&self, out: &mut Out) {
@@ -828,7 +1173,7 @@ impl Link {
 
     fn close(&self, out: &mut Out) {
         if let Link::Blocked(_) = self {
-            out.split_text();
+            // (React keeps it a text node of its own; the HTML is the same.)
             out.ascii(" [blocked]");
         }
         out.close();
@@ -855,7 +1200,14 @@ const MAX_REFERENCE: usize = 33;
 fn entity(units: &[u16], at: usize) -> Option<(usize, String)> {
     let window = &units[at..units.len().min(at + MAX_REFERENCE)];
     let semi = window.iter().position(|&u| u == u16::from(b';'))?;
-    let body: String = window[1..semi].iter().map(|&u| char::from_u32(u32::from(u)).filter(char::is_ascii).map_or('\u{80}', |c| c)).collect();
+    let body: String = window[1..semi]
+        .iter()
+        .map(|&u| {
+            char::from_u32(u32::from(u))
+                .filter(char::is_ascii)
+                .map_or('\u{80}', |c| c)
+        })
+        .collect();
     if !body.is_ascii() || body.is_empty() {
         return None;
     }
@@ -878,9 +1230,117 @@ fn entity(units: &[u16], at: usize) -> Option<(usize, String)> {
         if !body.chars().all(|c| c.is_ascii_alphanumeric()) {
             return None;
         }
-        rill_cmark::named_entity(&body)?.to_owned()
+        // A name outside the common ones may still be one of HTML's 2,231: the exact path
+        // decides (`UNKNOWN`), which keeps their table out of the build.
+        common_entity(&body).unwrap_or(UNKNOWN).to_owned()
     };
     Some((at + semi + 1, decoded))
+}
+
+/// What [`entity`] decodes a name it does not know to.
+const UNKNOWN: &str = "\u{FFFF}";
+
+/// The named character references model answers use.
+fn common_entity(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "amp" | "AMP" => "&",
+        "lt" | "LT" => "<",
+        "gt" | "GT" => ">",
+        "quot" | "QUOT" => "\"",
+        "apos" => "'",
+        "nbsp" => "\u{a0}",
+        "copy" | "COPY" => "©",
+        "reg" | "REG" => "®",
+        "trade" | "TRADE" => "™",
+        "hellip" | "mldr" => "…",
+        "mdash" => "—",
+        "ndash" => "–",
+        "lsquo" => "‘",
+        "rsquo" | "rsquor" => "’",
+        "ldquo" => "“",
+        "rdquo" | "rdquor" => "”",
+        "laquo" => "«",
+        "raquo" => "»",
+        "bull" | "bullet" => "•",
+        "middot" | "centerdot" => "·",
+        "times" => "×",
+        "divide" | "div" => "÷",
+        "deg" => "°",
+        "plusmn" | "pm" => "±",
+        "minus" => "−",
+        "le" => "≤",
+        "ge" => "≥",
+        "ne" => "≠",
+        "asymp" | "ap" => "≈",
+        "infin" => "∞",
+        "larr" | "leftarrow" => "←",
+        "rarr" | "rightarrow" => "→",
+        "uarr" | "uparrow" => "↑",
+        "darr" | "downarrow" => "↓",
+        "harr" | "leftrightarrow" => "↔",
+        "rArr" | "Rightarrow" | "Implies" => "⇒",
+        "lArr" | "Leftarrow" => "⇐",
+        "para" => "¶",
+        "sect" => "§",
+        "euro" => "€",
+        "pound" => "£",
+        "yen" => "¥",
+        "cent" => "¢",
+        "frac12" | "half" => "½",
+        "frac14" => "¼",
+        "frac34" => "¾",
+        "sup2" => "²",
+        "sup3" => "³",
+        "micro" => "µ",
+        "alpha" => "α",
+        "beta" => "β",
+        "gamma" => "γ",
+        "delta" => "δ",
+        "pi" => "π",
+        "sigma" => "σ",
+        "lambda" => "λ",
+        "mu" => "μ",
+        "theta" => "θ",
+        "omega" => "ω",
+        "Delta" => "Δ",
+        "Sigma" => "Σ",
+        "Omega" => "Ω",
+        "check" | "checkmark" => "✓",
+        "cross" => "✗",
+        "star" => "☆",
+        "starf" | "bigstar" => "★",
+        "hearts" | "heartsuit" => "♥",
+        "zwj" => "\u{200d}",
+        "zwnj" => "\u{200c}",
+        "shy" => "\u{ad}",
+        "ensp" => "\u{2002}",
+        "emsp" => "\u{2003}",
+        "thinsp" | "ThinSpace" => "\u{2009}",
+        "num" => "#",
+        "excl" => "!",
+        "dollar" => "$",
+        "percnt" => "%",
+        "ast" | "midast" => "*",
+        "lpar" => "(",
+        "rpar" => ")",
+        "lsqb" | "lbrack" => "[",
+        "rsqb" | "rbrack" => "]",
+        "lcub" | "lbrace" => "{",
+        "rcub" | "rbrace" => "}",
+        "verbar" | "vert" | "VerticalLine" => "|",
+        "bsol" => "\\",
+        "sol" => "/",
+        "colon" => ":",
+        "semi" => ";",
+        "equals" => "=",
+        "quest" => "?",
+        "commat" => "@",
+        "grave" | "DiacriticalGrave" => "`",
+        "Hat" => "^",
+        "lowbar" | "UnderBar" => "_",
+        "tilde" | "DiacriticalTilde" => "˜",
+        _ => return None,
+    })
 }
 
 /// An autolink at `at` (`<scheme:...>` or `<email>`): where it ends, its content's
@@ -896,7 +1356,11 @@ fn autolink(units: &[u16], at: usize) -> Option<(usize, usize, usize, bool)> {
             && byte(content[0]).is_ascii_alphabetic()
             && content[1..colon].iter().all(|&u| matches!(byte(u), b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'.' | b'-'))
     });
-    if scheme.is_some() && content.iter().all(|&u| u > 0x20 && u != u16::from(b'<') && u != 0x7f) {
+    if scheme.is_some()
+        && content
+            .iter()
+            .all(|&u| u > 0x20 && u != u16::from(b'<') && u != 0x7f)
+    {
         return Some((close + 1, start, close, false));
     }
     // An email: atext before `@`, then labels of letters, digits and `-` (not first or
@@ -911,7 +1375,9 @@ fn autolink(units: &[u16], at: usize) -> Option<(usize, usize, usize, bool)> {
         && domain.split(|&u| u == u16::from(b'.')).all(|label| {
             !label.is_empty()
                 && label.len() <= 63
-                && label.iter().all(|&u| byte(u).is_ascii_alphanumeric() || u == u16::from(b'-'))
+                && label
+                    .iter()
+                    .all(|&u| byte(u).is_ascii_alphanumeric() || u == u16::from(b'-'))
                 && label[0] != u16::from(b'-')
                 && label[label.len() - 1] != u16::from(b'-')
         });
@@ -1018,7 +1484,11 @@ fn unescape(units: &[u16]) -> String {
     let mut at = 0;
     while at < units.len() {
         let u = units[at];
-        if u == 0x5C && units.get(at + 1).is_some_and(|&n| n < 0x80 && (n as u8).is_ascii_punctuation()) {
+        if u == 0x5C
+            && units
+                .get(at + 1)
+                .is_some_and(|&n| n < 0x80 && (n as u8).is_ascii_punctuation())
+        {
             out.push(char::from(units[at + 1] as u8));
             at += 2;
         } else if u == 0x26
@@ -1027,7 +1497,10 @@ fn unescape(units: &[u16]) -> String {
             out.push_str(&decoded);
             at = end;
         } else {
-            let end = units[at..].iter().position(|&u| u == 0x5C || u == 0x26).map_or(units.len(), |n| at + n.max(1));
+            let end = units[at..]
+                .iter()
+                .position(|&u| u == 0x5C || u == 0x26)
+                .map_or(units.len(), |n| at + n.max(1));
             out.push_str(&String::from_utf16_lossy(&units[at..end]));
             at = end;
         }
@@ -1038,7 +1511,8 @@ fn unescape(units: &[u16]) -> String {
 /// Whether `www` (any case) ends at `at`.
 /// micromark's `gfmAtext`.
 fn atext(unit: u16) -> bool {
-    unit < 0x80 && matches!(unit as u8, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.' | b'_')
+    unit < 0x80
+        && matches!(unit as u8, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'+' | b'-' | b'.' | b'_')
 }
 
 fn www_before(units: &[u16], at: usize) -> bool {
@@ -1084,7 +1558,11 @@ fn code_content(out: &mut Out, raw: &[u16], after_break: bool, indent: usize) {
             if index > 0 {
                 text.push(0x20);
             }
-            let skip = if index > 0 { line.iter().take(indent).take_while(|&&u| u == 0x20).count() } else { 0 };
+            let skip = if index > 0 {
+                line.iter().take(indent).take_while(|&&u| u == 0x20).count()
+            } else {
+                0
+            };
             text.extend_from_slice(&line[skip..]);
         }
         joined = text;
@@ -1093,11 +1571,46 @@ fn code_content(out: &mut Out, raw: &[u16], after_break: bool, indent: usize) {
         raw
     };
     let space = |u: u16| u == 0x20;
-    let strip = raw.len() >= 2 && space(raw[0]) && space(raw[raw.len() - 1]) && raw.iter().any(|&u| !space(u));
+    let strip = raw.len() >= 2
+        && space(raw[0])
+        && space(raw[raw.len() - 1])
+        && raw.iter().any(|&u| !space(u));
     let mut raw = if strip { &raw[1..raw.len() - 1] } else { raw };
     if after_break {
         let lead = raw.iter().take_while(|&&u| space(u)).count();
         raw = &raw[lead..];
     }
     out.text(raw);
+}
+
+#[cfg(test)]
+mod tests {
+    /// Each common reference decodes as HTML's table has it.
+    #[test]
+    fn common_entities_are_html_entities() {
+        let names = include_str!("inline.rs")
+            .split("fn common_entity")
+            .nth(1)
+            .unwrap()
+            .split("_ => return None")
+            .next()
+            .unwrap();
+        let mut checked = 0;
+        for line in names.lines().filter(|line| line.contains("=>")) {
+            let (names, _) = line.split_once("=>").unwrap();
+            for name in names
+                .split('|')
+                .map(|name| name.trim().trim_matches('"'))
+                .filter(|name| !name.is_empty())
+            {
+                assert_eq!(
+                    super::common_entity(name),
+                    rill_cmark::named_entity(name),
+                    "&{name};"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 100, "{checked}");
+    }
 }

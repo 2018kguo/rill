@@ -23,7 +23,10 @@ fn record() {
         .collect();
     let key = frames.join(" <- ");
     let mut sites = SITES.lock().unwrap();
-    *sites.get_or_insert_with(HashMap::new).entry(key).or_default() += 1;
+    *sites
+        .get_or_insert_with(HashMap::new)
+        .entry(key)
+        .or_default() += 1;
     INSIDE.with(|i| i.set(false));
 }
 unsafe impl GlobalAlloc for Sampling {
@@ -60,7 +63,7 @@ fn main() {
     ON.store(false, Relaxed);
     let sites = SITES.lock().unwrap().take().unwrap_or_default();
     let mut sites: Vec<_> = sites.into_iter().collect();
-    sites.sort_by(|a, b| b.1.cmp(&a.1));
+    sites.sort_by_key(|site| std::cmp::Reverse(site.1));
     for (site, count) in sites.iter().take(25) {
         println!("{:5.2}/update {site}", *count as f64 / updates as f64);
     }

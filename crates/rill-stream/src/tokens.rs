@@ -144,11 +144,20 @@ pub struct Options {
     /// `dir`: each block in a `display: contents` element of this direction (0: none, 1:
     /// `ltr`, 2: `rtl`).
     pub dir: u8,
+    /// The text is one block (Streamdown's, for a text with definitions or footnotes).
+    pub whole: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { controls: true, animating: false, line_numbers: true, code_max_height: 400, dir: 0 }
+        Self {
+            controls: true,
+            animating: false,
+            line_numbers: true,
+            code_max_height: 400,
+            dir: 0,
+            whole: false,
+        }
     }
 }
 
@@ -172,15 +181,14 @@ pub struct Out {
     agree: usize,
     /// The session's interned strings (shared by its renderings).
     pub strings: std::rc::Rc<std::cell::RefCell<Strings>>,
-    /// The next text starts a text node of its own.
-    split: bool,
     /// What the rendering depends on besides the text.
     pub options: Options,
+    /// The text turned out to need [`Options::whole`] other than it was set.
+    pub flipped: bool,
 }
 
 impl Out {
     pub fn clear(&mut self) {
-        self.split = false;
         self.words.clear();
         self.text.clear();
         self.origins.clear();
@@ -198,28 +206,20 @@ impl Out {
     pub fn offset_of(&self, text: &[u16]) -> Option<usize> {
         // Wholly inside: a buffer allocated right after the source is not part of it.
         let offset = (text.as_ptr() as usize).wrapping_sub(self.source.0) / 2;
-        (offset <= self.source.1 && text.len() <= self.source.1 - offset).then(|| self.source_at + offset)
+        (offset <= self.source.1 && text.len() <= self.source.1 - offset)
+            .then(|| self.source_at + offset)
     }
 
     /// Appends tokens as they were written before (`origins` per word, `text` the
     /// literal text).
     pub fn extend(&mut self, words: &[u32], text: &[u16], origins: &[u32]) {
-        // A split before them is spent on their first token.
-        self.split &= words.is_empty();
         self.words.extend_from_slice(words);
         self.text.extend_from_slice(text);
         self.origins.extend_from_slice(origins);
     }
 
-    /// Ends the text node: the next text starts another (as React keeps adjacent
-    /// strings apart).
-    pub fn split_text(&mut self) {
-        self.split = true;
-    }
-
     #[inline]
     fn word(&mut self, word: u32) {
-        self.split = false;
         self.words.push(word);
         self.origins.push(NOWHERE);
     }
@@ -243,7 +243,11 @@ impl Out {
     pub fn add_attribute(&mut self, at: usize, attribute: &str) {
         let word = self.words[at];
         let id = word >> 2;
-        let html = if id >= tag::INTERNED { self.strings.borrow().get(id).to_owned() } else { TAGS[id as usize].to_owned() };
+        let html = if id >= tag::INTERNED {
+            self.strings.borrow().get(id).to_owned()
+        } else {
+            TAGS[id as usize].to_owned()
+        };
         let end = html.find('>').expect("an open tag");
         let html = format!("{}{attribute}{}", &html[..end], &html[end..]);
         let id = self.strings.borrow_mut().id(&html);
@@ -274,12 +278,13 @@ impl Out {
         {
             match self.last_text() {
                 // It follows the source token before: that one grows.
-                Some(Some(before)) if before + (self.words.last().expect("a token") >> 2) as usize == origin => {
+                Some(Some(before))
+                    if before + (self.words.last().expect("a token") >> 2) as usize == origin =>
+                {
                     *self.words.last_mut().expect("a token") += units << 2;
                     return;
                 }
                 None => {
-                    self.split = false;
                     self.words.push(kind::TEXT | units << 2);
                     self.origins.push(origin as u32);
                     return;
@@ -292,7 +297,9 @@ impl Out {
 
     /// Appends ASCII text.
     pub fn ascii(&mut self, text: &str) {
-        self.literal(text.len() as u32, |literal| literal.extend(text.bytes().map(u16::from)));
+        self.literal(text.len() as u32, |literal| {
+            literal.extend(text.bytes().map(u16::from))
+        });
     }
 
     /// Appends `byte` (ASCII) `count` times.
@@ -300,14 +307,13 @@ impl Out {
         if count == 0 {
             return;
         }
-        self.literal(count, |literal| literal.extend(std::iter::repeat_n(u16::from(byte), count as usize)));
+        self.literal(count, |literal| {
+            literal.extend(std::iter::repeat_n(u16::from(byte), count as usize))
+        });
     }
 
     /// The last token's origin when it is text (`None` when it is not text).
     fn last_text(&self) -> Option<Option<usize>> {
-        if self.split {
-            return None;
-        }
         let &last = self.words.last()?;
         (last & 3 == kind::TEXT).then(|| {
             let origin = *self.origins.last().expect("parallel");
@@ -324,7 +330,9 @@ impl Out {
                     let length = (self.words.last().expect("a token") >> 2) as usize;
                     // SAFETY: the source outlives the render (`set_source`), and the
                     // token is a stretch of it.
-                    let source = unsafe { std::slice::from_raw_parts(self.source.0 as *const u16, self.source.1) };
+                    let source = unsafe {
+                        std::slice::from_raw_parts(self.source.0 as *const u16, self.source.1)
+                    };
                     let start = origin - self.source_at;
                     self.text.extend_from_slice(&source[start..start + length]);
                     *self.origins.last_mut().expect("parallel") = NOWHERE;
@@ -332,7 +340,6 @@ impl Out {
                 *self.words.last_mut().expect("a token") += units << 2;
             }
             None => {
-                self.split = false;
                 self.words.push(kind::TEXT | units << 2);
                 self.origins.push(NOWHERE);
             }
@@ -343,24 +350,43 @@ impl Out {
 
 /// The HTML of `words` (the literal text from `text[0]`, source text from `source`, the
 /// whole text), appended to `out`.
-pub fn to_html(words: &[u32], text: &[u16], origins: &[u32], source: &[u16], strings: &Strings, out: &mut String) {
+pub fn to_html(
+    words: &[u32],
+    text: &[u16],
+    origins: &[u32],
+    source: &[u16],
+    strings: &Strings,
+    out: &mut String,
+) {
     let mut open: Vec<u32> = Vec::new();
     let mut at = 0;
     for (index, &word) in words.iter().enumerate() {
         let id = word >> 2;
         match word & 3 {
             kind::OPEN => {
-                out.push_str(if id >= tag::INTERNED { strings.get(id) } else { TAGS[id as usize] });
+                out.push_str(if id >= tag::INTERNED {
+                    strings.get(id)
+                } else {
+                    TAGS[id as usize]
+                });
                 open.push(id);
             }
             kind::CLOSE => {
                 let id = open.pop().expect("balanced");
-                let tag = if id >= tag::INTERNED { strings.get(id) } else { TAGS[id as usize] };
+                let tag = if id >= tag::INTERNED {
+                    strings.get(id)
+                } else {
+                    TAGS[id as usize]
+                };
                 out.push_str("</");
                 out.push_str(&tag[1..tag.find([' ', '>']).expect("a tag")]);
                 out.push('>');
             }
-            kind::VOID => out.push_str(if id >= tag::INTERNED { strings.get(id) } else { TAGS[id as usize] }),
+            kind::VOID => out.push_str(if id >= tag::INTERNED {
+                strings.get(id)
+            } else {
+                TAGS[id as usize]
+            }),
             _ => {
                 let units = if origins[index] == NOWHERE {
                     at += id as usize;

@@ -17,13 +17,15 @@ npx --no-install wasm-opt -O3 js/wasm/rill_bg.wasm -o js/wasm/rill_bg.wasm \
   --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-multivalue --enable-reference-types
 # rill-stream, the streaming renderer for Streamdown's default setup (its own small
-# module). SIMD128 is in every current browser engine; memchr's scans use it.
+# module, built for size: its work is a small share of an update's). SIMD128 is in
+# every current browser engine; memchr's scans use it.
 RUSTFLAGS="$RUSTFLAGS -C target-feature=+simd128,+bulk-memory" \
 cargo build --release -p rill-stream --features wasm --target wasm32-unknown-unknown \
   --config profile.release.lto=true --config profile.release.codegen-units=1 \
-  --config profile.release.debug=false --config profile.release.strip=true --config profile.release.panic='"abort"'
+  --config profile.release.debug=false --config profile.release.strip=true --config profile.release.panic='"abort"' \
+  --config profile.release.opt-level='"z"'
 "${WASM_BINDGEN:-wasm-bindgen}" target/wasm32-unknown-unknown/release/rill_stream.wasm \
   --target web --out-dir js/wasm --out-name rill_stream
-npx --no-install wasm-opt -O3 js/wasm/rill_stream_bg.wasm -o js/wasm/rill_stream_bg.wasm \
+npx --no-install wasm-opt -Oz js/wasm/rill_stream_bg.wasm -o js/wasm/rill_stream_bg.wasm \
   --enable-simd --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-multivalue --enable-reference-types
