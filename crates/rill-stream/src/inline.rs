@@ -566,6 +566,9 @@ impl Inline {
                 return Err(Fallback); // ponytail: whether attention takes the `_` first
             }
             let end = start + s[..end].encode_utf16().count();
+            if text[p..end].contains(&u16::from(b'`')) {
+                return Err(Fallback); // ponytail: how code spans pair around the literal
+            }
             // ponytail: backslashes in a literal (the exact path's resolution after it
             // differs, rarely matters).
             if text[p..end].contains(&u16::from(b'\\')) {

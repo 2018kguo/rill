@@ -82,6 +82,12 @@ fn same_structure_as_the_exact_pipeline() {
         seed ^= seed << 17;
         (seed % bound as u64) as usize
     };
+    // STRUCTURE_TEXT: one text, both renders printed.
+    if let Ok(text) = std::env::var("STRUCTURE_TEXT") {
+        let text = text.replace("\\n", "\n");
+        println!("ours   {:?}\ntheirs {:?}", ours(&text), theirs(&text));
+        return;
+    }
     let (mut rendered, mut total) = (0, 0);
     for _ in 0..rounds {
         let mut text = String::new();

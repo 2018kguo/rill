@@ -255,9 +255,7 @@ fn lex(src: &[u16], tokens: &mut Vec<Token>, mut clipped: bool) -> Result<bool> 
             precheck(&s[..length])?;
         }
         // ponytail: a definition inside a quote or a list (marked registers those too).
-        if matches!(kind, Kind::Blockquote | Kind::List)
-            && s[..length].windows(2).any(|pair| pair == [0x5D, 0x3A])
-        {
+        if matches!(kind, Kind::Blockquote | Kind::List) && may_define(&s[..length]) {
             return Err(Fallback);
         }
         let raw = if matches!(kind, Kind::Blockquote | Kind::List) {
@@ -777,6 +775,52 @@ fn blockquote(s: &[u16]) -> Result<Option<usize>> {
     Ok(Some(
         lines[..at].iter().map(|l| l.len()).sum::<usize>() + at.saturating_sub(1),
     ))
+}
+
+/// Whether a quote's or list's `raw` may hold a link definition: a line that starts,
+/// past its quote and list markers, with `[` and holds `]:`, outside fenced code. A fence
+/// is taken as open only while its lines keep at least its markers' width (anything less
+/// may have ended it: a definition there is assumed).
+fn may_define(raw: &[u16]) -> bool {
+    let mut fence: Option<(u16, usize, usize)> = None;
+    for line in raw.split(|&u| u == NL) {
+        let mut at = 0;
+        loop {
+            let rest = &line[at..];
+            let spaces = run(rest, SP);
+            if is(rest.get(spaces), b'>') {
+                at += spaces + 1;
+            } else if let Some((end, _, _)) = bullet(rest, usize::MAX)
+                && (end == rest.len() || rest[end] == SP)
+            {
+                at += end;
+            } else {
+                at += spaces;
+                break;
+            }
+        }
+        let content = &line[at..];
+        let ticks = content
+            .first()
+            .filter(|&&u| u == 0x60 || u == 0x7E)
+            .map_or(0, |&u| run(content, u));
+        match fence {
+            Some((unit, count, width)) if at >= width => {
+                if ticks >= count && content[0] == unit && content[ticks..].iter().all(|&u| u == SP)
+                {
+                    fence = None;
+                }
+                continue;
+            }
+            _ => fence = None,
+        }
+        if ticks >= 3 && !(content[0] == 0x60 && content[ticks..].contains(&0x60)) {
+            fence = Some((content[0], ticks, at));
+        } else if is(content.first(), b'[') && content.windows(2).any(|pair| pair == [0x5D, 0x3A]) {
+            return true;
+        }
+    }
+    false
 }
 
 /// `Tokenizer.list`: its `raw`'s length.
