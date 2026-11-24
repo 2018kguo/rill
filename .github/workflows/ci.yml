@@ -100,6 +100,8 @@ jobs:
         working-directory: js
         run: |
           npm run build
+          # rill-stream's Node build, for its oracles.
+          sh ../scripts/build-stream-wasm.sh
           npm test
       - name: The drop-in <Streamdown> against Streamdown 2.7.1 (DOM, SSR)
         run: |

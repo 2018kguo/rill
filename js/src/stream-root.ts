@@ -78,9 +78,10 @@ type Replay = { parent: Node; at: number; button: number };
  */
 export function useStreamRoot(props: Props, waitForStream = false): ReactElement | null {
   const eligible = streamEligible(props);
-  // (A version, so the merge loading re-renders too.)
-  useSyncExternalStore(subscribeStream, streamVersion, () => 0);
-  const stream = loadedStream();
+  // (A version, so the merge loading re-renders too; 0 on the server and while
+  // hydrating, so the first client render matches the server's.)
+  const version = useSyncExternalStore(subscribeStream, streamVersion, () => 0);
+  const stream = version === 0 ? null : loadedStream();
   const custom = props.className !== undefined;
   useEffect(() => {
     if (!eligible) return;
@@ -98,7 +99,7 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
   if (!eligible || handedOff) return null;
   // (Streamdown merges `className` into its root's with tailwind-merge, loaded only for a
   // message that passes one.)
-  const merge = loadedMerge();
+  const merge = version === 0 ? null : loadedMerge();
   const className = !custom ? ROOT_CLASS : merge === null ? null : merge(ROOT_CLASS, props.className);
   if (stream === null || className === null) {
     // (The light entry shows the root empty until the module is in, rather than load

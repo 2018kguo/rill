@@ -107,6 +107,26 @@ test("the light entry merges a className as Streamdown does", async () => {
   await theirs.unmount();
 });
 
+test("hydrates the server's HTML with the stream module already loaded", async () => {
+  const { renderToString } = await import("react-dom/server");
+  const { hydrateRoot } = await import("react-dom/client");
+  const { act, createElement } = await import("react");
+  const element = createElement(RillStreamdown, { isAnimating: true, children: ANSWER.slice(0, 80) });
+  // (The server snapshot is 0, so the server renders Streamdown's tree as one without
+  // the module does, and the hydrating render must match it.)
+  const host = document.createElement("div");
+  host.innerHTML = renderToString(element);
+  document.body.append(host);
+  const errors: unknown[] = [];
+  let root: ReturnType<typeof hydrateRoot> | undefined;
+  await act(async () => {
+    root = hydrateRoot(host, element, { onRecoverableError: (error) => errors.push(error) });
+  });
+  assert.deepEqual(errors, []);
+  await act(async () => root!.unmount());
+  host.remove();
+});
+
 test("a click hands the message to Streamdown and reaches the same button", async () => {
   const opened = (host: HTMLElement) => {
     host.querySelector<HTMLElement>('button[data-streamdown="link"]')!.click();
