@@ -60,6 +60,9 @@ export type StreamRenderer = {
   update(text: string): boolean;
   /** The islands in the DOM now (see `Island`), in document order. */
   islands(): Island[];
+  /** Makes again each island whose element gained or lost an attribute since React
+   * made it (React adds one last; a whole render puts it in its place). */
+  remake(): void;
   dispose(): void;
 };
 
@@ -74,6 +77,8 @@ export type Island = {
   json: string;
   /** The portal container React renders the island into (see `container`). */
   holder: Element;
+  /** Its element's attribute names when React made it (see `remake`). */
+  names: string;
 };
 
 /** An element of an island's subtree: its open tag's HTML (attributes and all), and
@@ -108,12 +113,13 @@ export function separate(root: Element): void {
   // updates are rare).
   for (const node of Array.from(root.childNodes)) if (separators.has(node)) root.removeChild(node);
   // After each element with anything after it (a block's own text, as before a
-  // table, included).
+  // table, included) but its own separator.
   let last: Node | null = null;
   for (let node = root.firstChild; node !== null; node = node.nextSibling) {
     // (An island's anchor sits before its element.)
     if (node.nodeType === Node.COMMENT_NODE) continue;
-    if (last?.nodeType === Node.ELEMENT_NODE) {
+    // (A block with several elements has its own separators.)
+    if (last?.nodeType === Node.ELEMENT_NODE && !(node.nodeType === Node.TEXT_NODE && (node as Text).data === "\n")) {
       const separator = root.ownerDocument.createTextNode("\n");
       separators.add(separator);
       owned.add(separator);
@@ -319,13 +325,7 @@ export function createStreamRenderer(
       let island = islandOf.get(anchor);
       // (An anchor moved into another element, by a retag, starts over there.)
       if (island === undefined || island.holder !== anchor.parentNode) {
-        island = {
-          key: (islandKeys += 1),
-          anchor,
-          tree,
-          json,
-          holder: container(anchor, String(islandKeys)),
-        };
+        island = made(anchor, tree, json);
         islandOf.set(anchor, island);
       } else if (island.json !== json) {
         island = { ...island, tree, json };
@@ -400,6 +400,15 @@ export function createStreamRenderer(
       return true;
     },
     islands: () => state.islands,
+    remake() {
+      if (!state.islands.some((island) => names(island.tree.html) !== island.names)) return;
+      state.islands = state.islands.map((island) => {
+        if (names(island.tree.html) === island.names) return island;
+        const again = made(island.anchor, island.tree, island.json);
+        islandOf.set(island.anchor, again);
+        return again;
+      });
+    },
     dispose() {
       session.free();
     },
@@ -445,6 +454,22 @@ function child(parent: Node, index: number): ChildNode | null {
     node = skip(node.nextSibling);
   }
   return node;
+}
+
+/** An open tag's attribute names. */
+const names = (html: string) => html.replace(/="[^"]*"/g, "");
+
+/** A new island (a new React key) at `anchor`. */
+function made(anchor: Comment, tree: IslandElement, json: string): Island {
+  islandKeys += 1;
+  return {
+    key: islandKeys,
+    anchor,
+    tree,
+    json,
+    names: names(tree.html),
+    holder: container(anchor, String(islandKeys)),
+  };
 }
 
 /** `node`, or the first node after it that is not an island's. */

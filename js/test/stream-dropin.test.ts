@@ -251,14 +251,16 @@ test("code blocks with the page's code plugin stream as islands, highlighted as 
   const before = blockRenders.rill + blockRenders.streamdown;
   const text = "Some `inline` code.\n\n```ts\nconst x: number = 1;\n\nfunction f() {}\n```\n\nAnd\n\n```\nplain\n```\n\n~~~py meta\nprint(1)\n";
   // Highlighting lands asynchronously on both sides: compare once neither changes.
+  // (Several quiet checks: under load one highlight can take longer than a check.)
   const settled = async () => {
     let last = "";
-    for (let tries = 0; tries < 100; tries += 1) {
+    let quiet = 0;
+    for (let tries = 0; tries < 200 && quiet < 4; tries += 1) {
       await act(async () => {
         await new Promise((resolve) => setTimeout(resolve, 15));
       });
       const now = ours.host.innerHTML + "\0" + theirs.host.innerHTML;
-      if (now === last) return;
+      quiet = now === last ? quiet + 1 : 0;
       last = now;
     }
   };
@@ -288,7 +290,7 @@ test("code blocks with the page's code plugin stream as islands, highlighted as 
 });
 
 test("a streamed message that turns static keeps its DOM when that is Streamdown's static DOM", async () => {
-  const pieces = ["[a](https://x.com)", "**", "*", "`c`", " ", "\n\n", "\n", "| a | b |\n|-|-|\n| 1 | 2 |\n", "# h\n", "- i ", "> q ", "```\nc\n```\n", "[", "x", "~~", "[^1]", "\n[^1]: n\n"];
+  const pieces = ["[a](https://x.com)", "**", "*", "`c`", " ", "\n\n", "\n", "| a | b |\n|-|-|\n| 1 | 2 |\n", "# h\n", "- i ", "> q ", "```\nc\n```\n", "[", "x", "~~", "[^1]", "\n[^1]: n\n", "[r][ref]", "\n[ref]: https://r.com \"t\"\n"];
   let seed = 11;
   const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
   let kept = 0;

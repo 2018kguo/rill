@@ -307,6 +307,7 @@ function StreamRoot({
       if (settled) {
         if (current!.session.repaired()) return onHandOff(null);
         if (!current!.session.whole()) separate(root.current!);
+        current!.renderer.remake();
       }
       // Streamdown's caret flag, when Rust gave it to an island: on the root's last
       // element, which the island's component rendered.
