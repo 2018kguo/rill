@@ -95,6 +95,34 @@ const owned = new WeakSet<Node>();
 /** Whether `node` is one an island's component rendered (at its top). */
 export const isIslandNode = (node: Node): boolean => owned.has(node);
 
+/** The root's `"\n"`s between blocks (see `separate`). */
+const separators = new WeakSet<Node>();
+
+/**
+ * Streamdown's static mode renders the text as one tree, with a `"\n"` text node between
+ * root elements, where streaming renders each block alone: the separators, for a settled
+ * stream (not the stream's own nodes: positions skip them).
+ */
+export function separate(root: Element): void {
+  // ponytail: removes and adds them all on each settled update (a static message's
+  // updates are rare).
+  for (const node of Array.from(root.childNodes)) if (separators.has(node)) root.removeChild(node);
+  // After each element with anything after it (a block's own text, as before a
+  // table, included).
+  let last: Node | null = null;
+  for (let node = root.firstChild; node !== null; node = node.nextSibling) {
+    // (An island's anchor sits before its element.)
+    if (node.nodeType === Node.COMMENT_NODE) continue;
+    if (last?.nodeType === Node.ELEMENT_NODE) {
+      const separator = root.ownerDocument.createTextNode("\n");
+      separators.add(separator);
+      owned.add(separator);
+      root.insertBefore(separator, last.nextSibling);
+    }
+    last = node;
+  }
+}
+
 /** Each anchor's island. */
 const islandOf = new WeakMap<Comment, Island>();
 let islandKeys = 0;

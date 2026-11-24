@@ -1166,9 +1166,6 @@ impl Writer<'_, '_> {
     /// item shows a lone paragraph's content; its section drops an item with nothing
     /// but the back reference): where it opens, if any footnote was called.
     fn footnotes(&mut self, after: bool) -> Result<Option<usize>> {
-        if self.out.options.setup & crate::tokens::setup::NO_FOOTNOTES != 0 {
-            return Err(Fallback);
-        }
         if self.inline.refs.calls.is_empty() {
             return Ok(None);
         }
@@ -1178,7 +1175,8 @@ impl Writer<'_, '_> {
         let at = self.out.words.len();
         self.out
             .open_html(r#"<section class="footnotes" data-footnotes="">"#);
-        self.out.open_html(r#"<h2 class="mt-6 mb-2 font-semibold text-2xl sr-only" data-streamdown="heading-2" id="footnote-label">"#);
+        let p = crate::inline::clobber(&self.out);
+        self.out.open_html(&format!(r#"<h2 class="mt-6 mb-2 font-semibold text-2xl sr-only" data-streamdown="heading-2" id="{p}footnote-label">"#));
         self.out.ascii("Footnotes");
         self.out.close();
         self.out.ascii("\n");
@@ -1192,12 +1190,13 @@ impl Writer<'_, '_> {
             let children: Vec<u32> = self.children(node).collect();
             if let Some(&last) = children.last() {
                 let id = String::from_utf16_lossy(label);
-                self.out.open_html(&format!(r#"<li class="py-1 [&amp;&gt;p]:inline" data-streamdown="list-item" id="user-content-fn-{id}">"#));
+                self.out.open_html(&format!(r#"<li class="py-1 [&amp;&gt;p]:inline" data-streamdown="list-item" id="{p}user-content-fn-{id}">"#));
+                let back = (id.clone(), index + 1);
                 let para_last = self.nodes[last as usize].kind == Kind::Para;
                 if children.len() == 1 && para_last {
                     self.inline_content(last, true)?;
                     self.out.ascii(" ");
-                    self.backrefs(count, " ");
+                    self.backrefs(count, " ", &back)?;
                 } else {
                     self.out.ascii("\n");
                     for &child in &children {
@@ -1205,7 +1204,7 @@ impl Writer<'_, '_> {
                             self.out.open(tag::P);
                             self.inline_content(child, true)?;
                             self.out.ascii(" ");
-                            self.backrefs(count, " ");
+                            self.backrefs(count, " ", &back)?;
                             self.out.close();
                         } else {
                             self.block(child, false)?;
@@ -1214,7 +1213,7 @@ impl Writer<'_, '_> {
                     }
                     if !para_last {
                         // (Each one a child of the item, line endings around.)
-                        self.backrefs(count, "\n \n");
+                        self.backrefs(count, "\n \n", &back)?;
                         self.out.ascii("\n");
                     }
                 }
@@ -1231,13 +1230,26 @@ impl Writer<'_, '_> {
         Ok(Some(at))
     }
 
-    /// A footnote's back references, one per call, `between` them.
-    fn backrefs(&mut self, count: u32, between: &str) {
+    /// A footnote's back references, one per call, `between` them; `back` is the note's
+    /// label and number.
+    fn backrefs(&mut self, count: u32, between: &str, back: &(String, usize)) -> Result<()> {
+        let island = self.out.options.overrides & crate::tokens::overrides::A != 0;
+        let id = if island { crate::inline::note_id(&back.0.encode_utf16().collect::<Vec<_>>())? } else { String::new() };
         for call in 1..=count {
             if call > 1 {
                 self.out.ascii(between);
             }
-            self.out.open_html(r#"<button class="wrap-anywhere appearance-none text-left font-medium text-primary underline data-footnote-backref" data-incomplete="false" data-streamdown="link" type="button">"#);
+            if island {
+                // The page's own `a`, as mdast-util-to-hast gives it.
+                let suffix = if call > 1 { format!("-{call}") } else { String::new() };
+                let number = back.1;
+                self.out.open_html(&format!(
+                    r##"{}<a href="#user-content-fnref-{id}{suffix}" data-footnote-backref="" aria-label="Back to reference {number}{suffix}" class="data-footnote-backref" target="_blank" rel="noopener noreferrer">"##,
+                    crate::tokens::ISLAND
+                ));
+            } else {
+                self.out.open_html(r#"<button class="wrap-anywhere appearance-none text-left font-medium text-primary underline data-footnote-backref" data-incomplete="false" data-streamdown="link" type="button">"#);
+            }
             self.out.text(&[0x21A9]);
             if call > 1 {
                 self.out.open_html(crate::inline::SUP);
@@ -1246,6 +1258,7 @@ impl Writer<'_, '_> {
             }
             self.out.close();
         }
+        Ok(())
     }
 
     /// Controls (Streamdown disables every one of them while the text animates).

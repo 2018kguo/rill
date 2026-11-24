@@ -467,15 +467,22 @@ impl Inline {
                 Kind::Decoded { start, end } => {
                     text_after(out, &self.decoded[start as usize..end as usize], &mut broke)
                 }
-                Kind::Note { .. } if out.options.setup & setup::NO_FOOTNOTES != 0 => return Err(Fallback),
                 Kind::Note { note } => {
-                    if out.options.overrides & overrides::A != 0 {
-                        return Err(Fallback); // ponytail: footnote calls as a page's own `a`
-                    }
                     broke = false;
                     let number = self.refs.call(note);
                     out.open_html(SUP);
-                    out.open(tag::LINK);
+                    if out.options.overrides & overrides::A != 0 {
+                        // mdast-util-to-hast's call, as the page's own `a`.
+                        let id = note_id(&self.refs.notes[note as usize].0)?;
+                        let call = self.refs.calls[number as usize - 1].1;
+                        let suffix = if call > 1 { format!("-{call}") } else { String::new() };
+                        let p = clobber(out);
+                        out.open_html(&format!(
+                            r##"{ISLAND}<a href="#user-content-fn-{id}" id="{p}user-content-fnref-{id}{suffix}" data-footnote-ref="" aria-describedby="{p}footnote-label" target="_blank" rel="noopener noreferrer">"##
+                        ));
+                    } else {
+                        out.open(tag::LINK);
+                    }
                     out.ascii(&number.to_string());
                     out.close();
                     out.close();
@@ -1238,6 +1245,21 @@ impl Link {
 }
 
 /// A page's own `a`: the island Streamdown's HAST gives it.
+/// A footnote's id in mdast-util-to-hast's attributes (its label, lowercased already).
+/// ponytail: a label normalizeUri would change takes the exact path.
+pub(crate) fn note_id(label: &[u16]) -> Result<String> {
+    let safe = |&unit: &u16| unit < 0x80 && (unit as u8).is_ascii_alphanumeric() || unit == u16::from(b'-') || unit == u16::from(b'_');
+    if !label.iter().all(safe) {
+        return Err(Fallback);
+    }
+    Ok(String::from_utf16_lossy(label))
+}
+
+/// rehype-sanitize's prefix for clobbered attributes ([`setup::SANITIZE`]), or none.
+pub(crate) fn clobber(out: &Out) -> &'static str {
+    if out.options.setup & setup::SANITIZE != 0 { "user-content-" } else { "" }
+}
+
 fn a_island(href: &str, title: Option<&str>) -> String {
     let mut html = String::from(ISLAND);
     html.push_str("<a href=\"");

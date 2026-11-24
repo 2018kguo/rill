@@ -20,6 +20,10 @@ export type StreamSession = Session & {
   setOptions(controls: boolean, animating: boolean): void;
   setLayout(lineNumbers: boolean, codeMaxHeight: number, dir: number): void;
   setOverrides(overrides: number): void;
+  /** Whether Streamdown's repair changed the text (its static mode does not repair). */
+  repaired(): boolean;
+  /** Whether the text renders as one block (its root has static mode's separators). */
+  whole(): boolean;
 };
 
 /** Streamdown's props the streaming DOM depends on. */

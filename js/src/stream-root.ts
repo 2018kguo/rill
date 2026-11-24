@@ -21,6 +21,7 @@ import type { Engine } from "./engine.ts";
 
 import {
   createStreamRenderer,
+  separate,
   isIslandNode,
   type Island,
   type StreamRenderer,
@@ -151,7 +152,12 @@ type Replay = { parent: Node; at: number; button: number };
  * clicked, it stays with the caller; the click goes to the same button there.
  */
 export function useStreamRoot(props: Props, waitForStream = false): ReactElement | null {
-  const eligible = streamEligible(props);
+  // A message that streamed here and then turns static (it finished) keeps its DOM:
+  // static mode renders the text whole and unrepaired, which is what the settled stream
+  // shows whenever the repair changed nothing (else it hands off).
+  const streamed = useRef(false);
+  const settled = props.mode === "static" && streamed.current;
+  const eligible = streamEligible(settled ? { ...props, mode: undefined } : props);
   // (A version, so the merge loading re-renders too; 0 on the server and while
   // hydrating, so the first client render matches the server's.)
   const version = useSyncExternalStore(subscribeStream, streamVersion, () => 0);
@@ -200,6 +206,7 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
     // all of Streamdown for the first frames.)
     return waitForStream ? createElement("div", { className: className ?? ROOT_CLASS }) : null;
   }
+  streamed.current = true;
   const maxHeight = props.codeBlockMaxHeight as number | undefined;
   const attributes: Props = {};
   for (const [name, value] of Object.entries(props)) {
@@ -225,7 +232,7 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
       controls: props.controls ?? true,
       isAnimating: Boolean(props.isAnimating),
       lineNumbers: props.lineNumbers ?? true,
-      mode: "streaming",
+      mode: settled ? "static" : "streaming",
       mermaid: props.mermaid,
       linkSafety: props.linkSafety ?? { enabled: true },
       portal: undefined,
@@ -233,6 +240,7 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
     },
     className,
     attributes,
+    settled,
     onHandOff: (click: Replay | null) => {
       replay.current = click;
       setHandedOff(true);
@@ -251,6 +259,8 @@ type StreamRootProps = {
   context: Record<string, unknown>;
   className: string;
   attributes: Props;
+  /** Streamdown's static mode (see `useStreamRoot`). */
+  settled: boolean;
   /** The text needs the exact path, or a button was clicked. */
   onHandOff(click: Replay | null): void;
 };
@@ -266,6 +276,7 @@ function StreamRoot({
   context,
   className,
   attributes,
+  settled,
   onHandOff,
 }: StreamRootProps) {
   // (By value: a page's inline objects keep the islands as they were.)
@@ -293,6 +304,10 @@ function StreamRoot({
     const module = stream;
     let current = state.current;
     const shown = () => {
+      if (settled) {
+        if (current!.session.repaired()) return onHandOff(null);
+        if (!current!.session.whole()) separate(root.current!);
+      }
       // Streamdown's caret flag, when Rust gave it to an island: on the root's last
       // element, which the island's component rendered.
       const flag =

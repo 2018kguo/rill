@@ -185,6 +185,16 @@ impl Session {
         }
     }
 
+    /// Whether the repair changed the text (Streamdown's static mode renders it unrepaired).
+    pub fn repaired(&self) -> bool {
+        self.remend.healed() != self.remend.input()
+    }
+
+    /// Whether the text renders as one block (as Streamdown's static mode renders it).
+    pub fn whole(&self) -> bool {
+        self.shown.options.whole
+    }
+
     /// The last update's rendering (the edit program's positions are in it).
     pub fn rendering(&self) -> &Out {
         &self.shown

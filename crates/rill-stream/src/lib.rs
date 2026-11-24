@@ -499,6 +499,14 @@ pub mod wasm {
             let outcome = self.session.update_units(&self.input[..length], reset);
             self.fill(outcome)
         }
+        /// See [`crate::Session::repaired`].
+        pub fn repaired(&self) -> bool {
+            self.session.repaired()
+        }
+        /// See [`crate::Session::whole`].
+        pub fn whole(&self) -> bool {
+            self.session.whole()
+        }
         /// Where the header is in [`memory`], as a `u32` index (it stays put).
         #[wasm_bindgen(js_name = headerAt)]
         pub fn header_at(&self) -> usize {

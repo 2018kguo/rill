@@ -206,6 +206,10 @@ test("islands: random texts stream as Streamdown renders them, at every prefix",
     "](",
     ")",
     "x",
+    "[^1]",
+    "[^Note]",
+    "\n[^1]: n *e*\n",
+    "\n[^note]: m\n\n    second\n",
   ];
   let seed = 7;
   const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
@@ -281,6 +285,35 @@ test("code blocks with the page's code plugin stream as islands, highlighted as 
   assert.equal(blockRenders.rill + blockRenders.streamdown, before, "streamed, no Block rendered");
   await ours.unmount();
   await theirs.unmount();
+});
+
+test("a streamed message that turns static keeps its DOM when that is Streamdown's static DOM", async () => {
+  const pieces = ["[a](https://x.com)", "**", "*", "`c`", " ", "\n\n", "\n", "| a | b |\n|-|-|\n| 1 | 2 |\n", "# h\n", "- i ", "> q ", "```\nc\n```\n", "[", "x", "~~", "[^1]", "\n[^1]: n\n"];
+  let seed = 11;
+  const random = (n: number) => ((seed = (seed * 1103515245 + 12345) % 2 ** 31), seed % n);
+  let kept = 0;
+  const texts = [ANSWER];
+  for (let round = 0; round < Number(process.env.ISLAND_ROUNDS ?? 40); round += 1) {
+    let text = "";
+    for (let count = 2 + random(8); count > 0; count -= 1) text += pieces[random(pieces.length)];
+    texts.push(text);
+  }
+  for (const [index, text] of texts.entries()) {
+    const components = index % 2 === 0 ? undefined : COMPONENTS;
+    const ours = mount(RillStreamdown);
+    const theirs = mount(Streamdown);
+    for (let end = 1; end <= text.length; end += 3) {
+      await ours.render(text.slice(0, end), { isAnimating: true, components });
+    }
+    const before = blockRenders.rill + blockRenders.streamdown;
+    await ours.render(text, { isAnimating: false, mode: "static", components });
+    if (blockRenders.rill + blockRenders.streamdown === before) kept += 1;
+    await theirs.render(text, { isAnimating: false, mode: "static", components });
+    assert.equal(ours.host.innerHTML.replaceAll("<!---->", ""), theirs.host.innerHTML, JSON.stringify(text));
+    await ours.unmount();
+    await theirs.unmount();
+  }
+  assert.ok(kept > texts.length / 2, `${kept} of ${texts.length} kept`);
 });
 
 test("an island's own events reach its component, and the message keeps streaming", async () => {

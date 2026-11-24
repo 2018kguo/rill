@@ -158,8 +158,9 @@ pub mod setup {
     pub const CITATIONS: u8 = 1;
     /// A blocked or incomplete link is a bare `<span>` of its text.
     pub const TEXT_ONLY_LINKS: u8 = 2;
-    /// Footnotes take the exact path (the sanitize schema prefixes their ids).
-    pub const NO_FOOTNOTES: u8 = 4;
+    /// rehype-sanitize's clobbering: footnotes' `id`s and `aria-describedby`s gain
+    /// another `user-content-`.
+    pub const SANITIZE: u8 = 4;
     /// `$$` math: the exact path.
     pub const MATH: u8 = 8;
     /// remark-cjk-friendly: CJK beside an emphasis marker takes the exact path.
