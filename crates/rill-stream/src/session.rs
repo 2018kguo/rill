@@ -264,7 +264,7 @@ mod tests {
 
     #[test]
     fn streaming_render_is_whole_text_render() {
-        const PIECES: [&str; 74] = [
+        const PIECES: [&str; 77] = [
             "https://",
             "@",
             ".co",
@@ -339,6 +339,9 @@ mod tests {
             "[c]",
             "\n[c]: /u",
             "[c][]",
+            "<br>",
+            "<BR />",
+            "<b",
         ];
         let mut seed =
             std::env::var("STREAM_SEED").map_or(0x9e37_79b9_7f4a_7c15u64, |s| s.parse().unwrap());

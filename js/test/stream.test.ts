@@ -58,6 +58,7 @@ const ALPHABETS: [name: string, pieces: string[], depth: number, fast?: number][
   ["code lines", ["```\n", "a", " ", "|", "\n", "\n\n", "<b"], 5],
   ["tables", ["| ", "a", "|", "--", ":", "\n", "*"], 5],
   ["table rows", ["|a|\n|-|\n", "b", "|", "\n", "- ", "`"], 5],
+  ["raw breaks", ["<", "br", "BR", ">", "/", " ", "a", "|", "\n", "*"], 5],
   // A letter after `<` is raw HTML, which takes the exact path for now.
   ["autolink brackets", ["<", ">", "a", ":", "@", ".", "b", "-", " "], 5, 0.4],
 ];

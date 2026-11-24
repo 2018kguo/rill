@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-const PIECES: [&str; 61] = [
+const PIECES: [&str; 64] = [
     "www.",
     "https://",
     "a@b.co",
@@ -69,6 +69,9 @@ const PIECES: [&str; 61] = [
     "[c]",
     "\n[c]: /u",
     "[c][]",
+    "<br>",
+    "<BR />",
+    "<b",
 ];
 
 #[test]

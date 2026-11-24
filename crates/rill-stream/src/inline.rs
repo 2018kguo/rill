@@ -206,6 +206,8 @@ enum Kind {
     Line { hard: bool },
     /// A backslash before a line ending.
     Break,
+    /// Raw HTML `<br>` (`<br/>`, `<br />`): the element alone.
+    RawBreak,
     /// A fixed replacement (an escaped character).
     Literal(&'static str),
     /// A code span's content `[start, end)`; `trim` after a hard break.
@@ -409,6 +411,10 @@ impl Inline {
             text_after(out, &text[cursor..event.at as usize], &mut broke);
             match event.kind {
                 Kind::Line { hard: false } => out.ascii("\n"),
+                Kind::RawBreak => {
+                    broke = false;
+                    out.void(tag::BR);
+                }
                 Kind::Line { hard: true } | Kind::Break => {
                     out.void(tag::BR);
                     out.ascii("\n");
@@ -767,7 +773,19 @@ impl Inline {
                         .map(|&unit| ascii(unit))
                         .is_some_and(|b| b.is_ascii_alphabetic() || matches!(b, b'/' | b'!' | b'?'))
                     {
-                        return Err(Fallback); // raw HTML
+                        if let Some(end) = raw_break(bytes, at) {
+                            self.event(at, end, Kind::RawBreak);
+                            at = end;
+                            continue;
+                        }
+                        if bytes[at..].contains(&u16::from(b'>')) {
+                            return Err(Fallback); // raw HTML
+                        }
+                        // No `>` after it: not HTML, text (a tag still streaming in: the
+                        // next update renders from here again).
+                        self.ceiling = self.ceiling.min(at);
+                        at += 1;
+                        continue;
                     } else {
                         at += 1;
                         continue; // text
@@ -1344,6 +1362,24 @@ fn common_entity(name: &str) -> Option<&'static str> {
         "tilde" | "DiacriticalTilde" => "˜",
         _ => return None,
     })
+}
+
+/// `<br>`, `<br/>` or `<br />` (any case) at `at`: where it ends.
+fn raw_break(units: &[u16], at: usize) -> Option<usize> {
+    let name = units.get(at + 1..at + 3)?;
+    if !(name[0] | 0x20 == u16::from(b'b') && name[1] | 0x20 == u16::from(b'r')) {
+        return None;
+    }
+    let mut end = at + 3;
+    while units.get(end) == Some(&0x20) {
+        end += 1;
+    }
+    if units.get(end) == Some(&u16::from(b'/')) {
+        end += 1;
+    } else if end > at + 3 {
+        return None;
+    }
+    (units.get(end) == Some(&u16::from(b'>'))).then_some(end + 1)
 }
 
 /// An autolink at `at` (`<scheme:...>` or `<email>`): where it ends, its content's

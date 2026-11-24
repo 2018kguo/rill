@@ -33,6 +33,7 @@ const ALPHABETS: [name: string, pieces: string[], depth: number, controls?: bool
   ["mixed", ["**", "*", "_", "`", "a", " ", "\n", "# ", "\\", "é"], 5],
   ["controls", ["```js\n", "a", "\n", "```", "| a |\n|--|\n", "| b |", "\n\n"], 5, true],
   ["footnotes", ["[^a]", "[^a]: ", "[c]", "[c]: /u", "x", "\n", "\n\n", "    ", "- "], 5],
+  ["raw breaks", ["<", "br", "BR", ">", " /", "a", "|", "\n", "|-|\n"], 5],
 ];
 
 /** Each tag's attributes in name order: an element updated in place (as React updates
