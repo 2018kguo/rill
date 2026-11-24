@@ -29,7 +29,7 @@ pub(crate) fn run_first_pass(text: &str, syntax: Syntax) -> (Tree<Item>, Allocat
         lookup_table,
         paragraph_interrupted: false,
         lazy_html: None,
-        literal_cache: (usize::MAX, 0, 0),
+        literal_cache: (usize::MAX, 0, 0, 0),
     };
     first_pass.run()
 }
@@ -50,7 +50,7 @@ struct FirstPass<'a, 'b> {
     /// in the open containers.
     lazy_html: Option<usize>,
     /// rill: `in_literal_path`'s line start, scan position and last literal end.
-    literal_cache: (usize, usize, usize),
+    literal_cache: (usize, usize, usize, usize),
 }
 
 impl<'a, 'b> FirstPass<'a, 'b> {
@@ -649,7 +649,8 @@ impl<'a, 'b> FirstPass<'a, 'b> {
     fn in_literal_path(&mut self, from: usize, ix: usize) -> bool {
         let text = self.text;
         let bytes = text.as_bytes();
-        if self.literal_cache.0 != from {
+        // (A line parsed again, as a table row, asks from its start again.)
+        if self.literal_cache.0 != from || ix < self.literal_cache.3 {
             // A code span opened on an earlier line of the block covers this one's start.
             let mut start = from;
             if let Some(n) = self.open_code_span(from) {
@@ -663,10 +664,12 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     close += next + run;
                 }
             }
-            self.literal_cache = (from, start, start);
+            // (`end` stays at `from`: no literal yet.)
+            self.literal_cache = (from, start, from, from);
         }
-        let (_, mut scanned, mut end) = self.literal_cache;
-        if scanned > ix {
+        self.literal_cache.3 = ix;
+        let (_, mut scanned, mut end, _) = self.literal_cache;
+        if scanned > ix && end <= ix {
             return false; // in that code span
         }
         let atext = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.' | b'_');
@@ -693,7 +696,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     };
                     match closer {
                         Some(closer) if closer + n > ix => {
-                            self.literal_cache = (from, at, end);
+                            self.literal_cache = (from, at, end, ix);
                             return false;
                         }
                         Some(closer) => at = closer + n,
@@ -729,7 +732,7 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                 _ => scanned = at + 1,
             }
         }
-        self.literal_cache = (from, scanned, end);
+        self.literal_cache = (from, scanned, end, ix);
         end > ix
     }
 

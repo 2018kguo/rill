@@ -1,6 +1,5 @@
 target/
 node_modules
-package-lock.json
 demo/dist/
 js/wasm/
 js/dist/
