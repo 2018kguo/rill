@@ -724,8 +724,11 @@ impl<'a, 'b> FirstPass<'a, 'b> {
                     continue;
                 }
             }
+            // A link's `](destination` is the resource micromark takes first.
+            // ponytail: only a destination right after `](`; `( <space>dest` and `<dest>` still scan.
+            let resource = || previous == Some('(') && at >= from + 2 && bytes[at - 2] == b']' && self.bracket_open(at - 2);
             match crate::autolink_literal::scan(text, at, previous) {
-                Some((literal_end, _)) if !self.bracket_open(at) => {
+                Some((literal_end, _)) if !self.bracket_open(at) && !resource() => {
                     end = literal_end;
                     scanned = literal_end.max(at + 1);
                 }
