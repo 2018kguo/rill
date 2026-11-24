@@ -238,6 +238,51 @@ test("islands: random texts stream as Streamdown renders them, at every prefix",
   await theirs.unmount();
 });
 
+test("code blocks with the page's code plugin stream as islands, highlighted as Streamdown's", async () => {
+  const { code } = await import("@streamdown/code");
+  const { act } = await import("react");
+  const plugins = { code };
+  const ours = mount(RillStreamdown);
+  const theirs = mount(Streamdown);
+  const before = blockRenders.rill + blockRenders.streamdown;
+  const text = "Some `inline` code.\n\n```ts\nconst x: number = 1;\n\nfunction f() {}\n```\n\nAnd\n\n```\nplain\n```\n\n~~~py meta\nprint(1)\n";
+  // Highlighting lands asynchronously on both sides: compare once neither changes.
+  const settled = async () => {
+    let last = "";
+    for (let tries = 0; tries < 100; tries += 1) {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      });
+      const now = ours.host.innerHTML + "\0" + theirs.host.innerHTML;
+      if (now === last) return;
+      last = now;
+    }
+  };
+  // (Shiki loads once, slowly: first on Streamdown's side.)
+  await theirs.render(text, { plugins });
+  for (let tries = 0; tries < 400 && !theirs.host.innerHTML.includes("--sdm-c: #"); tries += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    });
+  }
+  await theirs.render("", { isAnimating: true, plugins });
+  for (let end = 1; end <= text.length; end += 7) {
+    const prefix = text.slice(0, end);
+    await ours.render(prefix, { isAnimating: true, plugins });
+    await theirs.render(prefix, { isAnimating: true, plugins });
+    await settled();
+    assert.equal(ours.host.innerHTML.replaceAll("<!---->", ""), theirs.host.innerHTML, JSON.stringify(prefix));
+  }
+  await ours.render(text, { isAnimating: false, plugins });
+  await theirs.render(text, { isAnimating: false, plugins });
+  await settled();
+  assert.equal(ours.host.innerHTML.replaceAll("<!---->", ""), theirs.host.innerHTML);
+  assert.match(ours.host.innerHTML, /--sdm-c: #/, "highlighted");
+  assert.equal(blockRenders.rill + blockRenders.streamdown, before, "streamed, no Block rendered");
+  await ours.unmount();
+  await theirs.unmount();
+});
+
 test("islands in a text kept whole (a link definition): references get the definition's title", async () => {
   const ours = mount(RillStreamdown);
   const theirs = mount(Streamdown);

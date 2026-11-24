@@ -1435,6 +1435,25 @@ impl Writer<'_, '_> {
         } else {
             ""
         };
+        if self.out.options.overrides & crate::tokens::overrides::CODE != 0 {
+            // mdast-util-to-hast's `code`: the value and a line ending, if any.
+            let class = if language.is_empty() { String::new() } else { format!(r#" class="language-{language}""#) };
+            let meta = if meta.0 == meta.1 { String::new() } else { format!(r#" metastring="{}""#, attribute(meta)) };
+            self.out.open_html(&format!("\u{1}<code{class}{meta}{incomplete}>"));
+            let (first, last) = self.nodes[id as usize].lines;
+            let lines = &self.lines[first as usize..last as usize];
+            for (index, &(start, end)) in lines.iter().enumerate() {
+                if index > 0 {
+                    self.out.ascii("\n");
+                }
+                self.out.text(&source[start..end]);
+            }
+            if lines.len() > 1 || lines.first().is_some_and(|&(start, end)| start < end) {
+                self.out.ascii("\n");
+            }
+            self.out.close();
+            return;
+        }
         self.out.open_html(&format!(
             r#"<div class="relative my-4 flex w-full flex-col gap-2 rounded-xl border border-border bg-sidebar p-2"{incomplete} data-language="{language}" data-streamdown="code-block" style="content-visibility: auto; contain-intrinsic-size: auto 200px;" dir="ltr">"#
         ));

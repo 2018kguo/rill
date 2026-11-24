@@ -157,6 +157,9 @@ pub mod overrides {
     pub const A: u8 = 1;
     pub const TABLE: u8 = 2;
     pub const SPAN: u8 = 4;
+    /// A code block as Streamdown's HAST `<code>` (class, metastring, `data-incomplete`)
+    /// holding the code's text: the page highlights it (its `plugins.code`).
+    pub const CODE: u8 = 8;
 }
 
 /// What an island's interned open tag starts with.

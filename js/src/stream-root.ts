@@ -7,12 +7,14 @@ import {
   createElement,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
   type MouseEvent,
   type ReactElement,
 } from "react";
+import type { PluginConfig } from "streamdown";
 
 import {
   createStreamRenderer,
@@ -54,7 +56,13 @@ const STREAM_PROPS = new Set([
   "codeBlockMaxHeight",
   "dir",
   "components",
+  "plugins",
+  "mermaid",
 ]);
+
+/** The `plugins` the stream renders: `code` (code blocks become islands), and Mermaid
+ * and `renderers`, whose blocks hand the message to Streamdown's components. */
+const STREAM_PLUGINS = new Set(["code", "mermaid", "renderers"]);
 
 /** The tags `components` overrides that stream as islands (bits of `OVERRIDES`), or
  * -1 when it overrides one that does not. */
@@ -83,6 +91,10 @@ export function streamEligible(props: Props): boolean {
   }
   if (props.controls !== undefined && typeof props.controls !== "boolean") return false;
   if (overridesOf(props.components) < 0) return false;
+  const plugins = props.plugins as Record<string, unknown> | undefined;
+  if (plugins !== undefined && Object.entries(plugins).some(([name, value]) => value !== undefined && !STREAM_PLUGINS.has(name))) {
+    return false;
+  }
   if (props.dir !== undefined && props.dir !== "ltr" && props.dir !== "rtl") return false;
   const maxHeight = props.codeBlockMaxHeight;
   if (
@@ -106,6 +118,10 @@ export function streamEligible(props: Props): boolean {
   return true;
 }
 
+const EMPTY = {};
+/** The `overrides` bit for code blocks as islands (rill-stream's `overrides::CODE`). */
+const CODE_ISLANDS = 8;
+
 /** A click on the streaming root's button `button`, the root child `at` of `parent`. */
 type Replay = { parent: Node; at: number; button: number };
 
@@ -121,7 +137,8 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
   const version = useSyncExternalStore(subscribeStream, streamVersion, () => 0);
   const stream = version === 0 ? null : loadedStream();
   const custom = props.className !== undefined;
-  const overrides = eligible ? overridesOf(props.components) : 0;
+  const plugins = props.plugins as PluginConfig | undefined;
+  const overrides = eligible ? overridesOf(props.components) | (plugins?.code ? CODE_ISLANDS : 0) : 0;
   useEffect(() => {
     if (!eligible) return;
     void loadStream();
@@ -166,7 +183,21 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
       dir: props.dir === "ltr" ? 1 : props.dir === "rtl" ? 2 : 0,
       overrides,
     },
-    components: (props.components ?? {}) as Record<string, unknown>,
+    components: props.components as Record<string, unknown> | undefined,
+    plugins,
+    context: {
+      // Streamdown's own context, as its root makes it.
+      codeBlockMaxHeight: maxHeight ?? 400,
+      shikiTheme: props.shikiTheme ?? plugins?.code?.getThemes() ?? ["github-light", "github-dark"],
+      controls: props.controls ?? true,
+      isAnimating: Boolean(props.isAnimating),
+      lineNumbers: props.lineNumbers ?? true,
+      mode: "streaming",
+      mermaid: props.mermaid,
+      linkSafety: props.linkSafety ?? { enabled: true },
+      portal: undefined,
+      tableMaxHeight: 300,
+    },
     className,
     attributes,
     onHandOff: (click: Replay | null) => {
@@ -179,8 +210,10 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
 type StreamRootProps = {
   text: string;
   options: StreamOptions;
-  /** The page's own components (islands). */
-  components: Record<string, unknown>;
+  /** The page's own components and plugins, and Streamdown's context (islands). */
+  components: Record<string, unknown> | undefined;
+  plugins: PluginConfig | undefined;
+  context: Record<string, unknown>;
   className: string;
   attributes: Props;
   /** The text needs the exact path, or a button was clicked. */
@@ -193,10 +226,18 @@ function StreamRoot({
   text,
   options,
   components,
+  plugins,
+  context,
   className,
   attributes,
   onHandOff,
 }: StreamRootProps) {
+  // (By value: a page's inline objects keep the islands as they were.)
+  // biome-ignore lint/correctness/useExhaustiveDependencies: by value
+  const env = useMemo(
+    () => ({ components: components ?? EMPTY, plugins, context }),
+    [components, plugins, ...Object.values(context)]
+  );
   const root = useRef<HTMLDivElement>(null);
   const state = useRef<{
     renderer: StreamRenderer;
@@ -224,6 +265,7 @@ function StreamRoot({
         caret.current = last;
       }
       const next = current!.renderer.islands();
+      if (options.overrides > 0 && loadedIslands()!.ownRenderer(next, plugins)) return onHandOff(null);
       if (next !== islands) setIslands(next);
     };
     if (current?.key === key && current.animating && !options.animating) {
@@ -294,5 +336,5 @@ function StreamRoot({
     },
   });
   if (islands.length === 0) return div;
-  return createElement(Fragment, null, div, ...loadedIslands()!.islandPortals(islands, components));
+  return createElement(Fragment, null, div, createElement(loadedIslands()!.IslandPortals, { islands, env }));
 }
