@@ -21,9 +21,9 @@ export type GlueModule<A extends Args = []> = Glue<A> & {
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
 };
 
-export type EngineDefinition<A extends Args = []> = {
+export type EngineDefinition<A extends Args = [], G extends GlueModule<A> = GlueModule<A>> = {
   /** The build's glue, imported on demand: `() => import("./pkg/build.js")`. */
-  glue: () => Promise<GlueModule<A>>;
+  glue: () => Promise<G>;
   /** Where its WebAssembly is, from your own module so every bundler sees it:
    * `() => new URL("./pkg/build_bg.wasm", import.meta.url)`. */
   wasm: () => URL | string;
@@ -46,7 +46,7 @@ export type EngineDefinition<A extends Args = []> = {
    * a page's own `BlockComponent` and `parseMarkdownIntoBlocksFn` aside: the build
    * vouches that its blocks only add context, not DOM.
    */
-  stream?: (glue: GlueModule<A> & StreamGlue, ...args: A) => StreamSession;
+  stream?: (glue: G, ...args: A) => StreamSession;
 };
 
 export type Engine<A extends Args = []> = {
@@ -70,16 +70,18 @@ export type Engine<A extends Args = []> = {
 
 const attacherOf = (plugin: unknown): unknown => (Array.isArray(plugin) ? plugin[0] : plugin);
 
-export function defineEngine<A extends Args = []>(definition: EngineDefinition<A>): Engine<A> {
+export function defineEngine<A extends Args = [], G extends GlueModule<A> = GlueModule<A>>(
+  definition: EngineDefinition<A, G>
+): Engine<A> {
   let build: RillBuild<A> | null = null;
-  let glueModule: GlueModule<A> | null = null;
+  let glueModule: G | null = null;
   const streams = new Lru<string, LoadedStream>(64);
   let loading: Promise<void> | undefined;
   let warmed = false;
   const listeners = new Set<() => void>();
   const pipelines = new Lru<string, { pipeline: Pipeline; math: unknown }>(256);
 
-  const ready = (glue: GlueModule<A>) => {
+  const ready = (glue: G) => {
     if (build) return;
     glueModule = glue;
     build = createRill(glue);
@@ -114,8 +116,9 @@ export function defineEngine<A extends Args = []>(definition: EngineDefinition<A
         const key = argsKey(args);
         let found = streams.get(key);
         if (!found) {
-          const glue = glueModule as GlueModule<A> & StreamGlue;
-          found = streamModule(glue, () => stream(glue, ...args));
+          const glue = glueModule;
+          // (A build with a `stream` exports rill-stream's glue too.)
+          found = streamModule(glue as unknown as StreamGlue, () => stream(glue, ...args));
           streams.set(key, found);
         }
         return found;
