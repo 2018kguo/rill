@@ -1166,6 +1166,9 @@ impl Writer<'_, '_> {
     /// item shows a lone paragraph's content; its section drops an item with nothing
     /// but the back reference): where it opens, if any footnote was called.
     fn footnotes(&mut self, after: bool) -> Result<Option<usize>> {
+        if self.out.options.setup & crate::tokens::setup::NO_FOOTNOTES != 0 {
+            return Err(Fallback);
+        }
         if self.inline.refs.calls.is_empty() {
             return Ok(None);
         }
@@ -1438,7 +1441,7 @@ impl Writer<'_, '_> {
         if self.out.options.overrides & crate::tokens::overrides::CODE != 0 {
             // mdast-util-to-hast's `code`: the value and a line ending, if any.
             let class = if language.is_empty() { String::new() } else { format!(r#" class="language-{language}""#) };
-            let meta = if meta.0 == meta.1 { String::new() } else { format!(r#" metastring="{}""#, attribute(meta)) };
+            let meta = if meta.0 == meta.1 || self.out.options.setup & crate::tokens::setup::NO_CODE_META != 0 { String::new() } else { format!(r#" metastring="{}""#, attribute(meta)) };
             self.out.open_html(&format!("\u{1}<code{class}{meta}{incomplete}>"));
             let (first, last) = self.nodes[id as usize].lines;
             let lines = &self.lines[first as usize..last as usize];
@@ -1466,7 +1469,7 @@ impl Writer<'_, '_> {
         if self.out.options.controls {
             self.controls(CODE_ACTIONS);
         }
-        let meta = if meta.0 == meta.1 {
+        let meta = if meta.0 == meta.1 || self.out.options.setup & crate::tokens::setup::NO_CODE_META != 0 {
             String::new()
         } else {
             format!(r#" metastring="{}""#, attribute(meta))

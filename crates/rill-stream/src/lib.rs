@@ -6,6 +6,7 @@
 //! exactly returns [`Fallback`], and the caller renders the text the exact way.
 
 mod block;
+mod citations;
 mod diff;
 mod inline;
 mod marked;
@@ -375,7 +376,7 @@ pub(crate) fn thematic(rest: &[u16]) -> bool {
 }
 
 #[cfg(feature = "wasm")]
-mod wasm {
+pub mod wasm {
     use wasm_bindgen::prelude::*;
 
     /// Streamdown's DOM for `source`, or `undefined` to render it the exact way.
@@ -411,6 +412,20 @@ mod wasm {
         header: [u32; 12],
     }
 
+    impl Default for Stream {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Stream {
+        /// A page's own link rewriting (see [`crate::tokens::Out::href`]), for a page's
+        /// build of this module to set.
+        pub fn set_href(&mut self, href: crate::tokens::Href) {
+            self.session.set_href(href);
+        }
+    }
+
     #[wasm_bindgen]
     impl Stream {
         #[wasm_bindgen(constructor)]
@@ -439,6 +454,15 @@ mod wasm {
         pub fn set_overrides(&mut self, overrides: u8) {
             let options = crate::tokens::Options {
                 overrides,
+                ..self.session.options()
+            };
+            self.session.set_options(options);
+        }
+        /// A page's own pipeline (`setup::*` bits), before the first update.
+        #[wasm_bindgen(js_name = setSetup)]
+        pub fn set_setup(&mut self, setup: u8) {
+            let options = crate::tokens::Options {
+                setup,
                 ..self.session.options()
             };
             self.session.set_options(options);

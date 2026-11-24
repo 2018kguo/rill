@@ -5,7 +5,7 @@ import { type StreamModule, type StreamSession as Session } from "./stream-dom.t
 
 export { createStreamRenderer, type StreamRenderer } from "./stream-dom.ts";
 
-type StreamGlue = {
+export type StreamGlue = {
   default(options: { module_or_path: unknown }): Promise<unknown>;
   initSync(options: { module: BufferSource | WebAssembly.Module }): unknown;
   Stream: new () => StreamSession & {
@@ -16,7 +16,11 @@ type StreamGlue = {
   streamTags(): string;
 };
 
-export type StreamSession = Session & { setOptions(controls: boolean, animating: boolean): void };
+export type StreamSession = Session & {
+  setOptions(controls: boolean, animating: boolean): void;
+  setLayout(lineNumbers: boolean, codeMaxHeight: number, dir: number): void;
+  setOverrides(overrides: number): void;
+};
 
 /** Streamdown's props the streaming DOM depends on. */
 export type StreamOptions = {
@@ -32,7 +36,8 @@ export type StreamOptions = {
 };
 
 /** The `components` the stream renders as islands, and each one's bit. */
-export const OVERRIDES: Record<string, number> = { a: 1, table: 2, span: 4 };
+export const OVERRIDES: Record<string, number> = { a: 1, table: 2, span: 4, img: 0 };
+// (`img`: images take the exact path, so its component never renders here.)
 
 export type LoadedStream = StreamModule & { newSession(options: StreamOptions): StreamSession };
 
@@ -86,18 +91,23 @@ export function loadMerge(): Promise<void> {
   return merging;
 }
 
-const ready = (glue: StreamGlue) => {
-  loaded = {
+/** A build's streaming module: its memory, tags, and sessions from `create`. */
+export function streamModule(glue: StreamGlue, create: () => StreamSession): LoadedStream {
+  return {
     memory: glue.streamMemory(),
     tags: glue.streamTags(),
     newSession(options) {
-      const session = new glue.Stream();
+      const session = create();
       session.setOptions(options.controls, options.animating);
       session.setLayout(options.lineNumbers, options.codeMaxHeight, options.dir);
       session.setOverrides(options.overrides);
       return session;
     },
   };
+}
+
+const ready = (glue: StreamGlue) => {
+  loaded = streamModule(glue, () => new glue.Stream());
   changed();
 };
 

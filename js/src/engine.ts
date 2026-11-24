@@ -6,6 +6,8 @@ import type { PluggableList } from "unified";
 
 import { argsKey, createRill, type Args, type Glue, type Rill, type RillBuild } from "./core.ts";
 import { Lru } from "./prefix.ts";
+import type { LoadedStream, StreamGlue, StreamSession } from "./stream.ts";
+import { streamModule } from "./stream.ts";
 
 /** The remark and rehype plugins a build reproduces, as `<Streamdown>` takes them. */
 export type Pipeline = {
@@ -37,6 +39,14 @@ export type EngineDefinition<A extends Args = []> = {
    * math elements to it, with the options it has in the list.
    */
   katex?: unknown;
+  /**
+   * For a build that also exports rill-stream's `Stream` (its `wasm` feature): a new
+   * streaming session for `args`, with the build's own setup (`setSetup`, a link
+   * rewriting). Streaming messages then render through it as the default setup's do,
+   * a page's own `BlockComponent` and `parseMarkdownIntoBlocksFn` aside: the build
+   * vouches that its blocks only add context, not DOM.
+   */
+  stream?: (glue: GlueModule<A> & StreamGlue, ...args: A) => StreamSession;
 };
 
 export type Engine<A extends Args = []> = {
@@ -53,12 +63,17 @@ export type Engine<A extends Args = []> = {
   init(wasm: BufferSource | WebAssembly.Module): Promise<void>;
   /** Called once the WebAssembly is ready. */
   subscribe(listener: () => void): () => void;
+  /** The build's streaming renderer for `args` once loaded (see
+   * `EngineDefinition.stream`); `undefined` for a build without one. */
+  stream?(...args: A): LoadedStream | null;
 };
 
 const attacherOf = (plugin: unknown): unknown => (Array.isArray(plugin) ? plugin[0] : plugin);
 
 export function defineEngine<A extends Args = []>(definition: EngineDefinition<A>): Engine<A> {
   let build: RillBuild<A> | null = null;
+  let glueModule: GlueModule<A> | null = null;
+  const streams = new Lru<string, LoadedStream>(64);
   let loading: Promise<void> | undefined;
   let warmed = false;
   const listeners = new Set<() => void>();
@@ -66,6 +81,7 @@ export function defineEngine<A extends Args = []>(definition: EngineDefinition<A
 
   const ready = (glue: GlueModule<A>) => {
     if (build) return;
+    glueModule = glue;
     build = createRill(glue);
     for (const listener of listeners) listener();
   };
@@ -90,7 +106,21 @@ export function defineEngine<A extends Args = []>(definition: EngineDefinition<A
     return found;
   };
 
+  const stream = definition.stream;
   return {
+    ...(stream && {
+      stream(...args: A) {
+        if (!glueModule) return null;
+        const key = argsKey(args);
+        let found = streams.get(key);
+        if (!found) {
+          const glue = glueModule as GlueModule<A> & StreamGlue;
+          found = streamModule(glue, () => stream(glue, ...args));
+          streams.set(key, found);
+        }
+        return found;
+      },
+    }),
     plugins: (...args) => pipelineFor(args).pipeline,
     math: (...args) => pipelineFor(args).math,
     rill(...args) {

@@ -148,6 +148,24 @@ pub struct Options {
     pub whole: bool,
     /// The page's own components (see [`overrides`]): those elements are islands.
     pub overrides: u8,
+    /// A page's own pipeline (see [`setup`]).
+    pub setup: u8,
+}
+
+/// What a page's own pipeline (its engine's) does differently from Streamdown's default.
+pub mod setup {
+    /// `[n]` markers become citation spans (see `citations`).
+    pub const CITATIONS: u8 = 1;
+    /// A blocked or incomplete link is a bare `<span>` of its text.
+    pub const TEXT_ONLY_LINKS: u8 = 2;
+    /// Footnotes take the exact path (the sanitize schema prefixes their ids).
+    pub const NO_FOOTNOTES: u8 = 4;
+    /// `$$` math: the exact path.
+    pub const MATH: u8 = 8;
+    /// remark-cjk-friendly: CJK beside an emphasis marker takes the exact path.
+    pub const CJK: u8 = 16;
+    /// No `metastring` on code.
+    pub const NO_CODE_META: u8 = 32;
 }
 
 /// Tags a page's `components` override. Such an element is written as an island: its
@@ -175,6 +193,7 @@ impl Default for Options {
             dir: 0,
             whole: false,
             overrides: 0,
+            setup: 0,
         }
     }
 }
@@ -203,7 +222,13 @@ pub struct Out {
     pub options: Options,
     /// The text turned out to need [`Options::whole`] other than it was set.
     pub flipped: bool,
+    /// A page's own link rewriting: a link's `href` (normalized) to its new value, before
+    /// the sanitize schema and rehype-harden check it.
+    pub href: Option<Href>,
 }
+
+/// See [`Out::href`].
+pub type Href = std::rc::Rc<dyn Fn(&str) -> Option<String>>;
 
 impl Out {
     pub fn clear(&mut self) {

@@ -63,6 +63,12 @@ impl Session {
         self.next.options
     }
 
+    /// See [`crate::tokens::Out::href`].
+    pub fn set_href(&mut self, href: crate::tokens::Href) {
+        self.next.href = Some(href.clone());
+        self.shown.href = Some(href);
+    }
+
     pub fn set_options(&mut self, options: crate::tokens::Options) {
         self.next.options = options;
         self.shown.options = options;
@@ -116,6 +122,15 @@ impl Session {
             .iter()
             .fold(false, |any, &unit| any | (unit & 0xF800 == 0xD800));
         if surrogates && char::decode_utf16(checked.iter().copied()).any(|c| c.is_err()) {
+            self.failed = true;
+            return Outcome::Fallback;
+        }
+        let setup = self.next.options.setup;
+        // (From the unit before: a pair may straddle the chunks.)
+        let from = if outcome == Outcome::Reset { 0 } else { keep.saturating_sub(1) };
+        if setup & (crate::tokens::setup::MATH | crate::tokens::setup::CJK) != 0
+            && exact_only(&self.remend.healed()[from..], setup)
+        {
             self.failed = true;
             return Outcome::Fallback;
         }
@@ -211,6 +226,10 @@ impl Session {
             &mut self.next,
             &mut self.inline,
         )?;
+        let mut split = split;
+        if self.next.options.setup & crate::tokens::setup::CITATIONS != 0 {
+            split.words += crate::citations::split(&mut self.next, self.remend.healed(), split.words)?;
+        }
         self.final_nodes = split.nodes;
         if split.source > 0 || self.stable == 0 {
             self.decides = if split.decides > 0 {
@@ -223,6 +242,18 @@ impl Session {
         self.stable += split.source;
         Ok(())
     }
+}
+
+/// What a page's own pipeline renders that the stream does not: `$$` math, and CJK
+/// beside an emphasis marker (remark-cjk-friendly's flanking rules).
+fn exact_only(text: &[u16], setup: u8) -> bool {
+    let cjk = |unit: u16| matches!(unit, 0x2E80..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0xFE30..=0xFE4F | 0xFF00..=0xFFEF);
+    text.windows(2).any(|pair| {
+        (setup & crate::tokens::setup::MATH != 0 && pair == [0x24, 0x24])
+            || (setup & crate::tokens::setup::CJK != 0
+                && ((matches!(pair[0], 0x2A | 0x5F | 0x7E) && cjk(pair[1]))
+                    || (cjk(pair[0]) && matches!(pair[1], 0x2A | 0x5F | 0x7E))))
+    })
 }
 
 #[cfg(test)]

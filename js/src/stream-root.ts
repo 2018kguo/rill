@@ -16,6 +16,9 @@ import {
 } from "react";
 import type { PluginConfig } from "streamdown";
 
+import type { Args } from "./core.ts";
+import type { Engine } from "./engine.ts";
+
 import {
   createStreamRenderer,
   isIslandNode,
@@ -32,6 +35,7 @@ import {
   loadedStream,
   streamVersion,
   subscribeStream,
+  type LoadedStream,
   type StreamOptions,
   type StreamSession,
 } from "./stream.ts";
@@ -59,6 +63,9 @@ const STREAM_PROPS = new Set([
   "plugins",
   "mermaid",
 ]);
+
+/** What a page's engine with a streaming build may pass besides (see `streamEligible`). */
+const ENGINE_PROPS = new Set(["engine", "engineArgs", "BlockComponent", "parseMarkdownIntoBlocksFn"]);
 
 /** The `plugins` the stream renders: `code` (code blocks become islands), and Mermaid
  * and `renderers`, whose blocks hand the message to Streamdown's components. */
@@ -91,6 +98,11 @@ export function streamEligible(props: Props): boolean {
   }
   if (props.controls !== undefined && typeof props.controls !== "boolean") return false;
   if (overridesOf(props.components) < 0) return false;
+  // A page's engine with a streaming build: its blocks only add context (see
+  // `EngineDefinition.stream`).
+  const engine = props.engine as Engine<Args> | undefined;
+  const own = engine !== undefined;
+  if (own && !engine.stream) return false;
   const plugins = props.plugins as Record<string, unknown> | undefined;
   if (plugins !== undefined && Object.entries(plugins).some(([name, value]) => value !== undefined && !STREAM_PLUGINS.has(name))) {
     return false;
@@ -109,6 +121,7 @@ export function streamEligible(props: Props): boolean {
     if (
       value !== undefined &&
       !STREAM_PROPS.has(name) &&
+      !(own && ENGINE_PROPS.has(name)) &&
       !name.startsWith("data-") &&
       !name.startsWith("aria-")
     ) {
@@ -119,6 +132,13 @@ export function streamEligible(props: Props): boolean {
 }
 
 const EMPTY = {};
+const noSubscribe = () => () => {};
+const builds = new WeakMap<object, number>();
+let buildCount = 0;
+const buildId = (stream: object): number => {
+  if (!builds.has(stream)) builds.set(stream, (buildCount += 1));
+  return builds.get(stream)!;
+};
 /** The `overrides` bit for code blocks as islands (rill-stream's `overrides::CODE`). */
 const CODE_ISLANDS = 8;
 
@@ -135,16 +155,25 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
   // (A version, so the merge loading re-renders too; 0 on the server and while
   // hydrating, so the first client render matches the server's.)
   const version = useSyncExternalStore(subscribeStream, streamVersion, () => 0);
-  const stream = version === 0 ? null : loadedStream();
+  const engine = props.engine as Engine<Args> | undefined;
+  const args = (props.engineArgs ?? []) as Args;
+  // The page's engine's build (its readiness is the engine's to announce).
+  const engineVersion = useSyncExternalStore(
+    engine?.subscribe ?? noSubscribe,
+    () => (engine?.stream?.(...args) ? 1 : 0),
+    () => 0
+  );
+  const stream = version === 0 && engineVersion === 0 ? null : engine ? (engine.stream?.(...args) ?? null) : loadedStream();
   const custom = props.className !== undefined;
   const plugins = props.plugins as PluginConfig | undefined;
   const overrides = eligible ? overridesOf(props.components) | (plugins?.code ? CODE_ISLANDS : 0) : 0;
   useEffect(() => {
     if (!eligible) return;
-    void loadStream();
+    if (engine) void engine.load();
+    else void loadStream();
     if (custom) void loadMerge();
     if (overrides > 0) void loadIslands();
-  }, [eligible, custom, overrides]);
+  }, [eligible, custom, overrides, engine]);
   const [handedOff, setHandedOff] = useState(false);
   const replay = useRef<Replay | null>(null);
   useLayoutEffect(() => {
@@ -174,6 +203,7 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
     if (name.startsWith("data-") || name.startsWith("aria-")) attributes[name] = value;
   }
   return createElement(StreamRoot, {
+    stream,
     text: props.children as string,
     options: {
       controls: props.controls !== false,
@@ -208,6 +238,8 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
 }
 
 type StreamRootProps = {
+  /** The streaming build (rill's, or the page's engine's). */
+  stream: LoadedStream;
   text: string;
   options: StreamOptions;
   /** The page's own components and plugins, and Streamdown's context (islands). */
@@ -223,6 +255,7 @@ type StreamRootProps = {
 /** Streamdown's root element, its children kept by rill-stream: each update renders only
  * the open tail and edits the DOM in place. */
 function StreamRoot({
+  stream,
   text,
   options,
   components,
@@ -249,9 +282,10 @@ function StreamRoot({
   const [islands, setIslands] = useState<Island[]>([]);
   const caret = useRef<Element | null>(null);
   // (`isAnimating` only changes the open tail and the controls' `disabled`.)
-  const key = JSON.stringify({ ...options, animating: undefined });
+  // (A new build, as a new engine's, starts over too.)
+  const key = JSON.stringify({ ...options, animating: undefined, build: buildId(stream) });
   useLayoutEffect(() => {
-    const module = loadedStream()!;
+    const module = stream;
     let current = state.current;
     const shown = () => {
       // Streamdown's caret flag, when Rust gave it to an island: on the root's last

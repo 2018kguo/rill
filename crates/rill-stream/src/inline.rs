@@ -6,7 +6,7 @@
 //! (see `tokens`), the plain text between events copied as it is.
 
 use crate::simd::ByteSet;
-use crate::tokens::{ISLAND, Out, overrides, tag};
+use crate::tokens::{ISLAND, Out, overrides, setup, tag};
 use crate::{Fallback, Result};
 use rill_unicode::{PUNCTUATION_OR_SYMBOL, WHITESPACE, in_table};
 
@@ -147,6 +147,8 @@ pub struct Inline {
     brackets: Vec<Bracket>,
     /// Each link's rendering.
     links: Vec<Link>,
+    /// The page's link rewriting ([`Out::href`]), for this render.
+    href: Option<crate::tokens::Href>,
     /// Decoded character references, which events point into.
     decoded: Vec<u16>,
     /// The earliest position more text could change the scan at (an unclosed bracket, a
@@ -333,6 +335,7 @@ impl Inline {
         self.decoded.clear();
         self.ceiling = usize::MAX;
         self.open_ticks = None;
+        self.href.clone_from(&out.href);
         // The content's start in the whole text, and how much of it is as last time.
         let start = out.offset_of(text);
         let unchanged = stable.saturating_sub(start.unwrap_or(usize::MAX));
@@ -464,6 +467,7 @@ impl Inline {
                 Kind::Decoded { start, end } => {
                     text_after(out, &self.decoded[start as usize..end as usize], &mut broke)
                 }
+                Kind::Note { .. } if out.options.setup & setup::NO_FOOTNOTES != 0 => return Err(Fallback),
                 Kind::Note { note } => {
                     if out.options.overrides & overrides::A != 0 {
                         return Err(Fallback); // ponytail: footnote calls as a page's own `a`
@@ -1154,7 +1158,10 @@ impl Inline {
             Link::Incomplete
         } else {
             // micromark's normalizeUri, the sanitize schema's protocols, rehype-harden.
-            let href = rill_url::normalize_uri(destination.into());
+            let mut href = rill_url::normalize_uri(destination.into());
+            if let Some(rewritten) = self.href.as_ref().and_then(|hook| hook(&href)) {
+                href = rewritten.into();
+            }
             let href = rill_url::protocol_allowed(&href, HREF_PROTOCOLS).then_some(href);
             match href
                 .as_deref()
@@ -1193,7 +1200,11 @@ const HREF_PROTOCOLS: &[&str] = &[
 impl Link {
     fn open(&self, out: &mut Out) {
         let island = out.options.overrides;
+        let text_only = out.options.setup & setup::TEXT_ONLY_LINKS != 0;
         match self {
+            Link::Blocked(_) | Link::Incomplete if text_only => {
+                out.open_html(if island & overrides::SPAN != 0 { "\u{1}<span>" } else { "<span>" })
+            }
             Link::Button(href, title) if island & overrides::A != 0 => {
                 out.open_html(&a_island(href, title.as_deref()))
             }
@@ -1216,7 +1227,9 @@ impl Link {
     }
 
     fn close(&self, out: &mut Out) {
-        if let Link::Blocked(_) = self {
+        if let Link::Blocked(_) = self
+            && out.options.setup & setup::TEXT_ONLY_LINKS == 0
+        {
             // (React keeps it a text node of its own; the HTML is the same.)
             out.ascii(" [blocked]");
         }
