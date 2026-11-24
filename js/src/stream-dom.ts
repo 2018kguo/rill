@@ -298,14 +298,25 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
   const { u32, tags, origins, input } = root;
   let node: Node = parent;
   let added = 0;
+  // A new element under `parent` is built detached and inserted once it is whole (one
+  // insertion into the live tree, not one per node).
+  let depth = 0;
   for (let at = start; at < end; at += 1) {
     const word = u32[at]!;
     const id = word >>> 2;
     const kind = word & 3;
-    if (node === parent && kind !== CLOSE) added += 1;
-    if (kind === OPEN) node = node.appendChild(clone(root, id, false));
-    else if (kind === CLOSE) node = node.parentNode!;
-    else if (kind === VOID) node.appendChild(clone(root, id, true));
+    if (depth === 0 && kind !== CLOSE) added += 1;
+    if (kind === OPEN) {
+      const element = clone(root, id, false);
+      node = depth === 0 ? element : node.appendChild(element);
+      depth += 1;
+    } else if (kind === CLOSE) {
+      depth -= 1;
+      if (depth === 0) {
+        parent.appendChild(node);
+        node = parent;
+      } else node = node.parentNode!;
+    } else if (kind === VOID) node.appendChild(clone(root, id, true));
     else {
       const origin = u32[origins + at]!;
       if (origin !== NOWHERE) (node as Element).append(input.slice(origin, origin + id));
@@ -314,6 +325,11 @@ function build(root: Root, parent: Element, start: number, end: number, text: nu
         text += id;
       }
     }
+  }
+  // (An element left open at the end goes in as it is.)
+  if (depth > 0) {
+    while (node.parentNode !== null) node = node.parentNode;
+    parent.appendChild(node);
   }
   return added;
 }

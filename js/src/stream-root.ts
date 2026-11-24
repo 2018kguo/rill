@@ -2,7 +2,6 @@
 // for `<Streamdown>` props that leave Streamdown's default DOM as it is. Shared by the
 // drop-in (`./streamdown`) and the light entry (`./stream`), which imports nothing of
 // Streamdown's until a message needs it.
-import { clsx } from "clsx";
 import {
   createElement,
   useEffect,
@@ -13,10 +12,18 @@ import {
   type MouseEvent,
   type ReactElement,
 } from "react";
-import { twMerge } from "tailwind-merge";
 
 import { createStreamRenderer, type StreamRenderer } from "./stream-dom.ts";
-import { loadStream, loadedStream, subscribeStream, type StreamOptions, type StreamSession } from "./stream.ts";
+import {
+  loadMerge,
+  loadStream,
+  loadedMerge,
+  loadedStream,
+  streamVersion,
+  subscribeStream,
+  type StreamOptions,
+  type StreamSession,
+} from "./stream.ts";
 
 /** Streamdown's root element's classes. */
 const ROOT_CLASS = "space-y-4 whitespace-normal [&>*:first-child]:mt-0 [&>*:last-child]:mb-0";
@@ -71,10 +78,15 @@ type Replay = { parent: Node; at: number; button: number };
  */
 export function useStreamRoot(props: Props, waitForStream = false): ReactElement | null {
   const eligible = streamEligible(props);
-  const stream = useSyncExternalStore(subscribeStream, loadedStream, () => null);
+  // (A version, so the merge loading re-renders too.)
+  useSyncExternalStore(subscribeStream, streamVersion, () => 0);
+  const stream = loadedStream();
+  const custom = props.className !== undefined;
   useEffect(() => {
-    if (eligible) void loadStream();
-  }, [eligible]);
+    if (!eligible) return;
+    void loadStream();
+    if (custom) void loadMerge();
+  }, [eligible, custom]);
   const [handedOff, setHandedOff] = useState(false);
   const replay = useRef<Replay | null>(null);
   useLayoutEffect(() => {
@@ -84,11 +96,14 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
     (root?.querySelectorAll("button")[pending!.button] as HTMLElement | undefined)?.click();
   });
   if (!eligible || handedOff) return null;
-  const className = twMerge(clsx(ROOT_CLASS, props.className as string | undefined));
-  if (stream === null) {
+  // (Streamdown merges `className` into its root's with tailwind-merge, loaded only for a
+  // message that passes one.)
+  const merge = loadedMerge();
+  const className = !custom ? ROOT_CLASS : merge === null ? null : merge(ROOT_CLASS, props.className);
+  if (stream === null || className === null) {
     // (The light entry shows the root empty until the module is in, rather than load
     // all of Streamdown for the first frames.)
-    return waitForStream ? createElement("div", { className }) : null;
+    return waitForStream ? createElement("div", { className: className ?? ROOT_CLASS }) : null;
   }
   const maxHeight = props.codeBlockMaxHeight as number | undefined;
   const attributes: Props = {};

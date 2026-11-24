@@ -31,6 +31,33 @@ export type LoadedStream = StreamModule & { newSession(options: StreamOptions): 
 let loaded: LoadedStream | null = null;
 let loading: Promise<void> | undefined;
 const listeners = new Set<() => void>();
+let version = 0;
+const changed = () => {
+  version += 1;
+  for (const listener of listeners) listener();
+};
+
+/** Bumped as the streaming build or the class merge loads. */
+export const streamVersion = (): number => version;
+
+type Merge = (...classes: unknown[]) => string;
+let merge: Merge | null = null;
+let merging: Promise<void> | undefined;
+
+/** Streamdown's class merge (`twMerge(clsx(...))`) once loaded, else `null`. */
+export const loadedMerge = (): Merge | null => merge;
+
+export function loadMerge(): Promise<void> {
+  merging ??= Promise.all([import("clsx"), import("tailwind-merge")])
+    .then(([{ clsx }, { twMerge }]) => {
+      merge = (...classes) => twMerge(clsx(...(classes as Parameters<typeof clsx>)));
+      changed();
+    })
+    .catch(() => {
+      merging = undefined;
+    });
+  return merging;
+}
 
 const ready = (glue: StreamGlue) => {
   loaded = {
@@ -43,7 +70,7 @@ const ready = (glue: StreamGlue) => {
       return session;
     },
   };
-  for (const listener of listeners) listener();
+  changed();
 };
 
 /** The streaming build once loaded, else `null`. */

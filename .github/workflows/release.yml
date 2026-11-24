@@ -32,6 +32,8 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      - name: nightly for rill-stream's module (scripts/build-wasm.sh)
+        run: rustup toolchain install nightly-2026-11-23 --profile minimal --component rust-src --target wasm32-unknown-unknown
       - name: wasm-bindgen
         run: |
           mkdir -p "$RUNNER_TEMP/bin"

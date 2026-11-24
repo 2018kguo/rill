@@ -16,14 +16,17 @@ cargo build --release -p rill --lib --features wasm-exports --target wasm32-unkn
 npx --no-install wasm-opt -O3 js/wasm/rill_bg.wasm -o js/wasm/rill_bg.wasm \
   --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
   --enable-mutable-globals --enable-multivalue --enable-reference-types
-# rill-stream, the streaming renderer for Streamdown's default setup (its own small
-# module, built for size: its work is a small share of an update's). SIMD128 is in
-# every current browser engine; memchr's scans use it.
+# rill-stream, the streaming renderer for Streamdown's default setup: its own module,
+# built for size (its work is a small share of an update's) with std rebuilt to trap on
+# a panic instead of formatting one, which needs a pinned nightly:
+#   rustup toolchain install nightly-2026-11-23 --profile minimal --component rust-src --target wasm32-unknown-unknown
+# SIMD128 is in every current browser engine; memchr's scans use it.
 RUSTFLAGS="$RUSTFLAGS -C target-feature=+simd128,+bulk-memory" \
-cargo build --release -p rill-stream --features wasm --target wasm32-unknown-unknown \
+cargo +nightly-2026-11-23 build --release -p rill-stream --features wasm --target wasm32-unknown-unknown \
+  -Zpanic-immediate-abort -Zbuild-std=std,panic_abort -Zbuild-std-features=optimize_for_size \
   --config profile.release.lto=true --config profile.release.codegen-units=1 \
-  --config profile.release.debug=false --config profile.release.strip=true --config profile.release.panic='"abort"' \
-  --config profile.release.opt-level='"z"'
+  --config profile.release.debug=false --config profile.release.strip=true \
+  --config profile.release.panic='"immediate-abort"' --config profile.release.opt-level='"z"'
 "${WASM_BINDGEN:-wasm-bindgen}" target/wasm32-unknown-unknown/release/rill_stream.wasm \
   --target web --out-dir js/wasm --out-name rill_stream
 npx --no-install wasm-opt -Oz js/wasm/rill_stream_bg.wasm -o js/wasm/rill_stream_bg.wasm \

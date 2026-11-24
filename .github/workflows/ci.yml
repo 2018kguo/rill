@@ -25,6 +25,8 @@ jobs:
         with:
           node-version: 24
       - uses: oven-sh/setup-bun@v2
+      - name: nightly for rill-stream's module (scripts/build-wasm.sh)
+        run: rustup toolchain install nightly-2026-11-23 --profile minimal --component rust-src --target wasm32-unknown-unknown
       - name: wasm-bindgen
         run: |
           mkdir -p "$RUNNER_TEMP/bin"
@@ -152,6 +154,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: nightly for rill-stream's module (scripts/build-wasm.sh)
+        run: rustup toolchain install nightly-2026-11-23 --profile minimal --component rust-src --target wasm32-unknown-unknown
       - name: wasm-bindgen
         run: |
           mkdir -p "$RUNNER_TEMP/bin"

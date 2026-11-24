@@ -92,6 +92,21 @@ test("the light entry streams the same DOM", async () => {
   await theirs.unmount();
 });
 
+test("the light entry merges a className as Streamdown does", async () => {
+  const props = { className: "mt-2 space-y-2", isAnimating: true };
+  const ours = mount(LightStreamdown);
+  const theirs = mount(Streamdown);
+  await ours.render(ANSWER.slice(0, 40), props);
+  // (The merge loads on first use.)
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await ours.render(ANSWER.slice(0, 60), props);
+  await theirs.render(ANSWER.slice(0, 60), props);
+  assert.equal(ours.host.innerHTML, theirs.host.innerHTML);
+  assert.match(ours.host.innerHTML, /space-y-2/);
+  await ours.unmount();
+  await theirs.unmount();
+});
+
 test("a click hands the message to Streamdown and reaches the same button", async () => {
   const opened = (host: HTMLElement) => {
     host.querySelector<HTMLElement>('button[data-streamdown="link"]')!.click();
