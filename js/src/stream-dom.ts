@@ -72,7 +72,7 @@ export type Island = {
   /** The island's element and subtree, as `IslandNode`s; `json` compares them. */
   tree: IslandElement;
   json: string;
-  /** The container React renders the island into: it puts nodes after `anchor`. */
+  /** The portal container React renders the island into (see `container`). */
   holder: Element;
 };
 
@@ -99,35 +99,58 @@ export const isIslandNode = (node: Node): boolean => owned.has(node);
 const islandOf = new WeakMap<Comment, Island>();
 let islandKeys = 0;
 
-/** A container for React whose children go after `anchor` (in order), not into it. */
-function holder(document: Document, anchor: Comment): Element {
-  const box = document.createElement("div");
-  const nodes: Node[] = [];
-  const place = (node: Node, before: Node | null) => {
-    owned.add(node);
-    const at = nodes.indexOf(node);
-    if (at >= 0) nodes.splice(at, 1);
-    if (before === null) {
-      const last = nodes.findLast((n) => n.parentNode === anchor.parentNode) ?? anchor;
-      anchor.parentNode?.insertBefore(node, last.nextSibling);
-      nodes.push(node);
-    } else {
-      before.parentNode?.insertBefore(node, before);
-      nodes.splice(Math.max(0, nodes.indexOf(before)), 0, node);
-    }
-    return node;
-  };
-  Object.assign(box, {
-    appendChild: (node: Node) => place(node, null),
-    insertBefore: (node: Node, before: Node | null) => place(node, before),
-    removeChild: (node: Node) => {
+/** Each island's anchor and the nodes React put after it, by the island's key. */
+const placed = new Map<string, { anchor: Comment; nodes: Node[] }>();
+/** Elements whose children React's islands insert (see `container`). */
+const patched = new WeakSet<Node>();
+
+/** The island (its key) whose portal holds `node`: the React fiber React keeps on each
+ * node it made, up to its portal (whose key is the island's). */
+type Fiber = { tag: number; key: string | null; return: Fiber | null };
+function portalKey(node: Node): string | null {
+  const name = Object.keys(node).find((name) => name.startsWith("__reactFiber$"));
+  // (A HostPortal fiber's tag is 4.)
+  let fiber = name === undefined ? null : ((node as unknown as Record<string, Fiber>)[name] ?? null);
+  while (fiber !== null && fiber.tag !== 4) fiber = fiber.return;
+  return fiber?.key ?? null;
+}
+
+/**
+ * The portal container for the island `key` at `anchor`: the anchor's parent element,
+ * so the island's nodes are where React's events reach them. React's inserts into it
+ * go right after the island's anchor (and its nodes before them), and other code's
+ * edits (the stream's own) are left as they are.
+ */
+function container(anchor: Comment, key: string): Element {
+  const parent = anchor.parentNode as Element;
+  placed.set(key, { anchor, nodes: [] });
+  if (!patched.has(parent)) {
+    patched.add(parent);
+    const { insertBefore, removeChild } = parent;
+    const route = (node: Node, before: Node | null) => {
+      const key = before === null ? portalKey(node) : null;
+      const island = key === null ? undefined : placed.get(key);
+      if (island === undefined) return insertBefore.call(parent, node, before);
+      owned.add(node);
+      const { anchor, nodes } = island;
       const at = nodes.indexOf(node);
       if (at >= 0) nodes.splice(at, 1);
-      node.parentNode?.removeChild(node);
-      return node;
-    },
-  });
-  return box;
+      const last = nodes.findLast((n) => n.parentNode === anchor.parentNode) ?? anchor;
+      nodes.push(node);
+      return insertBefore.call(anchor.parentNode, node, last.nextSibling);
+    };
+    Object.assign(parent, {
+      appendChild: (node: Node) => route(node, null),
+      insertBefore: (node: Node, before: Node | null) => {
+        // A node of an island goes where its siblings are.
+        if (before !== null && owned.has(before)) owned.add(node);
+        return before === null ? route(node, null) : insertBefore.call(parent, node, before);
+      },
+      // (The stream may have removed it with its parent already.)
+      removeChild: (node: Node) => (node.parentNode === parent ? removeChild.call(parent, node) : node),
+    });
+  }
+  return parent;
 }
 
 /** Per document: the tags' elements (per module's list) and each parsed open tag or
@@ -266,13 +289,14 @@ export function createStreamRenderer(
       const tree = trees[index]!;
       const json = JSON.stringify(tree);
       let island = islandOf.get(anchor);
-      if (island === undefined) {
+      // (An anchor moved into another element, by a retag, starts over there.)
+      if (island === undefined || island.holder !== anchor.parentNode) {
         island = {
           key: (islandKeys += 1),
           anchor,
           tree,
           json,
-          holder: holder(root.ownerDocument, anchor),
+          holder: container(anchor, String(islandKeys)),
         };
         islandOf.set(anchor, island);
       } else if (island.json !== json) {

@@ -64,6 +64,12 @@ let loadingIslands: Promise<void> | undefined;
 /** The islands' renderer (for `components`) once loaded, else `null`. */
 export const loadedIslands = (): Islands | null => islands;
 
+/** Registers the islands' renderer, for an entry that bundles it anyway. */
+export function setIslands(module: Islands): void {
+  islands = module;
+  loadingIslands = Promise.resolve();
+}
+
 export function loadIslands(): Promise<void> {
   loadingIslands ??= import("./stream-islands.ts")
     .then((module) => {
@@ -78,6 +84,12 @@ export function loadIslands(): Promise<void> {
 
 /** Streamdown's class merge (`twMerge(clsx(...))`) once loaded, else `null`. */
 export const loadedMerge = (): Merge | null => merge;
+
+/** Registers the class merge, for an entry that bundles it anyway. */
+export function setMerge(value: Merge): void {
+  merge = value;
+  merging = Promise.resolve();
+}
 
 export function loadMerge(): Promise<void> {
   merging ??= Promise.all([import("clsx"), import("tailwind-merge")])

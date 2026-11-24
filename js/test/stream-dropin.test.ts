@@ -283,6 +283,21 @@ test("code blocks with the page's code plugin stream as islands, highlighted as 
   await theirs.unmount();
 });
 
+test("an island's own events reach its component, and the message keeps streaming", async () => {
+  const { act } = await import("react");
+  const clicks: string[] = [];
+  const Pill = (props: { href: string; children?: unknown }) =>
+    createElement("button", { className: "pill", onClick: () => clicks.push(props.href) }, props.children as never);
+  const ours = mount(RillStreamdown);
+  const before = blockRenders.rill + blockRenders.streamdown;
+  await ours.render("See [x](https://a.com) and more", { isAnimating: true, components: { a: Pill } });
+  await act(async () => (ours.host.querySelector(".pill") as HTMLElement).click());
+  assert.deepEqual(clicks, ["https://a.com/"]);
+  await ours.render("See [x](https://a.com) and more text", { isAnimating: true, components: { a: Pill } });
+  assert.equal(blockRenders.rill + blockRenders.streamdown, before, "still streaming");
+  await ours.unmount();
+});
+
 test("islands in a text kept whole (a link definition): references get the definition's title", async () => {
   const ours = mount(RillStreamdown);
   const theirs = mount(Streamdown);

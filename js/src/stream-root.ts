@@ -163,7 +163,10 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
     () => (engine?.stream?.(...args) ? 1 : 0),
     () => 0
   );
-  const stream = version === 0 && engineVersion === 0 ? null : engine ? (engine.stream?.(...args) ?? null) : loadedStream();
+  // (0 for both on the server and while hydrating: nothing streams before the client's
+  // first render matches the server's.)
+  const client = version !== 0 || engineVersion !== 0;
+  const stream = !client ? null : engine ? (engine.stream?.(...args) ?? null) : loadedStream();
   const custom = props.className !== undefined;
   const plugins = props.plugins as PluginConfig | undefined;
   const overrides = eligible ? overridesOf(props.components) | (plugins?.code ? CODE_ISLANDS : 0) : 0;
@@ -185,13 +188,13 @@ export function useStreamRoot(props: Props, waitForStream = false): ReactElement
   if (!eligible || handedOff) return null;
   // (Streamdown merges `className` into its root's with tailwind-merge, loaded only for a
   // message that passes one.)
-  const merge = version === 0 ? null : loadedMerge();
+  const merge = client ? loadedMerge() : null;
   const className = !custom
     ? ROOT_CLASS
     : merge === null
       ? null
       : merge(ROOT_CLASS, props.className);
-  const islands = version === 0 ? null : loadedIslands();
+  const islands = client ? loadedIslands() : null;
   if (stream === null || className === null || (overrides > 0 && islands === null)) {
     // (The light entry shows the root empty until the module is in, rather than load
     // all of Streamdown for the first frames.)
@@ -267,9 +270,11 @@ function StreamRoot({
 }: StreamRootProps) {
   // (By value: a page's inline objects keep the islands as they were.)
   // biome-ignore lint/correctness/useExhaustiveDependencies: by value
+  // (Its JSON: a page's inline objects, as `mermaid` options made each render, keep it.)
+  const contextKey = JSON.stringify(context);
   const env = useMemo(
     () => ({ components: components ?? EMPTY, plugins, context }),
-    [components, plugins, ...Object.values(context)]
+    [components, plugins, contextKey]
   );
   const root = useRef<HTMLDivElement>(null);
   const state = useRef<{

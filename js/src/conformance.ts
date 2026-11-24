@@ -48,17 +48,23 @@ export type EngineReport = {
 type Component = ComponentType<Record<string, unknown>>;
 
 /**
- * The host's DOM: each text node a JSON string (where one ends and the next begins
- * shows), each element's attributes sorted. The order attributes were set in depends on
+ * The host's DOM: each run of text nodes a JSON string, each element's attributes sorted. The order attributes were set in depends on
  * which elements React reused across updates, and DOM implementations keep it
- * differently, so it is not compared.
+ * differently, so it is not compared. A run of text nodes is one (the streaming root
+ * appends them).
  */
 function snapshot(host: HTMLElement): string {
   const write = (node: Node): string => {
     let out = "";
     for (let child = node.firstChild; child; child = child.nextSibling) {
       if (child.nodeType === 3) {
-        out += JSON.stringify((child as Text).data);
+        // The streaming root appends text nodes: a run of them is one.
+        let data = (child as Text).data;
+        while (child.nextSibling?.nodeType === 3) {
+          child = child.nextSibling as ChildNode;
+          data += (child as Text).data;
+        }
+        out += JSON.stringify(data);
       } else if (child.nodeType === 1) {
         const element = child as Element;
         const tag = element.localName;
@@ -67,7 +73,8 @@ function snapshot(host: HTMLElement): string {
           (attribute) => `${attribute.name}=${JSON.stringify(attribute.value)}`
         ).sort();
         out += `<${[tag, ...attributes].join(" ")}>${write(element)}</${tag}>`;
-      } else if (child.nodeType === 8) {
+      } else if (child.nodeType === 8 && (child as Comment).data !== "") {
+        // (An empty one is an island's anchor, the streaming root's.)
         out += `<!--${(child as Comment).data}-->`;
       }
     }

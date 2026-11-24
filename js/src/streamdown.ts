@@ -71,11 +71,13 @@ import { load, loadFailed, pluginsFor } from "./react.ts";
 import { reportFallback, type FallbackReason } from "./fallback.ts";
 import { knownLists } from "./known.ts";
 import { useStreamRoot } from "./stream-root.ts";
-import { loadIslands } from "./stream.ts";
+import * as islands from "./stream-islands.ts";
+import { setIslands, setMerge } from "./stream.ts";
 
-// The streaming root's islands (a page's own components): their dependencies are this
-// module's already, so they load with it.
-if (typeof window !== "undefined") void loadIslands();
+// The streaming root's islands (a page's own components and code blocks): their
+// dependencies are this module's already, so they come with it.
+setIslands(islands);
+setMerge(createCn(undefined) as (...classes: unknown[]) => string);
 import {
   animatedKey,
   beginPass,
